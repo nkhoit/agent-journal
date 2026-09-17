@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 fn assert_required_fields<T>(example: Value, required: &[&str])
 where
-    T: DeserializeOwned + Debug,
+    T: DeserializeOwned + serde::Serialize + Debug,
 {
     let bytes = serde_json::to_vec(&example).expect("serialize example");
     decode_json::<T>(&bytes).expect("positive wire example");
@@ -115,6 +115,19 @@ fn strict_json_rejects_duplicate_keys_at_any_depth() {
         error
             .to_string()
             .contains("duplicate object key \"record_id\"")
+    );
+}
+
+#[test]
+fn request_bodies_reject_arrays_for_object_shapes() {
+    assert!(
+        decode_json::<EnrollmentExchangeRequest>(br#"["instance-1"]"#).is_err(),
+        "request objects must not accept positional arrays"
+    );
+    assert!(
+        decode_json::<CommitRequest>(br#"{"generation":1,"items":[["item-1","attempt-1"]]}"#)
+            .is_err(),
+        "nested request objects must not accept positional arrays"
     );
 }
 
@@ -258,6 +271,54 @@ fn append_and_query_limits_use_utf8_bytes_and_exact_boundaries() {
         SearchRecordsQuery {
             q: "x".repeat(513),
             ..exact_query
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn wire_identifiers_use_openapi_character_limits() {
+    let exact = PrincipalCreateRequest {
+        id: "界".repeat(128),
+        display_name: "Agent".into(),
+    };
+    assert!(exact.validate().is_ok());
+    assert!(
+        PrincipalCreateRequest {
+            id: "界".repeat(129),
+            ..exact
+        }
+        .validate()
+        .is_err()
+    );
+
+    assert!(
+        ListRecordsQuery {
+            author: Some(String::new()),
+            ..ListRecordsQuery::default()
+        }
+        .validate()
+        .is_ok(),
+        "optional filters without minLength accept an empty value"
+    );
+}
+
+#[test]
+fn search_since_requires_an_rfc3339_timestamp() {
+    let query = SearchRecordsQuery {
+        q: "journal".into(),
+        page: PageQuery::default(),
+        author: None,
+        attention: None,
+        since: Some("2026-01-02T03:04:05+05:30".into()),
+        order: SearchOrder::Rank,
+    };
+    assert!(query.validate().is_ok());
+    assert!(
+        SearchRecordsQuery {
+            since: Some("not-a-time".into()),
+            ..query
         }
         .validate()
         .is_err()

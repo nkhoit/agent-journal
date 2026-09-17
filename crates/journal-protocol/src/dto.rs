@@ -28,6 +28,8 @@ pub enum WireValidationError {
         min: u64,
         max: u64,
     },
+    #[error("{field}: must be an RFC 3339 timestamp")]
+    InvalidDateTime { field: &'static str },
 }
 
 fn validate_chars(
@@ -43,6 +45,13 @@ fn validate_chars(
     Ok(())
 }
 
+fn validate_rfc3339(field: &'static str, value: &str) -> Result<(), WireValidationError> {
+    value
+        .parse::<jiff::Timestamp>()
+        .map(|_| ())
+        .map_err(|_| WireValidationError::InvalidDateTime { field })
+}
+
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), WireValidationError> {
     domain::validate_identifier(field, value)?;
     Ok(())
@@ -52,7 +61,7 @@ fn validate_optional_identifier(
     field: &'static str,
     value: Option<&str>,
 ) -> Result<(), WireValidationError> {
-    if let Some(value) = value {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
         validate_identifier(field, value)?;
     }
     Ok(())
@@ -857,6 +866,10 @@ impl SearchRecordsQuery {
         validate_chars("q", &self.q, 1, 512)?;
         self.page.validate()?;
         validate_optional_identifier("author", self.author.as_deref())?;
-        validate_optional_identifier("attention", self.attention.as_deref())
+        validate_optional_identifier("attention", self.attention.as_deref())?;
+        if let Some(since) = &self.since {
+            validate_rfc3339("since", since)?;
+        }
+        Ok(())
     }
 }

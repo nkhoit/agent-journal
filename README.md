@@ -92,7 +92,7 @@ docs/                        design, protocol, security, operations, and plans
 
 ## Build and test
 
-Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. The workspace uses edition 2024 and pins `serde`, `serde_json`, `thiserror`, `base64`, `hmac`, and `sha2`. The three cryptographic/encoding crates implement bounded HMAC-SHA-256 cursors; no async runtime, HTTP framework, SQLite driver, or `async-trait` is selected yet because no implemented path exercises one.
+Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. The workspace uses edition 2024 and pins `serde`, `serde_json`, `thiserror`, `base64`, `hmac`, `sha2`, and Jiff. The cryptographic and encoding crates implement bounded HMAC-SHA-256 cursors; timezone-database-free Jiff parsing validates RFC 3339 wire timestamps. No async runtime, HTTP framework, SQLite driver, or `async-trait` is selected yet because no implemented path exercises one.
 
 ```bash
 cargo fmt --all -- --check

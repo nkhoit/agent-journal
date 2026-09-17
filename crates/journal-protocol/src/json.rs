@@ -9,10 +9,36 @@ use serde_json::{Map, Number, Value};
 /// is unsafe for idempotency comparison and authentication-sensitive bodies.
 pub fn decode_json<T>(input: &[u8]) -> serde_json::Result<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + Serialize,
 {
     let value = serde_json::from_slice::<UniqueValue>(input)?.0;
-    serde_json::from_value(value)
+    let decoded = T::deserialize(&value)?;
+    let typed_shape = serde_json::to_value(&decoded)?;
+    reject_positional_objects(&value, &typed_shape)?;
+    Ok(decoded)
+}
+
+fn reject_positional_objects(input: &Value, typed: &Value) -> serde_json::Result<()> {
+    match (input, typed) {
+        (Value::Array(_), Value::Object(_)) => Err(serde_json::Error::custom(
+            "expected a JSON object, not an array",
+        )),
+        (Value::Array(input), Value::Array(typed)) => {
+            for (input, typed) in input.iter().zip(typed) {
+                reject_positional_objects(input, typed)?;
+            }
+            Ok(())
+        }
+        (Value::Object(input), Value::Object(typed)) => {
+            for (key, input) in input {
+                if let Some(typed) = typed.get(key) {
+                    reject_positional_objects(input, typed)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 pub fn encode_json<T>(value: &T) -> serde_json::Result<Vec<u8>>

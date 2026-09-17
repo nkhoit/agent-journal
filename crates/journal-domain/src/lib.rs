@@ -14,7 +14,7 @@ pub const MAX_LONG_POLL_SECONDS: u64 = 30;
 pub const MAX_TELEMETRY_DETAIL_BYTES: usize = 4096;
 pub const MAX_TELEMETRY_PROPERTIES: usize = 32;
 pub const MAX_TELEMETRY_VALUE_CHARS: usize = 1024;
-pub const MAX_IDENTIFIER_BYTES: usize = 128;
+pub const MAX_IDENTIFIER_CHARS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
@@ -179,10 +179,8 @@ pub fn default_limits() -> Limits {
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
-    #[error("{field}: must be 1..128 bytes")]
+    #[error("{field}: must be 1..128 characters")]
     InvalidIdentifier { field: String },
-    #[error("{field}: contains forbidden whitespace or separator")]
-    ForbiddenSeparator { field: String },
     #[error("content: must not be empty")]
     EmptyContent,
     #[error("content: exceeds {max} bytes")]
@@ -328,16 +326,8 @@ pub fn validate_generation(generation: i64) -> Result<(), ValidationError> {
 }
 
 pub fn validate_identifier(field: &str, value: &str) -> Result<(), ValidationError> {
-    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+    if value.is_empty() || value.chars().count() > MAX_IDENTIFIER_CHARS {
         return Err(ValidationError::InvalidIdentifier {
-            field: field.to_owned(),
-        });
-    }
-    if value
-        .chars()
-        .any(|character| matches!(character, ' ' | '/' | '\\' | '\t' | '\r' | '\n'))
-    {
-        return Err(ValidationError::ForbiddenSeparator {
             field: field.to_owned(),
         });
     }

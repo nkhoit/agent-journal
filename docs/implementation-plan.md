@@ -449,7 +449,7 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 
 - Complete append/read/list/search/common-error DTOs.
 - Add duplicate-key rejection, canonical append encoding, and cursor primitives.
-- Use only existing dependencies.
+- Pin only the base64/HMAC/SHA-256 cursor dependencies and timezone-database-free RFC 3339 parser exercised by this slice.
 
 **Exit:** stable wire fixtures and no need for downstream ad hoc JSON parsing.
 
