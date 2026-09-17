@@ -1,0 +1,32 @@
+fixture_version: 1
+cases:
+  - id: register-heartbeat-fencing
+    expectation: stale-generation-rejected_and_lease_renewed
+  - id: spool-before-custody
+    expectation: no_runtime_injection_before_host_acceptance
+  - id: lost-commit-response
+    expectation: retry_same_claim_and_attempt_id
+  - id: restart-recovery
+    expectation: enumerate_claim_instance_generation_and_injection_lifecycle
+  - id: lease-expiry
+    expectation: redelivery_preserves_attempt_id
+  - id: explicit-requeue
+    expectation: new_attempt_id_and_retained_history
+  - id: stale-generation
+    expectation: reject_central_operation_and_stop
+  - id: unknown-route
+    expectation: route_unavailable_without_default_fallback
+  - id: resolved-route-injection
+    expectation: runtime_receives_resolved_route_and_exact_envelope
+  - id: telemetry-before-custody
+    expectation: reject_pending_or_claimed_attempt
+  - id: telemetry-cross-principal
+    expectation: reject_adapter_principal_mismatch
+  - id: duplicate-runtime-send
+    expectation: stable_record_id_and_honest_at_least_once
+  - id: revocation
+    expectation: suppress_unclaimed_content_without_recall_claim
+limits:
+  claim_items_max: 20
+  envelope_bytes_max: 65536
+  telemetry_detail_serialized_utf8_bytes_max: 4096

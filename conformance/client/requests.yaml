@@ -1,0 +1,22 @@
+fixture_version: 1
+operations:
+  - name: append
+    method: POST
+    path: /v1/spaces/example-space/records
+    max_content_bytes: 65536
+    max_attention: 16
+    max_relations: 32
+    max_detail_serialized_utf8_bytes: 4096
+  - name: list
+    method: GET
+    path: /v1/spaces/example-space/records
+    max_limit: 100
+  - name: search
+    method: GET
+    path: /v1/spaces/example-space/search
+    order: [rank, seq]
+  - name: claim
+    method: POST
+    path: /v1/mailbox/claims
+    max_items: 20
+    max_wait_seconds: 30

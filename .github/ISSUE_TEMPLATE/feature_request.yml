@@ -1,0 +1,30 @@
+name: Feature request
+
+description: Propose a bounded change to the journal, CLI, adapter, or operations model.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private topology, runtime session IDs, or sensitive journal content.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operational problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the smallest compatible design change and its failure semantics.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: State testable security, protocol, and operational gates.
+    validations:
+      required: true

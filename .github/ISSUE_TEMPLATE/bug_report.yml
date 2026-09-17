@@ -1,0 +1,34 @@
+name: Bug report
+
+description: Report a reproducible defect in the implementation or contract.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private routes, hostnames, IP addresses, session IDs, or sensitive record content.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include sanitized commands, fixture names, request IDs, and safe logs only.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Include test output or a minimal public-safe fixture.

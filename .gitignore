@@ -1,0 +1,40 @@
+# Go build/test output
+/bin/
+/dist/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Local configuration and state
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.yml
+*.local.json
+config/local/
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.spool
+*.sock
+
+# Generated or private material
+*.log
+*.trace
+*.dump
+*.backup
+*.bak
+release/
+artifacts/
+private/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
