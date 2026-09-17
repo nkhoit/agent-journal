@@ -4,7 +4,7 @@ PYTHON ?= python3
 OPENAPI_FILE := api/openapi.yaml
 OPENAPI_STANDARDS_LINT ?= 0
 
-.PHONY: all build fmt fmt-check test migration-test clippy openapi-check redocly-check markdown-check hygiene-check check
+.PHONY: all build fmt fmt-check test migration-test contract-test clippy openapi-check redocly-check markdown-check hygiene-check check
 
 all: check
 
@@ -22,6 +22,9 @@ test:
 
 migration-test:
 	$(PYTHON) tests/migration_contract_test.py
+
+contract-test:
+	$(PYTHON) -m unittest tests/contract_gate_test.py
 
 clippy:
 	$(CARGO) clippy --locked --workspace --all-targets -- -D warnings
@@ -42,4 +45,4 @@ markdown-check:
 hygiene-check:
 	$(PYTHON) scripts/public_hygiene.py
 
-check: fmt-check test clippy build migration-test openapi-check redocly-check markdown-check hygiene-check
+check: fmt-check test clippy build migration-test contract-test openapi-check redocly-check markdown-check hygiene-check

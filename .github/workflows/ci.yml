@@ -39,6 +39,8 @@ jobs:
           python-version: '3.12'
       - name: Install pinned YAML parser
         run: python -m pip install --disable-pip-version-check --no-input PyYAML==6.0.2
+      - name: Contract mutation and coverage tests
+        run: python3 -m unittest tests/contract_gate_test.py
       - name: OpenAPI structural and reference check
         run: python scripts/validate_openapi.py api/openapi.yaml
       - name: Pinned Redocly standards lint
