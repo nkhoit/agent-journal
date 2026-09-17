@@ -1,177 +1,18 @@
-//! Stable, runtime-neutral wire helpers shared by clients and services.
+//! Stable, runtime-neutral wire types and codecs shared by clients and services.
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+mod canonical;
+mod cursor;
+mod dto;
+mod json;
 
+pub use canonical::{CanonicalizationError, canonical_append};
+pub use cursor::{CursorCodec, CursorError, CursorOrder, CursorPosition, CursorRoute, CursorScope};
+pub use dto::*;
 pub use journal_domain as domain;
 pub use journal_domain::{DeliveryState, TelemetryState};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub error: ErrorBody,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ErrorBody {
-    pub code: String,
-    pub message: String,
-    pub request_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Page<T> {
-    pub items: Vec<T>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterRegisterRequest {
-    pub instance_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterHeartbeatRequest {
-    pub instance_id: String,
-    pub generation: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClaimRequest {
-    pub instance_id: String,
-    pub generation: i64,
-    pub limit: usize,
-    #[serde(default)]
-    pub wait_seconds: u64,
-}
-
-impl ClaimRequest {
-    pub fn validate(&self) -> Result<(), domain::ValidationError> {
-        domain::validate_generation(self.generation)?;
-        domain::validate_claim_limit(self.limit)?;
-        domain::validate_long_poll_seconds(self.wait_seconds)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimItem {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub record: domain::Record,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ClaimState {
-    Active,
-    Committed,
-    Expired,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimResponse {
-    pub claim_id: String,
-    pub state: ClaimState,
-    pub lease_expires_at: String,
-    pub items: Vec<ClaimItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitItem {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitRequest {
-    pub generation: i64,
-    pub items: Vec<CommitItem>,
-}
-
-impl CommitRequest {
-    pub fn validate(&self) -> Result<(), domain::ValidationError> {
-        domain::validate_generation(self.generation)?;
-        if self.items.is_empty() || self.items.len() > domain::MAX_CLAIM_BATCH {
-            return Err(domain::ValidationError::InvalidClaimLimit {
-                max: domain::MAX_CLAIM_BATCH,
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CommitItemResult {
-    Committed,
-    AlreadyCommitted,
-    ClaimNotFound,
-    StaleGeneration,
-    AttemptMismatch,
-    LeaseExpired,
-    SuppressedRevoked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitItemResultEntry {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub result: CommitItemResult,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitResponse {
-    pub claim_id: String,
-    pub generation: i64,
-    pub items: Vec<CommitItemResultEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryEnvelope {
-    pub record_id: String,
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub space_id: String,
-    pub from_principal: String,
-    pub source_run: Option<String>,
-    pub reply_to: Option<String>,
-    pub addressed_to: String,
-    pub routing_key: Option<String>,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeliveryEventRequest {
-    pub event_id: String,
-    pub attempt_id: String,
-    pub generation: i64,
-    pub occurred_at: String,
-    pub state: TelemetryState,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub detail: domain::TelemetryDetail,
-}
-
-impl DeliveryEventRequest {
-    pub fn validate(&self) -> Result<(), domain::ValidationError> {
-        domain::validate_generation(self.generation)?;
-        domain::validate_telemetry_detail(&self.detail)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryEventResponse {
-    pub event_id: String,
-    pub state: TelemetryState,
-    pub received_at: String,
-}
+pub use json::{decode_json, encode_json};
 
 pub type Headers = BTreeMap<String, String>;
 
@@ -214,7 +55,7 @@ impl Response {
 }
 
 /// Synchronous transport seam for the future authenticated HTTP client.
-/// Concrete HTTP/TLS code is deliberately not part of this scaffold.
+/// Concrete HTTP/TLS code is deliberately not part of this slice.
 pub trait Transport: Send + Sync {
     fn send(&self, request: Request) -> Result<Response, TransportError>;
 }
@@ -259,20 +100,20 @@ mod tests {
     #[test]
     fn claim_request_defaults_wait_and_rejects_null_or_unknown_fields() {
         let request: ClaimRequest =
-            serde_json::from_str(r#"{"instance_id":"instance-1","generation":1,"limit":20}"#)
+            decode_json(br#"{"instance_id":"instance-1","generation":1,"limit":20}"#)
                 .expect("claim request");
         assert_eq!(request.wait_seconds, 0);
         assert!(request.validate().is_ok());
 
         assert!(
-            serde_json::from_str::<ClaimRequest>(
-                r#"{"instance_id":"instance-1","generation":1,"limit":20,"wait_seconds":null}"#,
+            decode_json::<ClaimRequest>(
+                br#"{"instance_id":"instance-1","generation":1,"limit":20,"wait_seconds":null}"#,
             )
             .is_err()
         );
         assert!(
-            serde_json::from_str::<ClaimRequest>(
-                r#"{"instance_id":"instance-1","generation":1,"limit":20,"extra":true}"#,
+            decode_json::<ClaimRequest>(
+                br#"{"instance_id":"instance-1","generation":1,"limit":20,"extra":true}"#,
             )
             .is_err()
         );
@@ -293,14 +134,16 @@ mod tests {
         assert!(value.get("mailbox_item_id").is_none());
         assert!(value.get("adapter_id").is_none());
         assert!(
-            serde_json::from_value::<DeliveryEventRequest>(serde_json::json!({
-                "event_id": "event-1",
-                "attempt_id": "attempt-1",
-                "generation": 1,
-                "occurred_at": "2026-01-01T00:00:00Z",
-                "state": "route-unavailable",
-                "mailbox_item_id": "not-a-wire-field"
-            }))
+            decode_json::<DeliveryEventRequest>(
+                br#"{
+                    "event_id":"event-1",
+                    "attempt_id":"attempt-1",
+                    "generation":1,
+                    "occurred_at":"2026-01-01T00:00:00Z",
+                    "state":"route-unavailable",
+                    "mailbox_item_id":"not-a-wire-field"
+                }"#,
+            )
             .is_err()
         );
     }

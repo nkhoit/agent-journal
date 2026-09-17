@@ -1,0 +1,224 @@
+{
+  "fixture_version": 1,
+  "schemas": {
+    "AppendRecordRequest": {
+      "kind": "message",
+      "content": "hello",
+      "attention": ["agent-beta"],
+      "relations": [{"type": "reply-to", "record_id": "record-0"}]
+    },
+    "Error": {"code": "not-found", "message": "not found", "request_id": "request-1"},
+    "ErrorResponse": {
+      "error": {"code": "not-found", "message": "not found", "request_id": "request-1"}
+    },
+    "PageInfo": {"next_cursor": null},
+    "Health": {"status": "ok", "version": "0.1.0", "checks": {}},
+    "Principal": {
+      "id": "agent-alpha",
+      "display_name": "Agent Alpha",
+      "created_at": "2026-01-01T00:00:00Z",
+      "disabled": false
+    },
+    "Relation": {"type": "reply-to", "record_id": "record-0"},
+    "Membership": {
+      "space_id": "project-alpha",
+      "principal_id": "agent-alpha",
+      "can_read": true,
+      "can_append": true,
+      "can_admin": false
+    },
+    "Limits": {
+      "content_bytes": 65536,
+      "relations": 32,
+      "attention_recipients": 16,
+      "page_size": 100,
+      "claim_batch": 20,
+      "long_poll_seconds": 30,
+      "telemetry_detail_serialized_utf8_bytes": 4096
+    },
+    "Space": {
+      "id": "project-alpha",
+      "name": "Project Alpha",
+      "created_at": "2026-01-01T00:00:00Z",
+      "archived_at": null,
+      "limits": {
+        "content_bytes": 65536,
+        "relations": 32,
+        "attention_recipients": 16,
+        "page_size": 100,
+        "claim_batch": 20,
+        "long_poll_seconds": 30,
+        "telemetry_detail_serialized_utf8_bytes": 4096
+      }
+    },
+    "Record": {
+      "id": "record-1",
+      "space_id": "project-alpha",
+      "seq": 1,
+      "author": "agent-alpha",
+      "kind": "message",
+      "content": "hello",
+      "run_id": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "attention": ["agent-beta"],
+      "routing_key": null,
+      "relations": []
+    },
+    "PrincipalPage": {"items": [], "next_cursor": null},
+    "SpacePage": {"items": [], "next_cursor": null},
+    "RecordPage": {"items": [], "next_cursor": null},
+    "AppendRecordResponse": {
+      "record": {
+        "id": "record-1",
+        "space_id": "project-alpha",
+        "seq": 1,
+        "author": "agent-alpha",
+        "kind": "message",
+        "content": "hello",
+        "created_at": "2026-01-01T00:00:00Z",
+        "relations": []
+      },
+      "mailbox_created": 0,
+      "replayed": false
+    },
+    "SearchResult": {
+      "id": "record-1",
+      "space_id": "project-alpha",
+      "seq": 1,
+      "author": "agent-alpha",
+      "kind": "message",
+      "content": "hello",
+      "created_at": "2026-01-01T00:00:00Z",
+      "relations": [],
+      "score": 1.25,
+      "snippet": "hello"
+    },
+    "SearchPage": {"items": [], "next_cursor": null, "order": "rank", "consistency": "best-effort"},
+    "Me": {
+      "principal": {"id": "agent-alpha", "created_at": "2026-01-01T00:00:00Z", "disabled": false},
+      "memberships": [],
+      "limits": {
+        "content_bytes": 65536,
+        "relations": 32,
+        "attention_recipients": 16,
+        "page_size": 100,
+        "claim_batch": 20,
+        "long_poll_seconds": 30,
+        "telemetry_detail_serialized_utf8_bytes": 4096
+      }
+    },
+    "AdapterProvisionResponse": {"adapter_id": "adapter-1", "principal_id": "agent-alpha"},
+    "AdapterRegistration": {
+      "adapter_id": "adapter-1",
+      "principal_id": "agent-alpha",
+      "instance_id": "instance-1",
+      "generation": 1,
+      "status": "active",
+      "lease_expires_at": "2026-01-01T00:00:00Z",
+      "heartbeat_after_seconds": 10
+    },
+    "Adapter": {
+      "adapter_id": "adapter-1",
+      "principal_id": "agent-alpha",
+      "instance_id": "instance-1",
+      "generation": 1,
+      "status": "active",
+      "lease_expires_at": "2026-01-01T00:00:00Z",
+      "heartbeat_after_seconds": 10,
+      "created_at": "2026-01-01T00:00:00Z"
+    },
+    "AdapterPage": {"items": [], "next_cursor": null},
+    "ClaimItem": {
+      "mailbox_item_id": "mailbox-1",
+      "attempt_id": "attempt-1",
+      "record": {
+        "id": "record-1",
+        "space_id": "project-alpha",
+        "seq": 1,
+        "author": "agent-alpha",
+        "kind": "message",
+        "content": "hello",
+        "created_at": "2026-01-01T00:00:00Z",
+        "relations": []
+      }
+    },
+    "ClaimResponse": {
+      "claim_id": "claim-1",
+      "state": "active",
+      "lease_expires_at": "2026-01-01T00:00:00Z",
+      "items": []
+    },
+    "CommitItemResult": {
+      "mailbox_item_id": "mailbox-1",
+      "attempt_id": "attempt-1",
+      "result": "committed"
+    },
+    "CommitResponse": {"claim_id": "claim-1", "generation": 1, "items": []},
+    "DeliveryEnvelope": {
+      "record_id": "record-1",
+      "mailbox_item_id": "mailbox-1",
+      "attempt_id": "attempt-1",
+      "space_id": "project-alpha",
+      "from_principal": "agent-alpha",
+      "source_run": null,
+      "reply_to": null,
+      "addressed_to": "agent-beta",
+      "routing_key": null,
+      "body": "hello"
+    },
+    "DeliveryEventResponse": {
+      "event_id": "event-1",
+      "state": "route-unavailable",
+      "received_at": "2026-01-01T00:00:00Z"
+    },
+    "DeliverySummary": {
+      "mailbox_item_id": "mailbox-1",
+      "recipient": "agent-beta",
+      "state": "pending",
+      "attempts": 1
+    },
+    "DeliveryStatusPage": {"items": [], "next_cursor": null},
+    "MailboxStatus": {"principal_id": "agent-alpha", "pending": 0, "oldest_pending_at": null},
+    "MailboxStatusPage": {"items": [], "next_cursor": null},
+    "OneTimeEnrollmentTicket": {"ticket": "ticket-example"},
+    "EnrollmentTicketCreateResponse": {
+      "principal_id": "agent-alpha",
+      "adapter_id": "adapter-1",
+      "expires_at": "2026-01-01T00:00:00Z",
+      "enrollment_ticket": {"ticket": "ticket-example"}
+    },
+    "OneTimePrincipalClientSecret": {
+      "credential_id": "principal-credential",
+      "secret": "p-example"
+    },
+    "OneTimeDeliveryAdapterSecret": {
+      "credential_id": "adapter-credential",
+      "secret": "a-example"
+    },
+    "EnrollmentExchangeResponse": {
+      "adapter_id": "adapter-1",
+      "principal_id": "agent-alpha",
+      "instance_id": "instance-1",
+      "generation": 1,
+      "principal_client_secret": {
+        "credential_id": "principal-credential",
+        "secret": "p-example"
+      },
+      "delivery_adapter_secret": {
+        "credential_id": "adapter-credential",
+        "secret": "a-example"
+      }
+    },
+    "CredentialMetadata": {
+      "credential_id": "credential-1",
+      "principal_id": "agent-alpha",
+      "class": "principal-client",
+      "rotated_at": "2026-01-01T00:00:00Z"
+    },
+    "RequeueResponse": {
+      "mailbox_item_id": "mailbox-1",
+      "attempt_id": "attempt-2",
+      "state": "pending"
+    }
+  }
+}

@@ -7,11 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
+hmac.workspace = true
 serde.workspace = true
-journal-domain = { path = "../journal-domain" }
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+journal-domain = { path = "../journal-domain" }
 
 [lints]
 workspace = true
