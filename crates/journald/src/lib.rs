@@ -1,26 +1,23 @@
-use std::io::Write;
+//! Runnable Agent Journal service shell.
 
-pub fn run_stub<W: Write>(mut output: W, name: &str) -> i32 {
-    match writeln!(
-        output,
-        "{name}: not implemented (Agent Journal Rust scaffold only)"
-    ) {
-        Ok(()) => 2,
-        Err(_) => 1,
-    }
-}
+mod config;
+mod executor;
+mod http;
+mod server;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use config::{
+    Config, ConfigError, DEFAULT_BLOCKING_LIMIT, DEFAULT_BODY_READ_TIMEOUT, DEFAULT_MAX_BODY_BYTES,
+    DEFAULT_SHUTDOWN_TIMEOUT,
+};
+pub use executor::{BlockingError, BlockingExecutor};
+pub use http::{ServiceState, admin_router, public_router};
+pub use server::{Server, ServerError};
 
-    #[test]
-    fn stub_is_explicit_and_nonzero() {
-        let mut output = Vec::new();
-        assert_eq!(run_stub(&mut output, "journald"), 2);
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "journald: not implemented (Agent Journal Rust scaffold only)\n"
-        );
-    }
+pub fn init_tracing() {
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
 }
