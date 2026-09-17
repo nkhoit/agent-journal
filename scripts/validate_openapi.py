@@ -287,7 +287,10 @@ def security_for(path: str, operation_id: str) -> list[dict[str, list[Any]]]:
     return [{"principalClient": []}]
 
 
-def collect_operations(paths: dict[str, Any]) -> dict[str, tuple[str, str, dict[str, Any]]]:
+def collect_operations(
+    paths: dict[str, Any],
+    component_parameters: dict[str, Any],
+) -> dict[str, tuple[str, str, dict[str, Any]]]:
     operations: dict[str, tuple[str, str, dict[str, Any]]] = {}
     for path_name, path_item in paths.items():
         if not isinstance(path_item, dict):
@@ -326,11 +329,14 @@ def collect_operations(paths: dict[str, Any]) -> dict[str, tuple[str, str, dict[
                     fail(f"admin operation {operation_id} missing protected Unix-socket authorization")
                 if "administration" not in operation.get("tags", []):
                     fail(f"admin operation {operation_id} must use the administration tag")
-                parameters = operation.get("parameters", [])
-                if not isinstance(parameters, list):
-                    fail(f"admin operation {operation_id} parameters must be a list")
+                path_parameters = path_item.get("parameters", [])
+                operation_parameters = operation.get("parameters", [])
+                if not isinstance(path_parameters, list) or not isinstance(
+                    operation_parameters, list
+                ):
+                    fail(f"admin operation {operation_id} parameters must be lists")
                 parameter_refs: list[str] = []
-                for parameter in parameters:
+                for parameter in (*path_parameters, *operation_parameters):
                     if (
                         not isinstance(parameter, dict)
                         or set(parameter) != {"$ref"}
@@ -342,11 +348,30 @@ def collect_operations(paths: dict[str, Any]) -> dict[str, tuple[str, str, dict[
                             else repr(parameter)
                         )
                         fail(
-                            f"admin operation {operation_id} must not declare inline "
-                            f"parameter {inline_name!r}; X-Admin-Authorization headers "
-                            "are forbidden"
+                            f"admin operation {operation_id} at {path_name} must not "
+                            f"declare inline parameter {inline_name!r}; "
+                            "X-Admin-Authorization headers are forbidden"
                         )
-                    parameter_refs.append(parameter["$ref"])
+                    reference = parameter["$ref"]
+                    prefix = "#/components/parameters/"
+                    if not reference.startswith(prefix):
+                        fail(
+                            f"admin operation {operation_id} has unsupported "
+                            f"parameter reference {reference!r}"
+                        )
+                    component_name = reference.removeprefix(prefix)
+                    resolved = component_parameters.get(component_name)
+                    if not isinstance(resolved, dict):
+                        fail(
+                            f"admin operation {operation_id} references missing "
+                            f"parameter {component_name}"
+                        )
+                    if resolved.get("in") == "header":
+                        fail(
+                            f"admin operation {operation_id} parameter {component_name} "
+                            "must not be a header; X-Admin-Authorization is forbidden"
+                        )
+                    parameter_refs.append(reference)
                 expected_parameter_refs = EXPECTED_ADMIN_PARAMETER_REFS[operation_id]
                 if tuple(parameter_refs) != expected_parameter_refs:
                     fail(
@@ -585,6 +610,20 @@ def validate_request_contract(
             fail(f"{schema_name} request schema type must be object")
         actual_properties = schema.get("properties")
         actual_required = schema.get("required", [])
+        expected_schema_keys = {
+            "type",
+            "required",
+            "additionalProperties",
+            "properties",
+        }
+        if set(schema) != expected_schema_keys:
+            unexpected_keywords = sorted(set(schema) - expected_schema_keys)
+            missing_keywords = sorted(expected_schema_keys - set(schema))
+            fail(
+                f"{schema_name} request schema keywords drifted; "
+                f"missing={missing_keywords}, unexpected={unexpected_keywords}; "
+                "patternProperties or composition must not expose credential fields"
+            )
         actual_property_names = (
             set(actual_properties) if isinstance(actual_properties, dict) else set()
         )
@@ -644,9 +683,10 @@ def validate_operation_schemas(
         if isinstance(response, dict):
             content = response.get("content")
             if not isinstance(content, dict) or set(content) != {"application/json"}:
+                media_types = sorted(content) if isinstance(content, dict) else []
                 fail(
-                    f"{operation_id} {success_status} response must use "
-                    "the JSON media type only"
+                    f"{operation_id} {success_status} response must use only "
+                    f"application/json; got media types {media_types}"
                 )
             actual_schema = content["application/json"].get("schema")
         expected_reference = f"#/components/schemas/{response_schema}"
@@ -711,7 +751,10 @@ def validate_openapi(document: dict[str, Any]) -> dict[str, tuple[str, str, dict
 
     if "security" in document:
         fail("document-level security is forbidden; every operation declares its class")
-    operations = collect_operations(paths)
+    component_parameters = components.get("parameters")
+    if not isinstance(component_parameters, dict):
+        fail("OpenAPI component parameters must be an object")
+    operations = collect_operations(paths, component_parameters)
     if len(operations) != len(EXPECTED_OPERATIONS):
         fail(f"expected {len(EXPECTED_OPERATIONS)} operations, found {len(operations)}")
     validate_local_references(document)

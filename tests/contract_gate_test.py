@@ -142,6 +142,19 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("appendRecord", "AppendRecordResponse")
 
+    def test_append_response_rejects_additional_media_types(self) -> None:
+        document = self.load_yaml(self.openapi)
+        operation = document["paths"]["/v1/spaces/{space}/records"]["post"]
+        content = operation["responses"]["201"]["content"]
+        content["application/xml"] = {
+            "schema": {"$ref": "#/components/schemas/AppendRecordResponse"}
+        }
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects(
+            "appendRecord", "response", "application/xml"
+        )
+
     def test_append_response_must_remain_an_object_schema(self) -> None:
         document = self.load_yaml(self.openapi)
         document["components"]["schemas"]["AppendRecordResponse"]["type"] = "string"
@@ -166,12 +179,35 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("AdapterProvisionRequest", "credential")
 
+    def test_adapter_provision_request_rejects_credential_pattern(self) -> None:
+        document = self.load_yaml(self.openapi)
+        provision_request = document["components"]["schemas"][
+            "AdapterProvisionRequest"
+        ]
+        provision_request["patternProperties"] = {
+            "^credential$": {"type": "string"}
+        }
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects(
+            "AdapterProvisionRequest", "patternProperties"
+        )
+
     def test_limit_parameter_maximum_is_enforced(self) -> None:
         document = self.load_yaml(self.openapi)
         document["components"]["parameters"]["Limit"]["schema"]["maximum"] = 1000
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects("Limit", "maximum")
+
+    def test_component_parameter_rejects_remote_admin_header(self) -> None:
+        document = self.load_yaml(self.openapi)
+        cursor = document["components"]["parameters"]["Cursor"]
+        cursor["name"] = "X-Admin-Authorization"
+        cursor["in"] = "header"
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects("Cursor", "X-Admin-Authorization")
 
     def test_delivery_status_other_reader_visibility_is_enforced(self) -> None:
         document = self.load_yaml(self.openapi)
@@ -270,6 +306,23 @@ class ContractGateTest(unittest.TestCase):
             "createEnrollmentTicket", "X-Admin-Authorization"
         )
 
+    def test_admin_path_item_rejects_inline_authorization_header(self) -> None:
+        document = self.load_yaml(self.openapi)
+        path_item = document["paths"]["/v1/admin/adapters"]
+        path_item.setdefault("parameters", []).append(
+            {
+                "name": "X-Admin-Authorization",
+                "in": "header",
+                "required": True,
+                "schema": {"type": "string"},
+            }
+        )
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects(
+            "/v1/admin/adapters", "X-Admin-Authorization"
+        )
+
     def test_private_identifier_in_conformance_data_is_rejected(self) -> None:
         scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
         scenarios = self.load_yaml(scenarios_path)
@@ -290,6 +343,19 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(scenarios_path, scenarios)
 
         self.assert_gate_rejects("adapter", "coverage")
+
+    def test_adapter_operation_coverage_is_enforced(self) -> None:
+        scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
+        scenarios = self.load_yaml(scenarios_path)
+        for case in scenarios["cases"]:
+            case["operation_ids"] = [
+                operation_id
+                for operation_id in case["operation_ids"]
+                if operation_id != "replaceAdapter"
+            ]
+        self.write_yaml(scenarios_path, scenarios)
+
+        self.assert_gate_rejects("adapter", "coverage", "replaceAdapter")
 
 
 if __name__ == "__main__":
