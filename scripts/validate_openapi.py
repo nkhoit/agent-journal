@@ -287,6 +287,35 @@ def security_for(path: str, operation_id: str) -> list[dict[str, list[Any]]]:
     return [{"principalClient": []}]
 
 
+def resolve_component_parameter(
+    reference: str,
+    component_parameters: dict[str, Any],
+    seen: frozenset[str] = frozenset(),
+) -> tuple[str, dict[str, Any]]:
+    prefix = "#/components/parameters/"
+    if not reference.startswith(prefix):
+        fail(f"unsupported parameter reference {reference!r}")
+    component_name = reference.removeprefix(prefix)
+    if component_name in seen:
+        fail(f"cyclic component parameter reference: {component_name}")
+    resolved = component_parameters.get(component_name)
+    if not isinstance(resolved, dict):
+        fail(f"missing component parameter: {component_name}")
+    nested_reference = resolved.get("$ref")
+    if nested_reference is not None:
+        if set(resolved) != {"$ref"} or not isinstance(nested_reference, str):
+            fail(
+                f"component parameter {component_name} must be either a "
+                "Parameter Object or an exact reference"
+            )
+        return resolve_component_parameter(
+            nested_reference,
+            component_parameters,
+            seen | {component_name},
+        )
+    return component_name, resolved
+
+
 def collect_operations(
     paths: dict[str, Any],
     component_parameters: dict[str, Any],
@@ -353,23 +382,15 @@ def collect_operations(
                             "X-Admin-Authorization headers are forbidden"
                         )
                     reference = parameter["$ref"]
-                    prefix = "#/components/parameters/"
-                    if not reference.startswith(prefix):
-                        fail(
-                            f"admin operation {operation_id} has unsupported "
-                            f"parameter reference {reference!r}"
-                        )
-                    component_name = reference.removeprefix(prefix)
-                    resolved = component_parameters.get(component_name)
-                    if not isinstance(resolved, dict):
-                        fail(
-                            f"admin operation {operation_id} references missing "
-                            f"parameter {component_name}"
-                        )
+                    original_component_name = reference.rsplit("/", 1)[-1]
+                    resolved_name, resolved = resolve_component_parameter(
+                        reference, component_parameters
+                    )
                     if resolved.get("in") == "header":
                         fail(
-                            f"admin operation {operation_id} parameter {component_name} "
-                            "must not be a header; X-Admin-Authorization is forbidden"
+                            f"admin operation {operation_id} parameter "
+                            f"{original_component_name} resolves to header "
+                            f"{resolved_name}; X-Admin-Authorization is forbidden"
                         )
                     parameter_refs.append(reference)
                 expected_parameter_refs = EXPECTED_ADMIN_PARAMETER_REFS[operation_id]

@@ -50,12 +50,13 @@ class ContractGateTest(unittest.TestCase):
     def write_yaml(self, path: Path, document: dict) -> None:
         path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    def assert_gate_rejects(self, *expected_fragments: str) -> None:
+    def assert_gate_rejects(self, *expected_fragments: str) -> str:
         result = self.run_gate()
         output = f"{result.stdout}\n{result.stderr}"
         self.assertNotEqual(result.returncode, 0, output)
         for fragment in expected_fragments:
             self.assertIn(fragment.casefold(), output.casefold(), output)
+        return output
 
     def test_unmodified_contract_and_fixtures_pass(self) -> None:
         result = self.run_gate()
@@ -208,6 +209,27 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects("Cursor", "X-Admin-Authorization")
+
+    def test_component_parameter_ref_rejects_remote_admin_header(self) -> None:
+        document = self.load_yaml(self.openapi)
+        parameters = document["components"]["parameters"]
+        parameters["AdminAuthorization"] = {
+            "name": "X-Admin-Authorization",
+            "in": "header",
+            "required": True,
+            "schema": {"type": "string"},
+        }
+        parameters["Cursor"] = {
+            "$ref": "#/components/parameters/AdminAuthorization"
+        }
+        self.write_yaml(self.openapi, document)
+
+        output = self.assert_gate_rejects("X-Admin-Authorization")
+        self.assertTrue(
+            "cursor" in output.casefold()
+            or "adminauthorization" in output.casefold(),
+            output,
+        )
 
     def test_delivery_status_other_reader_visibility_is_enforced(self) -> None:
         document = self.load_yaml(self.openapi)
