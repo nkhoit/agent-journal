@@ -14,7 +14,7 @@ pub const MAX_LONG_POLL_SECONDS: u64 = 30;
 pub const MAX_TELEMETRY_DETAIL_BYTES: usize = 4096;
 pub const MAX_TELEMETRY_PROPERTIES: usize = 32;
 pub const MAX_TELEMETRY_VALUE_CHARS: usize = 1024;
-pub const MAX_IDENTIFIER_BYTES: usize = 128;
+pub const MAX_IDENTIFIER_CHARS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
@@ -39,25 +39,49 @@ pub struct Space {
     pub limits: Limits,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Relation {
-    #[serde(rename = "type")]
-    pub relation_type: String,
-    pub record_id: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelationType {
+    ReplyTo,
+    Supersedes,
+    Tombstones,
+    RefersTo,
+    Acknowledges,
 }
 
-pub const RELATION_REPLY_TO: &str = "reply-to";
-pub const RELATION_SUPERSEDES: &str = "supersedes";
-pub const RELATION_TOMBSTONES: &str = "tombstones";
-pub const RELATION_REFERS_TO: &str = "refers-to";
-pub const RELATION_ACKNOWLEDGES: &str = "acknowledges";
-pub const RELATION_TYPES: [&str; 5] = [
-    RELATION_REPLY_TO,
-    RELATION_SUPERSEDES,
-    RELATION_TOMBSTONES,
-    RELATION_REFERS_TO,
-    RELATION_ACKNOWLEDGES,
+impl RelationType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReplyTo => "reply-to",
+            Self::Supersedes => "supersedes",
+            Self::Tombstones => "tombstones",
+            Self::RefersTo => "refers-to",
+            Self::Acknowledges => "acknowledges",
+        }
+    }
+}
+
+impl std::fmt::Display for RelationType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+pub const RELATION_TYPES: [RelationType; 5] = [
+    RelationType::ReplyTo,
+    RelationType::Supersedes,
+    RelationType::Tombstones,
+    RelationType::RefersTo,
+    RelationType::Acknowledges,
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Relation {
+    #[serde(rename = "type")]
+    pub relation_type: RelationType,
+    pub record_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,10 +179,8 @@ pub fn default_limits() -> Limits {
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
-    #[error("{field}: must be 1..128 bytes")]
+    #[error("{field}: must be 1..128 characters")]
     InvalidIdentifier { field: String },
-    #[error("{field}: contains forbidden whitespace or separator")]
-    ForbiddenSeparator { field: String },
     #[error("content: must not be empty")]
     EmptyContent,
     #[error("content: exceeds {max} bytes")]
@@ -169,10 +191,8 @@ pub enum ValidationError {
     TooManyAttention { max: usize },
     #[error("attention: duplicate principal {principal:?}")]
     DuplicateAttention { principal: String },
-    #[error("relation type {relation_type:?}: unsupported")]
-    UnsupportedRelation { relation_type: String },
     #[error("relations: at most one {relation_type:?} relation is allowed")]
-    MultipleReplyTo { relation_type: &'static str },
+    MultipleReplyTo { relation_type: RelationType },
     #[error("detail: exceeds {max} properties")]
     TooManyTelemetryProperties { max: usize },
     #[error("detail value {key:?}: exceeds {max} characters")]
@@ -227,17 +247,12 @@ impl RecordInput {
 
         let mut reply_to_count = 0;
         for relation in &self.relations {
-            if !RELATION_TYPES.contains(&relation.relation_type.as_str()) {
-                return Err(ValidationError::UnsupportedRelation {
-                    relation_type: relation.relation_type.clone(),
-                });
-            }
             validate_identifier("relation record", &relation.record_id)?;
-            if relation.relation_type == RELATION_REPLY_TO {
+            if relation.relation_type == RelationType::ReplyTo {
                 reply_to_count += 1;
                 if reply_to_count > 1 {
                     return Err(ValidationError::MultipleReplyTo {
-                        relation_type: RELATION_REPLY_TO,
+                        relation_type: RelationType::ReplyTo,
                     });
                 }
             }
@@ -310,17 +325,9 @@ pub fn validate_generation(generation: i64) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_identifier(field: &str, value: &str) -> Result<(), ValidationError> {
-    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+pub fn validate_identifier(field: &str, value: &str) -> Result<(), ValidationError> {
+    if value.is_empty() || value.chars().count() > MAX_IDENTIFIER_CHARS {
         return Err(ValidationError::InvalidIdentifier {
-            field: field.to_owned(),
-        });
-    }
-    if value
-        .chars()
-        .any(|character| matches!(character, ' ' | '/' | '\\' | '\t' | '\r' | '\n'))
-    {
-        return Err(ValidationError::ForbiddenSeparator {
             field: field.to_owned(),
         });
     }
@@ -373,7 +380,7 @@ mod tests {
             attention: vec!["beta".into()],
             routing_key: None,
             relations: vec![Relation {
-                relation_type: RELATION_REPLY_TO.into(),
+                relation_type: RelationType::ReplyTo,
                 record_id: "record-1".into(),
             }],
         }
@@ -388,6 +395,31 @@ mod tests {
         let mut duplicate = valid_input();
         duplicate.attention.push("beta".into());
         assert!(duplicate.validate().is_err());
+        let mut exact_attention = valid_input();
+        exact_attention.attention = (0..MAX_ATTENTION_RECIPIENTS)
+            .map(|index| format!("agent-{index}"))
+            .collect();
+        assert!(exact_attention.validate().is_ok());
+        let mut too_many_attention = exact_attention;
+        too_many_attention
+            .attention
+            .push(format!("agent-{MAX_ATTENTION_RECIPIENTS}"));
+        assert!(too_many_attention.validate().is_err());
+
+        let mut exact_relations = valid_input();
+        exact_relations.relations = (0..MAX_RELATIONS)
+            .map(|index| Relation {
+                relation_type: RelationType::RefersTo,
+                record_id: format!("record-{index}"),
+            })
+            .collect();
+        assert!(exact_relations.validate().is_ok());
+        let mut too_many_relations = exact_relations;
+        too_many_relations.relations.push(Relation {
+            relation_type: RelationType::RefersTo,
+            record_id: format!("record-{MAX_RELATIONS}"),
+        });
+        assert!(too_many_relations.validate().is_err());
     }
 
     #[test]
@@ -421,7 +453,7 @@ mod tests {
                 kind: "message".into(),
                 content: "x".into(),
                 relations: vec![Relation {
-                    relation_type: relation_type.into(),
+                    relation_type,
                     record_id: "record-1".into(),
                 }],
                 ..valid_input()
@@ -434,15 +466,14 @@ mod tests {
     fn rejects_multiple_reply_to_and_unknown_relations() {
         let mut input = valid_input();
         input.relations.push(Relation {
-            relation_type: RELATION_REPLY_TO.into(),
+            relation_type: RelationType::ReplyTo,
             record_id: "record-2".into(),
         });
         assert!(input.validate().is_err());
-        input.relations = vec![Relation {
-            relation_type: "executes".into(),
-            record_id: "record-1".into(),
-        }];
-        assert!(input.validate().is_err());
+        assert!(
+            serde_json::from_str::<Relation>(r#"{"type":"executes","record_id":"record-1"}"#,)
+                .is_err()
+        );
     }
 
     #[test]

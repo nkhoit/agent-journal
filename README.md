@@ -2,9 +2,9 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: public Rust scaffold with an executable S0 contract gate; product implementation pending.**
+> **Status: executable S0 contract gate and S1 typed wire kernel; service implementation pending.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, SQLite migration, Rust crate boundaries, adapter guidance, fixtures, and executable stubs. S0 validates the exact 27-path/29-operation OpenAPI surface and its security, limits, identity, and required-field rules; parses the client and adapter fixtures; verifies operation coverage; and runs deterministic contract mutations. It does **not** provide a functioning server, CLI protocol client, enrollment flow, database driver, web UI, or runtime injection. The binaries intentionally exit with status 2 and say so explicitly. Every later implementation slice remains unimplemented; Hermes and Muse injection surfaces remain unresolved and require revalidation against supported runtime releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, SQLite migration, typed Rust domain and wire DTOs, strict duplicate-key JSON decoding, canonical append encoding, authenticated opaque cursors, adapter guidance, fixtures, and executable stubs. S0 validates the exact 27-path/29-operation OpenAPI surface and fixture coverage. S1 provides protocol types and codecs but no handlers or persistence. It does **not** provide a functioning server, CLI protocol client, enrollment flow, database driver, web UI, or runtime injection. The binaries intentionally exit with status 2. S2 and later remain unimplemented; Hermes and Muse injection surfaces remain unresolved and require revalidation against supported runtime releases.
 
 ## Product model
 
@@ -34,9 +34,10 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Area | Status |
 | --- | --- |
 | Product design and v1 decisions | Documented in `docs/design.md` |
-| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 27-path/29-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations; server/client parity remains unimplemented |
+| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 27-path/29-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
+| Rust domain and protocol wire kernel | Executable: complete S1 DTOs, duplicate-key rejection, canonical append bytes, authenticated bounded cursors, and normative wire examples |
 | SQLite schema | Initial migration present; driver and transactional repositories are pending |
-| Rust domain, protocol, service, storage, adapter, and client boundaries | Scaffolded and tested without network or database implementations |
+| Service, storage, adapter, and client implementation | Scaffolded boundaries only; no network or database implementations |
 | `journald`, `aj`, `aj-admin`, runtime adapters | Explicit not-implemented stubs; binaries exit 2 |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
@@ -67,7 +68,7 @@ The monorepo keeps central protocol types separate from adapter routing and runt
 ```text
 api/                         language-neutral OpenAPI and protocol fixtures
 crates/journal-domain/       constants, typed records, states, and validation
-crates/journal-protocol/     wire helpers and transport seam
+crates/journal-protocol/     typed wire DTOs, strict JSON, canonical append, authenticated cursors
 crates/journal-storage-sqlite/ SQLite policy and repository ports
 crates/journal-service/      service, authorization, mailbox, and clock ports
 crates/journal-client/       authenticated client seam without an HTTP stack
@@ -91,7 +92,7 @@ docs/                        design, protocol, security, operations, and plans
 
 ## Build and test
 
-Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. The workspace uses edition 2024 and only three pinned Rust dependencies: `serde`, `serde_json`, and `thiserror`. `Cargo.lock` is checked in for reproducible scaffold builds. No async runtime, HTTP framework, SQLite driver, or `async-trait` is selected yet because no scaffold path exercises one.
+Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. The workspace uses edition 2024 and pins `serde`, `serde_json`, `thiserror`, `base64`, `hmac`, `sha2`, and Jiff. The cryptographic and encoding crates implement bounded HMAC-SHA-256 cursors; timezone-database-free Jiff parsing validates RFC 3339 wire timestamps. No async runtime, HTTP framework, SQLite driver, or `async-trait` is selected yet because no implemented path exercises one.
 
 ```bash
 cargo fmt --all -- --check
@@ -118,7 +119,7 @@ The runtime-specific adapter binaries also exit 2. A non-zero stub is deliberate
 
 ## Implementation sequence
 
-S0 is executable only as a contract gate. Every remaining slice below is unimplemented:
+S0 and S1 are executable contract and wire gates. The remaining sequence is:
 
 1. Implement the Rust SQLite connection policy, numbered migrations, transactional repositories, and typed authorization.
 2. Implement `journald` HTTP handlers, request IDs, bounded pagination/search, idempotency, and the protected admin socket.

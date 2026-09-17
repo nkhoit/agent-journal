@@ -400,7 +400,7 @@ Content-Type: application/json
 }
 ```
 
-The idempotency scope is `(authenticated principal, HTTP method, route, Idempotency-Key)`. Before comparison, the server parses and validates JSON, removes insignificant object-key ordering, rejects duplicate object keys, deduplicates and lexically sorts set-valued fields such as `attention`, and serializes the validated request through one documented canonical encoder. Repeating the same key and canonical payload returns the original result. Reusing the key with a different payload returns `409 Conflict`.
+The idempotency scope is `(authenticated principal, HTTP method, route, Idempotency-Key)`. Before comparison, the server rejects duplicate JSON object keys, parses and validates the typed request, validates uniqueness and lexically sorts set-valued fields such as `attention`, and serializes the validated request through the documented compact canonical encoder. Object-key order is therefore insignificant; identifiers, content, routing keys, and ordered relations remain byte-for-byte significant. Repeating the same key and canonical payload returns the original result. Reusing the key with a different payload returns `409 Conflict`.
 
 The service enforces explicit maximum body size, relation count, attention-recipient count, append rate per principal/space, and pending-mailbox capacity. If all attention obligations cannot be created atomically, the entire append fails; the server never publishes while silently dropping recipients.
 

@@ -23,6 +23,7 @@ x-agent-journal-admin-transport:
   note: >-
     OpenAPI has no standard security scheme for Unix-socket peer credentials;
     admin operations use security: [] plus this explicit extension.
+x-agent-journal-wire-examples: ../conformance/client/wire-examples.json
 x-limits:
   content_bytes: 65536
   relations: 32

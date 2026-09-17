@@ -10,9 +10,25 @@ This document is the implementation-facing summary of the v1 HTTP/JSON protocol.
 - `limit` is bounded. Clients must follow `next_cursor` and must not manufacture cursors.
 - Sequence-ordered records use `(space_seq, id)`. Ranked FTS pages are best effort under concurrent writes; use `order=seq` or `after_seq` for deterministic catch-up.
 - Cursors are route/filter fingerprints and cannot be moved between queries.
-- Request bodies and response records are UTF-8 JSON. Duplicate JSON object keys are rejected before canonical idempotency comparison.
+- Request bodies and response records are UTF-8 JSON. Duplicate JSON object keys are rejected before canonical idempotency comparison, and object-shaped DTOs never accept positional JSON arrays.
+- Identifier and token `maxLength` constraints count Unicode scalar values, matching OpenAPI and SQLite text-length semantics. Only content and serialized telemetry detail have additional UTF-8 byte limits.
+- Search `since` values use RFC 3339 timestamps.
 - `content` is limited to 65,536 UTF-8 bytes; any schema `maxLength` is only a secondary character bound. The server must validate the byte limit after decoding the JSON string.
 - Telemetry `detail` is compact serialized JSON limited to 4,096 UTF-8 bytes after escaping. It may additionally be bounded to 32 properties, 128-character keys, and 1,024-character values.
+
+### Strict JSON and canonical append bytes
+
+All request and response decoding must pass through the duplicate-key-rejecting decoder before typed deserialization. The decoder also rejects positional arrays wherever the typed wire shape requires an object. Request DTOs reject unknown fields and distinguish an omitted optional field from an explicit `null` when the OpenAPI schema does not permit null.
+
+Append idempotency compares only validated canonical bytes. The canonical encoder emits compact UTF-8 JSON with keys in this order: `kind`, `content`, `run_id`, `attention`, `routing_key`, `relations`. It always emits `kind` and `content`; omits absent optional fields and empty `attention` or `relations`; validates `attention` uniqueness and then sorts it lexically; and preserves relation order and every string byte exactly. It performs no case folding, whitespace normalization, identifier rewriting, token normalization, or content normalization.
+
+The public-safe examples referenced by `x-agent-journal-wire-examples` in OpenAPI are compiled through the Rust DTOs. Required response arrays and nullable fields remain present even when their values are `[]` or `null`.
+
+### Opaque cursor codec
+
+Cursor version 1 is `base64url(payload).base64url(tag)` without padding. The compact JSON payload contains `version`, `route`, a SHA-256 filter fingerprint, `order`, and the typed last position. The tag is HMAC-SHA-256 over the exact payload bytes. The codec derives its fixed internal MAC key with SHA-256 from a secret containing at least 32 bytes, verifies the tag before parsing the payload, and rejects tokens longer than 2,048 characters.
+
+The filter fingerprint input must include every path value and effective query filter that determines membership, excluding `cursor` and `limit`; the ordering mode is carried separately. Decoding requires an exact route, fingerprint, and ordering match. Clients still treat the token as opaque and must never inspect, edit, or manufacture it.
 
 ## Credential classes
 
