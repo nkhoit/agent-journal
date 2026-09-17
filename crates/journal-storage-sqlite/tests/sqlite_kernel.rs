@@ -224,6 +224,34 @@ fn failed_migration_rolls_back_and_can_be_retried() {
 }
 
 #[test]
+fn concurrent_database_open_serializes_initial_migration() {
+    const OPENERS: usize = 8;
+    const ROUNDS: usize = 8;
+
+    let temporary = TempDir::new("concurrent-migration");
+    for round in 0..ROUNDS {
+        let path = Arc::new(temporary.database(&format!("journal-{round}.db")));
+        let barrier = Arc::new(Barrier::new(OPENERS));
+        let mut threads = Vec::new();
+        for _ in 0..OPENERS {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                Database::open(path.as_path())
+            }));
+        }
+
+        for thread in threads {
+            thread
+                .join()
+                .expect("database opener thread")
+                .expect("concurrent database open");
+        }
+    }
+}
+
+#[test]
 fn newer_schema_is_rejected_without_mutation() {
     let temporary = TempDir::new("schema-mismatch");
     let path = temporary.database("journal.db");
@@ -364,6 +392,10 @@ fn backup_is_consistent_and_verified_in_isolation() {
         Err(StorageError::BackupDestinationExists(path)) if path == backup_path
     ));
     assert!(matches!(
+        Database::restore_backup(&backup_path, &restored_path),
+        Err(StorageError::BackupDestinationExists(path)) if path == restored_path
+    ));
+    assert!(matches!(
         database.backup_to(database.path()),
         Err(StorageError::BackupDestinationIsSource)
     ));
@@ -371,6 +403,74 @@ fn backup_is_consistent_and_verified_in_isolation() {
         Database::restore_backup(&backup_path, &backup_path),
         Err(StorageError::BackupDestinationIsSource)
     ));
+}
+
+#[test]
+fn backup_destination_is_literal_and_cannot_overwrite_a_file_uri_target() {
+    let temporary = TempDir::new("backup-uri");
+    let source = Database::open(temporary.database("source.db")).expect("open source");
+    let target_path = temporary.database("existing.db");
+    let target = Database::open(&target_path).expect("open target");
+    target
+        .connect()
+        .expect("connect target")
+        .execute(
+            "INSERT INTO principals(id, display_name, created_at) VALUES ('sentinel', 'Sentinel', ?1)",
+            [NOW],
+        )
+        .expect("insert target sentinel");
+    drop(target);
+
+    let uri = PathBuf::from(format!("file:{}", target_path.display()));
+    let _ = source.backup_to(uri);
+
+    let target = Database::open(&target_path).expect("reopen target");
+    assert_eq!(
+        target
+            .connect_read_only()
+            .expect("read target")
+            .query_row(
+                "SELECT count(*) FROM principals WHERE id = 'sentinel'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("query target sentinel"),
+        1,
+        "URI-shaped destinations must not address another database"
+    );
+}
+
+#[test]
+fn concurrent_backups_atomically_claim_one_destination() {
+    let temporary = TempDir::new("backup-reservation");
+    let source =
+        Arc::new(Database::open(temporary.database("source.db")).expect("open source database"));
+    let destination = Arc::new(temporary.database("backup.db"));
+    let barrier = Arc::new(Barrier::new(2));
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let source = Arc::clone(&source);
+        let destination = Arc::clone(&destination);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            source.backup_to(destination.as_path())
+        }));
+    }
+
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().expect("backup thread"))
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(StorageError::BackupDestinationExists(_))))
+            .count(),
+        1
+    );
+    Database::verify_backup(destination.as_path()).expect("verify reserved destination");
 }
 
 #[test]
@@ -385,6 +485,43 @@ fn backup_failures_and_truncated_files_are_rejected() {
     let truncated = temporary.database("truncated.db");
     fs::write(&truncated, b"not a sqlite database").expect("write truncated backup");
     assert!(Database::verify_backup(&truncated).is_err());
+}
+
+#[test]
+fn failed_destination_verification_removes_the_owned_backup() {
+    let temporary = TempDir::new("backup-verification-cleanup");
+    let database = Database::open(temporary.database("journal.db")).expect("open database");
+    database
+        .connect()
+        .expect("connect")
+        .execute("DROP TABLE records_fts", [])
+        .expect("remove FTS table");
+
+    let destination = temporary.database("backup.db");
+    assert!(database.backup_to(&destination).is_err());
+    assert!(
+        !destination.exists(),
+        "an unverified backup must not remain at its final destination"
+    );
+
+    database
+        .connect()
+        .expect("connect")
+        .execute_batch(
+            "CREATE VIRTUAL TABLE records_fts USING fts5(
+                record_id UNINDEXED,
+                space_id UNINDEXED,
+                content,
+                author_principal_id UNINDEXED,
+                kind UNINDEXED,
+                run_id UNINDEXED,
+                tokenize = 'unicode61'
+            );",
+        )
+        .expect("restore FTS table");
+    database
+        .backup_to(&destination)
+        .expect("retry verified backup at the same destination");
 }
 
 #[test]

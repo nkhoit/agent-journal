@@ -1,11 +1,11 @@
 //! Synchronous SQLite connection, migration, transaction, and backup primitives.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::backup::Backup;
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
 pub const MIGRATION_VERSION: i64 = 1;
@@ -13,6 +13,7 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BACKUP_PAGES_PER_STEP: i32 = 128;
 const BACKUP_STEP_PAUSE: Duration = Duration::from_millis(5);
+const CONNECTION_RETRY_PAUSE: Duration = Duration::from_millis(5);
 const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_initial.sql");
 
 struct Migration {
@@ -45,6 +46,13 @@ pub enum StorageError {
         expected: String,
         actual: String,
     },
+    #[error("cannot {operation} {path}: {source}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("table {table} returned invalid row count {count}")]
     InvalidRowCount { table: &'static str, count: i64 },
     #[error("backup destination already exists: {0}")]
@@ -76,13 +84,19 @@ impl ConnectionFactory {
     }
 
     pub fn connect(&self) -> Result<Connection, StorageError> {
-        let connection = Connection::open(&self.path)?;
+        let path = absolute_path(&self.path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags)?;
         configure_connection(&connection, false)?;
         Ok(connection)
     }
 
     pub fn connect_read_only(&self) -> Result<Connection, StorageError> {
-        let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let path = absolute_path(&self.path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags)?;
         configure_connection(&connection, true)?;
         Ok(connection)
     }
@@ -147,27 +161,12 @@ impl Database {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<BackupVerification, StorageError> {
-        let destination = destination.as_ref();
-        if destination == self.path() {
-            return Err(StorageError::BackupDestinationIsSource);
-        }
-        if destination.exists() {
-            return Err(StorageError::BackupDestinationExists(
-                destination.to_owned(),
-            ));
-        }
-
-        let result = self.create_backup(destination);
-        if result.is_err() {
-            remove_sqlite_files(destination);
-        }
-        result?;
-        Self::verify_backup(destination)
-    }
-
-    fn create_backup(&self, destination: &Path) -> Result<(), StorageError> {
+        let destination = ReservedDestination::new(destination.as_ref(), self.path())?;
         let source = self.connect_read_only()?;
-        copy_database(&source, destination)
+        copy_database(&source, destination.path())?;
+        let verification = Self::verify_backup(destination.path())?;
+        destination.commit();
+        Ok(verification)
     }
 
     pub fn verify_backup(path: impl AsRef<Path>) -> Result<BackupVerification, StorageError> {
@@ -197,25 +196,14 @@ impl Database {
         backup: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<BackupVerification, StorageError> {
-        let backup = backup.as_ref();
-        let destination = destination.as_ref();
-        if backup == destination {
-            return Err(StorageError::BackupDestinationIsSource);
-        }
-        if destination.exists() {
-            return Err(StorageError::BackupDestinationExists(
-                destination.to_owned(),
-            ));
-        }
-
-        Self::verify_backup(backup)?;
-        let source = ConnectionFactory::new(backup).connect_read_only()?;
-        let result = copy_database(&source, destination);
-        if result.is_err() {
-            remove_sqlite_files(destination);
-        }
-        result?;
-        Self::verify_backup(destination)
+        let backup = absolute_path(backup.as_ref())?;
+        Self::verify_backup(&backup)?;
+        let destination = ReservedDestination::new(destination.as_ref(), &backup)?;
+        let source = ConnectionFactory::new(&backup).connect_read_only()?;
+        copy_database(&source, destination.path())?;
+        let verification = Self::verify_backup(destination.path())?;
+        destination.commit();
+        Ok(verification)
     }
 }
 
@@ -227,10 +215,72 @@ pub struct BackupVerification {
 }
 
 fn copy_database(source: &Connection, destination: &Path) -> Result<(), StorageError> {
-    let mut destination_connection = Connection::open(destination)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut destination_connection = Connection::open_with_flags(destination, flags)?;
     let backup = Backup::new(source, &mut destination_connection)?;
     backup.run_to_completion(BACKUP_PAGES_PER_STEP, BACKUP_STEP_PAUSE, None)?;
     Ok(())
+}
+
+struct ReservedDestination {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl ReservedDestination {
+    fn new(destination: &Path, source: &Path) -> Result<Self, StorageError> {
+        let destination = absolute_path(destination)?;
+        let source = absolute_path(source)?;
+        if destination == source {
+            return Err(StorageError::BackupDestinationIsSource);
+        }
+
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(file) => drop(file),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(StorageError::BackupDestinationExists(destination));
+            }
+            Err(source) => {
+                return Err(StorageError::Io {
+                    operation: "reserve backup destination",
+                    path: destination,
+                    source,
+                });
+            }
+        }
+        Ok(Self {
+            path: destination,
+            committed: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ReservedDestination {
+    fn drop(&mut self) {
+        if !self.committed {
+            remove_sqlite_files(&self.path);
+        }
+    }
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, StorageError> {
+    std::path::absolute(path).map_err(|source| StorageError::Io {
+        operation: "resolve database path",
+        path: path.to_owned(),
+        source,
+    })
 }
 
 fn configure_connection(connection: &Connection, read_only: bool) -> Result<(), StorageError> {
@@ -239,10 +289,28 @@ fn configure_connection(connection: &Connection, read_only: bool) -> Result<(), 
     if read_only {
         connection.pragma_update(None, "query_only", "ON")?;
     } else {
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        set_wal_mode(connection)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
     }
     verify_connection_policy(connection, read_only)
+}
+
+fn set_wal_mode(connection: &Connection) -> Result<(), StorageError> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match connection.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(CONNECTION_RETRY_PAUSE);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn verify_connection_policy(connection: &Connection, read_only: bool) -> Result<(), StorageError> {
@@ -290,7 +358,13 @@ fn verify_pragma_string(
 }
 
 fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
-    let versions = read_schema_versions(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|source| StorageError::Migration {
+            version: MIGRATION_VERSION,
+            source,
+        })?;
+    let versions = read_schema_versions(&transaction)?;
     validate_schema_versions(&versions)?;
     let current = versions.last().copied().unwrap_or(0);
 
@@ -298,26 +372,19 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
         .iter()
         .filter(|migration| migration.version > current)
     {
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|source| StorageError::Migration {
-                version: migration.version,
-                source,
-            })?;
         if let Err(source) = transaction.execute_batch(migration.sql) {
             return Err(StorageError::Migration {
                 version: migration.version,
                 source,
             });
         }
-        transaction
-            .commit()
-            .map_err(|source| StorageError::Migration {
-                version: migration.version,
-                source,
-            })?;
     }
-    Ok(())
+    transaction
+        .commit()
+        .map_err(|source| StorageError::Migration {
+            version: MIGRATION_VERSION,
+            source,
+        })
 }
 
 fn verify_schema(connection: &Connection) -> Result<(), StorageError> {
