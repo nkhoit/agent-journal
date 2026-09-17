@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SKIP = {".git", "bin", "dist"}
+SKIP = {".git", "bin", "dist", "target"}
 TEXT_SUFFIXES = {
-    ".go", ".md", ".yaml", ".yml", ".json", ".sql", ".toml", ".txt", ".mod", ".sum", ".sh", ".py"
+    ".rs", ".md", ".yaml", ".yml", ".json", ".sql", ".toml", ".lock", ".txt", ".sh", ".py"
 }
 TEXT_NAMES = {"Makefile"}
 PATTERNS = {
@@ -22,7 +22,11 @@ PATTERNS = {
 def main() -> int:
     violations: list[str] = []
     for path in Path(".").rglob("*"):
-        if not path.is_file() or (path.name not in TEXT_NAMES and path.suffix.lower() not in TEXT_SUFFIXES) or any(part in SKIP for part in path.parts):
+        if (
+            not path.is_file()
+            or (path.name not in TEXT_NAMES and path.suffix.lower() not in TEXT_SUFFIXES)
+            or any(part in SKIP for part in path.parts)
+        ):
             continue
         try:
             text = path.read_text(encoding="utf-8")

@@ -1,0 +1,17 @@
+[package]
+name = "journald"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "journald"
+path = "src/main.rs"
+
+[lints]
+workspace = true

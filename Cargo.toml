@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/journal-domain",
+    "crates/journal-protocol",
+    "crates/journal-storage-sqlite",
+    "crates/journal-service",
+    "crates/journal-client",
+    "crates/journal-adapter-core",
+    "crates/journal-adapter-spool",
+    "crates/journal-runtime-hermes",
+    "crates/journal-runtime-muse",
+    "crates/journald",
+    "crates/aj",
+    "crates/aj-admin",
+    "crates/journal-adapter-hermes",
+    "crates/journal-adapter-muse",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/nkhoit/agent-journal"
+
+[workspace.dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+thiserror = "=2.0.17"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

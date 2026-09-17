@@ -1,6 +1,6 @@
 # Implementation plan
 
-This plan turns the design into a buildable system without treating stubs or an HTTP 200 as evidence of delivery. Milestones are dependency ordered; each gate is required before the next milestone is accepted.
+This plan turns the design into a buildable Rust system without treating stubs or an HTTP 200 as evidence of delivery. Milestones are dependency ordered; each gate is required before the next milestone is accepted.
 
 ## M0 — Contract freeze and repository hygiene
 
@@ -11,10 +11,10 @@ Deliverables:
 - OpenAPI 3.1 contract and shared error/pagination schemas.
 - Published hard limits: 65,536 UTF-8 content bytes, 4,096 serialized telemetry-detail UTF-8 bytes, 32 relations, 16 attention recipients, 100 records/page, 20 claim items, 30-second long poll.
 - Delivery vocabulary: published, claimed, host-accepted, adapter-reported-runtime-accepted, and explicit failure states.
-- Client, adapter, and fake-runtime fixture formats.
+- Rust workspace metadata, pinned lockfile, client/adapter/fake-runtime fixture formats.
 - Public-safe scan and CI checks.
 
-**Acceptance gate:** OpenAPI parses with a standards-aware validator; all designed v1 endpoints are represented; every security class and error behavior is documented; fixtures contain no credentials or private identifiers; `gofmt`, `go test`, `go vet`, and hygiene checks are green.
+**Acceptance gate:** OpenAPI parses with a standards-aware validator; all designed v1 endpoints are represented; every security class and error behavior is documented; fixtures contain no credentials or private identifiers; Rust format, test, clippy, build, migration, contract, Markdown, and hygiene checks are green.
 
 ## M1 — SQLite policy and domain core
 
@@ -22,7 +22,7 @@ Deliverables:
 
 Deliverables:
 
-- Select and pin a maintained Go SQLite driver with tested FTS5 support.
+- Select and pin a maintained Rust SQLite driver with tested FTS5 support.
 - Implement connection setup: WAL, foreign keys, busy timeout, durable synchronous mode, and controlled pooling.
 - Apply numbered migrations, including immutable-record triggers, same-space relation checks, uniqueness constraints, mailbox attempt history, telemetry principal/host-custody triggers, and FTS5.
 - Implement typed domain validation and repository interfaces.
@@ -53,7 +53,7 @@ Deliverables:
 - Noninteractive `aj` commands with stable JSON output, bounded defaults, safe stdin/file body input, typed exit classes, and generated idempotency keys.
 - `aj enroll --ticket-file` exchange that atomically consumes a one-use ticket and writes separate protected principal and delivery credentials without printing secrets.
 - `aj doctor` protocol and local configuration checks.
-- Client fixtures shared with the server contract tests.
+- Client fixtures shared with the service contract tests.
 
 **Acceptance gate:** CLI output matches fixtures byte-for-byte where specified; no credential is placed in argv/stdout/logs; replay and ticket reuse fail safely; an enrolled client can perform only its principal scope; delivery credentials cannot append.
 
@@ -70,7 +70,7 @@ Deliverables:
 - Authenticated envelope renderer that separates trusted provenance from untrusted body.
 - Fake runtime and shared adapter conformance suite.
 
-- **Acceptance gate:** Crash tests cover every boundary in `docs/protocol.md`; no runtime injection occurs before idempotent custody confirmation; lease expiry preserves attempt ID while administrative requeue creates a new one; stale generations and wrong principals are rejected; unknown routes never fall back to default; resolved routes reach the runtime together with the envelope; duplicate injection is represented as possible.
+**Acceptance gate:** Crash tests cover every boundary in `docs/protocol.md`; no runtime injection occurs before idempotent custody confirmation; lease expiry preserves attempt ID while administrative requeue creates a new one; stale generations and wrong principals are rejected; unknown routes never fall back to default; resolved routes reach the runtime together with the envelope; duplicate injection is represented as possible.
 
 ## M5 — Runtime adapters (conditional canary gates)
 

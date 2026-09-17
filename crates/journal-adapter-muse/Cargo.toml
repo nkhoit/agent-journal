@@ -1,0 +1,20 @@
+[package]
+name = "journal-adapter-muse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+journal-runtime-muse = { path = "../journal-runtime-muse" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "journal-adapter-muse"
+path = "src/main.rs"
+
+[lints]
+workspace = true

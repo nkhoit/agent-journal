@@ -2,9 +2,9 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: public scaffold / implementation pending.**
+> **Status: public Rust scaffold / implementation pending.**
 >
-> This repository contains the reviewed product model, protocol contract, storage migration, package boundaries, adapter guidance, fixtures, and executable stubs. It does **not** yet provide a functioning server, CLI, enrollment flow, database driver, web UI, or runtime injection. Commands that are not implemented exit non-zero and say so explicitly. Hermes and Muse injection surfaces remain unresolved and require revalidation against supported runtime releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, SQLite migration, Rust crate boundaries, adapter guidance, fixtures, and executable stubs. It does **not** yet provide a functioning server, CLI protocol client, enrollment flow, database driver, web UI, or runtime injection. The binaries intentionally exit with status 2 and say so explicitly. Hermes and Muse injection surfaces remain unresolved and require revalidation against supported runtime releases.
 
 ## Product model
 
@@ -36,8 +36,8 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Product design and v1 decisions | Documented in `docs/design.md` |
 | OpenAPI 3.1 contract | Initial contract present; server/client parity is an implementation gate |
 | SQLite schema | Initial migration present; driver and transactional repositories are pending |
-| Go package boundaries and domain validation | Scaffolded and tested |
-| `journald`, `aj`, `aj-admin`, adapters | Explicit not-implemented stubs |
+| Rust domain, protocol, service, storage, adapter, and client boundaries | Scaffolded and tested without network or database implementations |
+| `journald`, `aj`, `aj-admin`, runtime adapters | Explicit not-implemented stubs; binaries exit 2 |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Backup/restore, crash, security, and live canaries | Planned acceptance work; not claimed by this repository |
@@ -60,54 +60,68 @@ private HTTPS / protected local Unix socket
   vendor runtime/session internals stay private
 ```
 
-The monorepo intentionally keeps central protocol types separate from adapter routing and runtime packages. There is no MCP server in v1, no `aj-enroll` binary, and no remote admin bearer-token fallback.
+The monorepo keeps central protocol types separate from adapter routing and runtime packages. There is no MCP server in v1, no `aj-enroll` binary, and no remote admin bearer-token fallback.
 
 ## Repository layout
 
 ```text
-api/                         OpenAPI and protocol fixtures
-cmd/                         journald, aj, aj-admin, and adapter entrypoints
-docs/                        design, protocol, security, operations, and plans
-internal/domain/              runtime-neutral domain types and validation
-internal/service/             service ports/use-case boundaries
-internal/storage/sqlite/      SQLite policy boundary and migration metadata
-internal/adapter/             adapter, spool, routing, and envelope boundaries
-internal/adapter/runtime/       unresolved Hermes/Muse runtime surfaces
-integrations/shared/           portable agent skill
+api/                         language-neutral OpenAPI and protocol fixtures
+crates/journal-domain/       constants, typed records, states, and validation
+crates/journal-protocol/     wire helpers and transport seam
+crates/journal-storage-sqlite/ SQLite policy and repository ports
+crates/journal-service/      service, authorization, mailbox, and clock ports
+crates/journal-client/       authenticated client seam without an HTTP stack
+crates/journal-adapter-core/ registration, heartbeat, custody, routing, envelope ports
+crates/journal-adapter-spool/ crash-recovery contract and pending store
+crates/journal-runtime-hermes/ unresolved Hermes runtime boundary
+crates/journal-runtime-muse/ unresolved Muse runtime boundary
+crates/journald/             not-implemented service binary
+crates/aj/                   not-implemented principal CLI binary
+crates/aj-admin/             not-implemented protected-admin CLI binary
+crates/journal-adapter-hermes/ not-implemented Hermes adapter binary
+crates/journal-adapter-muse/ not-implemented Muse adapter binary
 migrations/                  numbered SQLite migrations
-conformance/                 adapter/client/fake-runtime test-plan fixtures
-config/examples/              generic, non-secret configuration
+conformance/                 adapter, client, and fake-runtime fixtures
+config/examples/             generic, non-secret configuration
+integrations/shared/         portable agent skill
+scripts/                     OpenAPI and public-hygiene checks
 .github/                     CI and issue templates
+docs/                        design, protocol, security, operations, and plans
 ```
 
 ## Build and test
 
-Requirements: Go 1.22 or newer. The scaffold has no third-party Go dependencies.
+Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. The workspace uses edition 2024 and only three pinned Rust dependencies: `serde`, `serde_json`, and `thiserror`. `Cargo.lock` is checked in for reproducible scaffold builds. No async runtime, HTTP framework, SQLite driver, or `async-trait` is selected yet because no scaffold path exercises one.
 
 ```bash
-make fmt-check
-make test
-make vet
+cargo fmt --all -- --check
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo build --locked --workspace
+python3 tests/migration_contract_test.py
+python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs formatting verification, Go tests, the stdlib-only SQLite migration contract tests, vet, the deterministic OpenAPI structural/reference check, Markdown checks when available, and repository hygiene scans. It does not claim standards-compliant OpenAPI linting unless `OPENAPI_STANDARDS_LINT=1` is set with the pinned Redocly CLI installed. CI runs that structural check plus `@redocly/cli@1.34.3`. The commands are intentionally safe to run without credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates, the migration contract, the deterministic OpenAPI structural/reference check, optional pinned Redocly standards lint, Markdown checks when available, and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands are safe to run without credentials.
 
 The current binaries are compile checks, not services:
 
 ```bash
-go build ./...
-go build -o /tmp/journald-scaffold ./cmd/journald
-/tmp/journald-scaffold        # built binary exits 2: not implemented
-go run ./cmd/journald          # go's wrapper exits 1 and reports the program's "exit status 2"
+cargo build --locked --workspace --bins
+./target/debug/journald       # prints not implemented; exits 2
+./target/debug/aj             # prints not implemented; exits 2
+./target/debug/aj-admin       # prints not implemented; exits 2
 ```
+
+The runtime-specific adapter binaries also exit 2. A non-zero stub is deliberate: no runtime integration is claimed.
 
 ## Implementation sequence
 
 1. Freeze the OpenAPI schemas, error vocabulary, limits, and conformance fixtures.
-2. Implement SQLite connection policy, numbered migrations, transactional repositories, and typed authorization.
-3. Implement `journald` HTTP handlers, request IDs, bounded pagination/search, idempotency, and protected admin socket.
-4. Implement `aj` and `aj enroll` against the same typed client and fixtures; add crash/ACL/security tests.
+2. Implement the Rust SQLite connection policy, numbered migrations, transactional repositories, and typed authorization.
+3. Implement `journald` HTTP handlers, request IDs, bounded pagination/search, idempotency, and the protected admin socket.
+4. Implement `aj` and `aj enroll` against the same typed client and fixtures; add crash, ACL, and security tests.
 5. Implement the generic adapter core and local spool; prove custody semantics with a fake runtime.
 6. Revalidate Muse and Hermes runtime injection surfaces on supported releases; implement adapters only after their canary gates pass.
 7. Add safe read-only web views, operations/backup tooling, and migration evidence.

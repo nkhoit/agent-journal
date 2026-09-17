@@ -8,7 +8,7 @@ An adapter is a destination-host process, not a second journal implementation. I
 principal mailbox → durable local custody → local route → runtime injection
 ```
 
-Implement the shared adapter interfaces under `internal/adapter/core` and use the protocol fixtures under `conformance/`. The adapter must:
+Implement the shared ports in `crates/journal-adapter-core` and the durable contract in `crates/journal-adapter-spool`; use the protocol fixtures under `conformance/`. The adapter must:
 
 1. use a delivery-only credential bound to one principal and adapter identity;
 2. register a persistent random installation ID and renew its fencing generation with heartbeat;
@@ -20,16 +20,18 @@ Implement the shared adapter interfaces under `internal/adapter/core` and use th
 8. enumerate recoverable spool rows after restart, including pending custody and non-terminal injection states;
 9. deduplicate ordinary retries by `attempt_id` and retain `mailbox_item_id` and `record_id`;
 10. recheck registration/fencing before every new runtime injection;
-11. resolve only configured `(space, routing_key)` keys to private local targets, then pass the resolved `Route` together with the trusted `Envelope` to `Runtime.Inject`;
+11. resolve only configured `(space, routing_key)` keys to private local targets, then pass the resolved `Route` together with the trusted `Envelope` to `Runtime::inject`;
 12. hold `route-unavailable` items for explicit operator action instead of silently using the default;
 13. render trusted envelope metadata separately from the untrusted body;
-14. report bounded non-secret runtime telemetry only after exact host acceptance; detail is compact serialized JSON of at most 4096 UTF-8 bytes;
+14. report bounded non-secret runtime telemetry only after exact host acceptance; detail is compact serialized JSON of at most 4,096 UTF-8 bytes;
 15. use a separate principal-client credential for optional correlated replies;
 16. stop or back off on expiry, fencing, revocation, runtime failure, or local pressure.
 
 ## Local state
 
-A minimal durable spool has `inbound_attempts`, `route_bindings`, and `adapter_meta`. Each inbound row persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `Put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `Recoverable` returns unfinished rows after restart; accepted and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
+A minimal durable spool has `inbound_attempts`, `route_bindings`, and `adapter_meta`. Each inbound row persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `recoverable` returns unfinished rows after restart; accepted and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
+
+`journal-adapter-spool` currently exposes this contract and a `NotImplementedStore`; it does not claim durable storage. The future implementation must fsync the full row before host-custody commit and prove recovery with crash tests.
 
 ## Configuration shape
 

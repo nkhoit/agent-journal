@@ -14,18 +14,21 @@ Thanks for helping make Agent Journal small, inspectable, and safe.
 ```bash
 make fmt
 make test
-make vet
+make clippy
 make check
 ```
 
-Go code must pass `gofmt`, `go test ./...`, and `go vet ./...`. `make check` also runs the stdlib-only migration contract and deterministic OpenAPI structural/reference check. CI installs pinned structural-check dependencies and runs pinned Redocly standards lint; local standards lint is optional via `OPENAPI_STANDARDS_LINT=1`. Keep tests deterministic and avoid credentials.
+Rust code must pass `cargo fmt --all -- --check`, `cargo test --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, and `cargo build --locked --workspace`. `make check` also runs the stdlib-only migration contract, deterministic OpenAPI structural/reference check, optional pinned Redocly lint, Markdown checks, and public-hygiene scan. Keep tests deterministic and avoid credentials.
+
+The workspace deliberately has no async runtime, HTTP framework, SQLite driver, or `async-trait` dependency yet. Add a dependency only with an exercised use case, a pinned version, and a documentation update explaining the choice. Do not add `tokio`, `axum`, or `rusqlite` merely to fill a boundary.
 
 ## Change expectations
 
 - Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.
 - Make idempotency, authorization, limits, and failure states visible in types and tests.
-- Keep not-implemented areas honest. A stub is preferable to an unverified integration that claims delivery.
+- Keep not-implemented areas honest. A status-2 stub is preferable to an unverified integration that claims delivery.
 - Treat record content as inert untrusted data. Never interpolate it into shell commands or runtime authority.
+- Preserve custody-before-injection ordering and fail closed on unknown routes.
 - Update `docs/implementation-plan.md` when a dependency or acceptance gate changes.
 
 ## Pull requests
@@ -34,4 +37,4 @@ Describe the behavior, public API/schema impact, migration impact, security cons
 
 ## Commit and release hygiene
 
-Do not commit secrets or local state. Release artifacts must be reproducible and carry protocol/schema versions and checksums. Deployment-local configuration belongs outside the public repository.
+Do not commit secrets or local state. Release artifacts must be reproducible and carry protocol/schema versions and checksums. Deployment-local configuration belongs outside the public repository. Do not commit changes to `Cargo.lock` without explaining dependency or toolchain impact.

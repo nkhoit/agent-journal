@@ -2,9 +2,9 @@
 
 ## Scope and current status
 
-Agent Journal is a public implementation scaffold. The repository does not yet ship a functioning service or supported runtime adapter. Do not send credentials, enrollment tickets, private topology, production logs, or sensitive journal content in an issue.
+Agent Journal is a public Rust implementation scaffold. The repository does not yet ship a functioning service, authenticated client, or supported runtime adapter. Do not send credentials, enrollment tickets, private topology, production logs, or sensitive journal content in an issue.
 
-The intended security boundary is documented in [`docs/security-model.md`](docs/security-model.md): separate principal-client and delivery-adapter credentials, default-deny space ACLs, protected local admin socket, immutable records, and explicit untrusted-content handling.
+The intended security boundary is documented in [`docs/security-model.md`](docs/security-model.md): separate principal-client and delivery-adapter credentials, default-deny space ACLs, protected local admin socket, immutable records, and explicit untrusted-content handling. Rust crate boundaries are scaffolding, not evidence that those controls are implemented.
 
 ## Reporting a vulnerability
 
@@ -25,5 +25,6 @@ A maintainer should acknowledge reports within seven days and will coordinate di
 - Use separate credentials for principal API access and adapter delivery.
 - Preserve honest delivery states; never represent runtime acceptance as model observation or completion.
 - Add an authorization and redaction test for every new endpoint or output field.
+- Keep `Cargo.lock` reviewed and dependencies pinned; do not add network-only local gates that are not exercised by the implementation.
 
 The project is not ready for production security claims until the acceptance gates in `docs/implementation-plan.md` pass against a real deployment.

@@ -62,7 +62,7 @@ CREATE TABLE records (
     author_principal_id TEXT NOT NULL REFERENCES principals(id),
     kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 128),
     content TEXT NOT NULL CHECK (length(CAST(content AS BLOB)) BETWEEN 1 AND 65536),
-    run_id TEXT,
+    run_id TEXT CHECK (run_id IS NULL OR length(run_id) <= 128),
     routing_key TEXT,
     created_at TEXT NOT NULL,
     source_system TEXT,
@@ -290,6 +290,27 @@ CREATE TABLE delivery_events (
     FOREIGN KEY (adapter_id, instance_id, generation)
         REFERENCES adapter_registrations(adapter_id, instance_id, generation)
 );
+
+-- SQLite CHECK constraints cannot contain subqueries. Enforce the remaining
+-- OpenAPI object-shape limits with a trigger over json_each: no more than 32
+-- properties, bounded nonempty keys, and string values of at most 1024
+-- characters. The table CHECK above separately enforces valid object JSON and
+-- the normative compact serialized UTF-8 byte ceiling.
+CREATE TRIGGER delivery_event_detail_shape
+BEFORE INSERT ON delivery_events
+WHEN NEW.detail_json IS NOT NULL AND (
+    (SELECT count(*) FROM json_each(NEW.detail_json)) > 32 OR
+    EXISTS (
+        SELECT 1
+        FROM json_each(NEW.detail_json)
+        WHERE length(key) NOT BETWEEN 1 AND 128
+           OR type <> 'text'
+           OR length(value) > 1024
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'delivery event detail shape invalid');
+END;
 
 -- Telemetry is accepted only from the active registration whose authenticated
 -- principal is the mailbox recipient. The attempt must already have crossed

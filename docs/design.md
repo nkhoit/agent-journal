@@ -998,7 +998,7 @@ SQLite configuration:
 
 SQLite remains on service-host-local persistent storage, never SMB/NFS. The HTTP service is the only database writer.
 
-The pilot target is fewer than 10,000 records/day, fewer than 50 concurrent clients, and a database below 10 GiB. The selected Go driver must be built and tested with FTS5. The service deliberately configures its connection pool, serializes write transactions where needed, keeps long polls outside transactions, and acceptance-tests WAL growth, checkpoints, online backup, concurrent search/append/claim load, and disk-full behavior. Exceeding these bounds triggers measurement and a PostgreSQL reassessment rather than adding a broker.
+The pilot target is fewer than 10,000 records/day, fewer than 50 concurrent clients, and a database below 10 GiB. The future Rust SQLite driver must be built and tested with FTS5. The service deliberately configures its connection pool, serializes write transactions where needed, keeps long polls outside transactions, and acceptance-tests WAL growth, checkpoints, online backup, concurrent search/append/claim load, and disk-full behavior. Exceeding these bounds triggers measurement and a PostgreSQL reassessment rather than adding a broker.
 
 ---
 
@@ -1006,25 +1006,19 @@ The pilot target is fewer than 10,000 records/day, fewer than 50 concurrent clie
 
 ### 12.1 Central service
 
-Preferred implementation: **Go**.
+Preferred implementation: **Rust**.
 
 Reasons:
 
 - one static or nearly static service binary;
-- strong concurrency and HTTP support without a framework;
+- strong concurrency and HTTP support with explicit dependencies;
 - straightforward bounded long polling;
 - embedded migrations and assets;
 - low memory footprint;
 - easy cross-compilation and containerization;
 - small dependency and supply-chain surface.
 
-Dependencies should be limited to:
-
-- Go standard library HTTP server;
-- a maintained SQLite driver with FTS5 support;
-- UUIDv7 generation if not provided by the selected library;
-- structured logging;
-- an optional tiny metrics exporter.
+The scaffold intentionally starts with only pinned `serde`, `serde_json`, and `thiserror`. The implementation may add a maintained SQLite driver, HTTP stack, UUID generation, structured logging, or metrics only when exercised by a concrete milestone and documented in `Cargo.toml` and the implementation plan.
 
 Do not add Redis, NATS, RabbitMQ, a search service, or an ORM. Use explicit SQL and embedded numbered migrations.
 
@@ -1050,48 +1044,35 @@ Version 1 uses one public monorepo so the server, CLI, adapters, migrations, and
 
 ```text
 agent-journal/
+├── Cargo.toml                 workspace metadata and pinned shared dependencies
+├── Cargo.lock                 checked-in reproducible dependency resolution
+├── crates/
+│   ├── journal-domain/        runtime-neutral types, constants, and validation
+│   ├── journal-protocol/      language-neutral wire helpers and transport seam
+│   ├── journal-storage-sqlite/ SQLite policy and repository ports
+│   ├── journal-service/       service, authorization, mailbox, and clock ports
+│   ├── journal-client/        authenticated client seam
+│   ├── journal-adapter-core/  registration, custody, routing, and envelope ports
+│   ├── journal-adapter-spool/ crash-recovery contract and pending store
+│   ├── journal-runtime-hermes/ unresolved Hermes runtime boundary
+│   ├── journal-runtime-muse/  unresolved Muse runtime boundary
+│   ├── journald/              service stub binary
+│   ├── aj/                    principal CLI stub binary
+│   ├── aj-admin/              protected-admin CLI stub binary
+│   ├── journal-adapter-hermes/ Hermes adapter stub binary
+│   └── journal-adapter-muse/ Muse adapter stub binary
 ├── api/
-│   ├── openapi.yaml
-│   └── fixtures/
-├── cmd/
-│   ├── journald/
-│   ├── aj/
-│   ├── aj-admin/
-│   ├── journal-adapter-hermes/
-│   └── journal-adapter-muse/
-├── internal/
-│   ├── domain/
-│   ├── service/
-│   ├── storage/sqlite/
-│   ├── httpapi/
-│   ├── adminapi/
-│   ├── journalclient/
-│   ├── adapter/
-│   │   ├── core/
-│   │   ├── spool/
-│   │   ├── routing/
-│   │   └── envelope/
-│   └── runtime/
-│       ├── hermes/
-│       └── muse/
-├── integrations/
-│   ├── shared/agent-journal/SKILL.md
-│   ├── hermes/
-│   └── muse/
+│   └── openapi.yaml           language-neutral contract
+├── integrations/shared/agent-journal/SKILL.md
 ├── conformance/
 │   ├── adapter/
 │   ├── client/
 │   └── fake-runtime/
 ├── migrations/
-├── packaging/
-├── web/
+├── config/examples/
 ├── docs/
 └── tests/
-    ├── integration/
-    ├── crash/
-    ├── security/
-    ├── restore/
-    └── e2e/
+    └── migration_contract_test.py
 ```
 
 There is no `aj-enroll` binary and no `journal-mcp` binary in version 1. Enrollment is an `aj` subcommand; runtime instructions live in skills or narrow wrappers. Adapters may later become separate modules or repositories if runtime constraints require it, but all consume the versioned OpenAPI contract and conformance fixtures.

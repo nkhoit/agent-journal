@@ -2,7 +2,7 @@
 """Executable SQLite contract checks for the public migration.
 
 This deliberately uses only Python's stdlib sqlite3 so the migration contract is
-checked in CI without selecting or hiding behind a Go SQLite driver.
+checked in CI without selecting or hiding behind a Rust SQLite driver.
 """
 from __future__ import annotations
 
@@ -23,14 +23,21 @@ def expect_integrity(connection: sqlite3.Connection, sql: str, parameters: tuple
     raise AssertionError(f"integrity constraint did not reject: {sql}")
 
 
-def make_record(connection: sqlite3.Connection, record_id: str, space: str, seq: int, content: str = "content") -> None:
+def make_record(
+    connection: sqlite3.Connection,
+    record_id: str,
+    space: str,
+    seq: int,
+    content: str = "content",
+    run_id: str | None = None,
+) -> None:
     connection.execute(
         """
         INSERT INTO records(
-            id, space_id, space_seq, author_principal_id, kind, content, created_at
-        ) VALUES (?, ?, ?, 'p1', 'message', ?, ?)
+            id, space_id, space_seq, author_principal_id, kind, content, run_id, created_at
+        ) VALUES (?, ?, ?, 'p1', 'message', ?, ?, ?)
         """,
-        (record_id, space, seq, content, NOW),
+        (record_id, space, seq, content, run_id, NOW),
     )
 
 
@@ -52,6 +59,14 @@ def main() -> None:
     make_record(connection, "rel-target", "s1", 1)
     make_record(connection, "rel-source", "s1", 2)
     make_record(connection, "other-space", "s2", 1)
+
+    # Optional run attribution follows the public 128-character wire bound.
+    make_record(connection, "run-id-exact-limit", "s1", 3, run_id="r" * 128)
+    expect_integrity(
+        connection,
+        "INSERT INTO records(id, space_id, space_seq, author_principal_id, kind, content, run_id, created_at) VALUES ('run-id-too-long', 's1', 4, 'p1', 'message', 'content', ?, ?)",
+        ("r" * 129, NOW),
+    )
     exact_types = ("reply-to", "supersedes", "tombstones", "refers-to", "acknowledges")
     for relation_type in exact_types:
         connection.execute(
@@ -291,6 +306,17 @@ def main() -> None:
         "INSERT INTO delivery_events(event_id, mailbox_item_id, attempt_id, adapter_id, instance_id, generation, state, detail_json, occurred_at, received_at) VALUES ('event-detail-too-large', 'item-detail-limit', 'initial-item-detail-limit', 'adapter-1', 'install-1', 1, 'adapter-reported-runtime-accepted', ?, ?, ?)",
         (oversized_detail, NOW, NOW),
     )
+    for event_id, invalid_detail in (
+        ("event-detail-too-many-properties", json.dumps({f"k{i}": "v" for i in range(33)})),
+        ("event-detail-key-too-long", json.dumps({"k" * 129: "v"})),
+        ("event-detail-value-too-long", json.dumps({"message": "v" * 1025})),
+        ("event-detail-value-not-string", json.dumps({"count": 1})),
+    ):
+        expect_integrity(
+            connection,
+            "INSERT INTO delivery_events(event_id, mailbox_item_id, attempt_id, adapter_id, instance_id, generation, state, detail_json, occurred_at, received_at) VALUES (?, 'item-detail-limit', 'initial-item-detail-limit', 'adapter-1', 'install-1', 1, 'adapter-reported-retryable-failure', ?, ?, ?)",
+            (event_id, invalid_detail, NOW, NOW),
+        )
 
     # Ticket storage is hash-only, bound to the adapter's principal, and one-use.
     ticket_columns = {row[1] for row in connection.execute("PRAGMA table_info(enrollment_tickets)")}

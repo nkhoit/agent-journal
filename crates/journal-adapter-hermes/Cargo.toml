@@ -1,0 +1,20 @@
+[package]
+name = "journal-adapter-hermes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+journal-runtime-hermes = { path = "../journal-runtime-hermes" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "journal-adapter-hermes"
+path = "src/main.rs"
+
+[lints]
+workspace = true
