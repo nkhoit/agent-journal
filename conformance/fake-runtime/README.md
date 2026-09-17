@@ -10,4 +10,4 @@ Required assertions:
 4. It receives the adapter's resolved private route together with the envelope, never the route allowlist/configuration, central credentials, or portable routing key as a destination.
 5. Tests can inspect the adapter's reported state without calling a real runtime.
 
-A fake-runtime implementation is not included in this scaffold; adding one is an M4 deliverable.
+A fake-runtime implementation is not included in this scaffold; adding one is an S11 deliverable.

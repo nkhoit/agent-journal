@@ -1,114 +1,471 @@
-# Implementation plan
+# Incremental implementation plan
 
-This plan turns the design into a buildable Rust system without treating stubs or an HTTP 200 as evidence of delivery. Milestones are dependency ordered; each gate is required before the next milestone is accepted.
+This plan turns the reviewed Rust scaffold into a working Agent Journal through small, independently testable vertical slices. A slice is complete only when its behavior, negative cases, and recovery boundaries are exercised. Compilation, an HTTP `200`, or a stub test is never feature evidence.
 
-## M0 — Contract freeze and repository hygiene
+## Working rules
 
-**Depends on:** none.
+- Keep the system boring: concrete structs, explicit SQLite transactions, narrow traits at real process or storage boundaries, and no generic framework layer.
+- Add a dependency only in the slice that exercises it. Pin it, update `Cargo.lock`, and document why it exists.
+- Keep synchronous `rusqlite` repositories explicit. From async handlers, run database work in bounded blocking tasks. Long-poll waits must not occupy a database transaction or blocking-worker permit.
+- Build public and administrative routers separately. The private HTTPS listener must not register administrative routes; `aj-admin` uses only the protected Unix socket.
+- Derive principal, adapter, and installation authority from authenticated server context. Never accept those identities from ordinary JSON bodies.
+- Use deterministic failpoints and fake clocks. Do not make tests depend on long sleeps or timing luck.
+- Land the typed client method and CLI command with the endpoint family it consumes; do not defer all client work to the end.
+- Keep runtime-specific adapters unresolved until the durable spool and fake-runtime conformance suite pass.
+- Preserve the current non-goals: no MCP, broker, PostgreSQL, federation, task engine, artifact store, or exactly-once runtime claim in v1.
 
-Deliverables:
+## Dependency graph
 
-- OpenAPI 3.1 contract and shared error/pagination schemas.
-- Published hard limits: 65,536 UTF-8 content bytes, 4,096 serialized telemetry-detail UTF-8 bytes, 32 relations, 16 attention recipients, 100 records/page, 20 claim items, 30-second long poll.
-- Delivery vocabulary: published, claimed, host-accepted, adapter-reported-runtime-accepted, and explicit failure states.
-- Rust workspace metadata, pinned lockfile, client/adapter/fake-runtime fixture formats.
-- Public-safe scan and CI checks.
+```text
+S0 contract gate
+ └─ S1 domain + wire kernel
+     └─ S2 SQLite kernel
+         └─ S3 runnable service shell
+             └─ S4 admin + auth + enrollment
+                 └─ S5 append/read/list vertical
+                     ├─ S6 relations/search/thread
+                     └─ S7 registration/claim/lease
+                         └─ S8 custody/telemetry/requeue
+                             ├─ S9 durable adapter spool
+                             │   └─ S10 adapter orchestration
+                             │       └─ S11 fake-runtime conformance
+                             └─ S12 operations + read-only web
 
-**Acceptance gate:** OpenAPI parses with a standards-aware validator; all designed v1 endpoints are represented; every security class and error behavior is documented; fixtures contain no credentials or private identifiers; Rust format, test, clippy, build, migration, contract, Markdown, and hygiene checks are green.
+Hermes and Muse are separate conditional canaries after S11.
+```
 
-## M1 — SQLite policy and domain core
+Every slice should be one reviewable PR unless its acceptance gate cannot be demonstrated without two tightly coupled changes.
 
-**Depends on:** M0.
+## S0 — Executable contract gate
 
-Deliverables:
+**Goal:** make protocol drift fail before implementation code lands.
 
-- Select and pin a maintained Rust SQLite driver with tested FTS5 support.
-- Implement connection setup: WAL, foreign keys, busy timeout, durable synchronous mode, and controlled pooling.
-- Apply numbered migrations, including immutable-record triggers, same-space relation checks, uniqueness constraints, mailbox attempt history, telemetry principal/host-custody triggers, and FTS5.
-- Implement typed domain validation and repository interfaces.
-- Add transaction tests for sequence allocation, atomic record-plus-mailbox creation, idempotency, relations, and ACL predicates.
+### Build
 
-**Acceptance gate:** A temporary SQLite database survives concurrent append/search/claim tests; no successful append can exist without all requested mailbox obligations; duplicate idempotency payloads replay and mismatches conflict; invalid/cross-space/inaccessible relations fail without leakage; FTS5 is built and ACL filtering occurs before snippets/counts leave storage.
+- Parse the OpenAPI document and every client/adapter conformance fixture.
+- Map fixtures to OpenAPI operation IDs and report uncovered operations explicitly.
+- Assert hard limits, security class, idempotency requirements, request identity sources, and required response fields.
+- Assert that public routes contain no remote-admin authorization scheme and ordinary append contains no import provenance.
+- Preserve the public-hygiene scanner and fake identifiers.
 
-## M2 — `journald` HTTP service
+### Test
 
-**Depends on:** M1.
+- Existing structural OpenAPI check and pinned Redocly lint.
+- Fixture parser and operation-coverage tests.
+- Mutation tests proving failure for a removed path, broken `$ref`, missing security declaration, public admin route, or private identifier.
 
-Deliverables:
+### Accept when
 
-- Versioned JSON handlers for all principal, record, search, mailbox, adapter, event, health, and admin paths in `api/openapi.yaml`.
-- Request IDs, structured errors, bounded cursors, body limits, rate/capacity refusal, and bounded long polling outside transactions.
-- Separate principal-client, delivery-adapter, and service-admin authentication/authorization.
-- Admin mutations on a protected local Unix socket only.
-- SQLite online backup and restore tooling with recovery fencing.
+- CI reports the expected 27 paths and 29 operations plus fixture coverage.
+- Failure mutations fail deterministically.
+- All binaries remain honest not-implemented stubs.
 
-**Acceptance gate:** Black-box HTTP tests pass for every path and credential class; unauthorized resource probing has non-leaking 404 behavior; admin paths are unreachable on the private HTTPS listener; sequence pagination is deterministic; ranked search is explicitly best-effort; delivery-status tests prove recipient-only versus author-all visibility; backup/restore and disk-pressure tests pass.
+## S1 — Domain, wire, canonicalization, and cursors
 
-## M3 — `aj` and enrollment
+**Goal:** create one typed interpretation of the public protocol before handlers or repositories duplicate it.
 
-**Depends on:** M2.
+### Build
 
-Deliverables:
+- Complete request/response DTOs for append, record reads, pages, search, errors, claims, commits, telemetry, and enrollment.
+- Keep path values, transport headers, authentication context, and JSON body fields in separate types.
+- Implement duplicate-JSON-key rejection before deserialization.
+- Implement canonical append encoding for idempotency comparison. Normalize only fields explicitly defined as sets; do not normalize identifiers, tokens, content, or ordered relations.
+- Implement signed or MACed opaque cursor payloads containing route, filter fingerprint, ordering mode, and last key. Cursor parsing must be bounded and versioned.
+- Preserve required response fields even when arrays are empty or values are null.
 
-- Noninteractive `aj` commands with stable JSON output, bounded defaults, safe stdin/file body input, typed exit classes, and generated idempotency keys.
-- `aj enroll --ticket-file` exchange that atomically consumes a one-use ticket and writes separate protected principal and delivery credentials without printing secrets.
-- `aj doctor` protocol and local configuration checks.
-- Client fixtures shared with the service contract tests.
+### Test
 
-**Acceptance gate:** CLI output matches fixtures byte-for-byte where specified; no credential is placed in argv/stdout/logs; replay and ticket reuse fail safely; an enrolled client can perform only its principal scope; delivery credentials cannot append.
+- Table-driven serialization tests against OpenAPI examples.
+- Required-field deletion tests for every response DTO.
+- Unknown-field, duplicate-key, null-versus-omitted, UTF-8 byte-limit, enum, and one-over-limit tests.
+- Canonicalization tests for equivalent and conflicting idempotency payloads.
+- Cursor tamper, truncation, wrong-route, wrong-filter, wrong-order, and valid-continuation tests.
 
-## M4 — Generic adapter core and fake runtime
+### Accept when
 
-**Depends on:** M2; M3 for correlated reply client behavior.
+- Handlers and repositories never need to parse ad hoc JSON.
+- One canonical byte representation determines idempotency equality.
+- Every required wire field has positive and missing-field tests.
 
-Deliverables:
+## S2 — SQLite kernel and recovery primitives
 
-- Adapter registration/heartbeat/fencing state machine.
-- Machine-local process lock and durable adapter SQLite spool that persists claim ID, instance/generation, custody confirmation, injection lifecycle, receipts, and recoverable rows.
-- Claim → local durable write → host-custody commit → resolved-route injection ordering.
-- Attempt deduplication, lease expiry, explicit requeue, route allowlists, disk/item/byte backpressure, and bounded retry.
-- Authenticated envelope renderer that separates trusted provenance from untrusted body.
-- Fake runtime and shared adapter conformance suite.
+**Goal:** replace the storage placeholder with a real, synchronous SQLite foundation.
 
-**Acceptance gate:** Crash tests cover every boundary in `docs/protocol.md`; no runtime injection occurs before idempotent custody confirmation; lease expiry preserves attempt ID while administrative requeue creates a new one; stale generations and wrong principals are rejected; unknown routes never fall back to default; resolved routes reach the runtime together with the envelope; duplicate injection is represented as possible.
+### Build
 
-## M5 — Runtime adapters (conditional canary gates)
+- Add pinned `rusqlite` with only exercised features, including bundled SQLite/FTS5 and online backup support.
+- Implement database open, numbered migration application, schema-version checks, and explicit transaction helpers.
+- Apply and verify `foreign_keys=ON`, WAL, `synchronous=FULL`, and a bounded busy timeout on every connection.
+- Add a connection factory suitable for bounded `spawn_blocking` calls. Do not add a pool until measurements justify one.
+- Implement backup creation and isolated restore/open verification; service-level restore fencing comes later.
 
-**Depends on:** M4.
+### Test
 
-Deliverables:
+- Keep the stdlib Python migration contract as an independent implementation.
+- Add Rust integration tests using temporary on-disk databases.
+- Probe actual pragmas, tables, indexes, triggers, immutable-record guards, and FTS5 search.
+- Test migration rollback/retry, busy timeout, read-only paths, backup failure, truncated backup, and schema mismatch.
+- Run concurrent reader/writer smoke tests.
 
-- Revalidated Hermes injection implementation for a supported persistent-session surface.
-- Revalidated Muse hook/helper and `chat.send_message` implementation for a supported release.
-- Local route configuration containing opaque runtime targets only on destination hosts.
-- Separate principal-client credentials for replies and delivery credentials for mailbox access.
+### Accept when
 
-**Acceptance gate:** Each runtime passes fake-runtime conformance and a live Alpha → Journal → Beta → correlated reply canary. Evidence must identify host custody and the strongest runtime acceptance receipt without claiming read/understood/completed. If the runtime surface cannot be revalidated, the adapter remains not implemented and the release gate stays closed.
+- Rust can create, migrate, query, back up, restore, and FTS-search a real database.
+- A failed migration leaves no partially advanced schema version.
+- No tested storage path uses `NotImplementedStore` or a fake success.
 
-## M6 — Safe read-only web view and operations
+## S3 — Runnable `journald` shell and listener isolation
 
-**Depends on:** M2; M5 for delivery summaries only if runtime telemetry is available.
+**Goal:** produce the first real process without pretending the product API is implemented.
 
-Deliverables:
+### Build
 
-- Stable record URLs, timeline, search, thread projection, and authorized delivery summaries.
-- Markdown/raw HTML/unsafe URL sanitization and restrictive CSP.
-- Backup, restore, monitoring, capacity, and incident runbooks.
+- Add pinned `tokio`, `axum`, and `tower` only now.
+- Construct two independent routers: a private application router and a protected local Unix-socket administrative router.
+- Implement graceful startup/shutdown, structured tracing, request IDs, bounded JSON bodies, common error envelopes, `/health/live`, and `/health/ready`.
+- Readiness checks database availability and schema compatibility.
+- Run every SQLite operation through a bounded blocking executor; waiting requests fail with explicit capacity errors rather than creating unbounded tasks.
 
-**Acceptance gate:** Browser and API security tests show no active HTML, unsafe scheme, external-image, snippet, or forged-envelope execution/leak; restored data passes counts, hashes, ACL, sequence, search, mailbox, and registration checks.
+### Test
 
-## M7 — Migration and burn-in
+- Router tests without a network where practical.
+- Black-box subprocess tests over loopback and a temporary Unix socket.
+- Assert the public router returns non-leaking `404` for every admin path.
+- Test unavailable database, incompatible schema, oversized body, malformed JSON, occupied/inaccessible socket, client disconnect, and graceful shutdown.
 
-**Depends on:** M2, M3, M5, M6.
+### Accept when
 
-Deliverables:
+- `journald` starts, reports liveness/readiness honestly, and exits cleanly.
+- Admin routes are absent—not merely middleware-protected—on the public listener.
+- Long-running or blocked database work cannot grow without a configured bound.
 
-- Future protected-admin import design only; ordinary append has no provenance fields and v1 exposes no import endpoint.
-- Read-only comparison, bounded final delta, cutover, and rollback evidence for any separately approved migration.
-- Monitored burn-in with the source system recoverable but not dual-written indefinitely.
+## S4 — Protected administration, authentication, and enrollment
 
-**Acceptance gate:** Count/hash/ACL/relation/search samples and delivery canaries pass; operational owners sign the recovery and rollback procedure; no private migration export enters the public repository.
+**Goal:** create the security bootstrap needed to test every later endpoint honestly.
 
-## Explicit non-gates
+### Build
 
-No milestone may claim exactly-once runtime injection, model observation, task completion, or action authorization. MCP, artifacts, failover/fanout, PostgreSQL/HA, and federation remain post-v1 options requiring separate demand and design review.
+- Add high-entropy token generation and SHA-256 token digests; these are random bearer tokens, not human passwords.
+- Implement host-local admin operations for principals, spaces, memberships, adapter provisioning, credential rotation/revocation, and enrollment tickets.
+- Implement principal-client and delivery-adapter authentication as distinct credential classes.
+- Implement one-use enrollment exchange in one transaction: hash lookup and expiry check, ticket consume, adapter/principal binding, separate credential issuance, and hash-only persistence.
+- Implement the corresponding `aj-admin` Unix-socket methods and `aj enroll --ticket-file`.
+- Write credentials atomically to separate mode-`0600` destinations and never print their values.
+
+### Test
+
+- Full credential-class matrix for public, delivery, and admin operations.
+- Expired, consumed, revoked, wrong-class, wrong-principal, and malformed credentials.
+- Failpoints after ticket lookup, consume, credential creation, and file write.
+- Assert failed enrollment cannot leave a consumed ticket with missing credentials.
+- Subprocess tests inspect argv, stdout, stderr, traces, and SQLite rows for secrets.
+- Unix-socket permissions and peer-access failure tests.
+
+### Accept when
+
+- A fresh database can be bootstrapped entirely through `aj-admin` and the protected socket.
+- Enrollment returns each secret exactly once and stores only digests centrally.
+- Delivery credentials cannot append; principal credentials cannot claim delivery.
+
+## S5 — First product vertical: append, read, and list
+
+**Goal:** deliver the first useful end-to-end journal behavior.
+
+### Build
+
+- Add UUIDv7 generation when record IDs become real.
+- Implement `/v1/me`, relevant principal/space discovery, append, single-record read, and deterministic record listing.
+- Implement append as one explicit transaction: authorize; validate/canonicalize; allocate sequence; insert record and relations; validate recipients; create mailbox items and ordinal-1 attempts; persist idempotency result.
+- Derive the author from authentication and the timestamp from the server.
+- Implement `aj me`, `aj spaces`, `aj post`, `aj get`, and `aj list` through typed `journal-client` methods.
+
+### Test
+
+- Repository transaction and service authorization tests.
+- Black-box API and CLI tests bootstrapped through S4.
+- Concurrent append tests proving unique monotonic per-space sequence numbers.
+- Replay tests after a lost response; conflicting payloads return `409`.
+- Fail after each append step and assert complete commit or complete rollback.
+- ACL/non-leaking `404` tests for record reads and lists.
+
+### Accept when
+
+- An enrolled principal can append, read, and list using only `aj`.
+- Every successful addressed append has exactly one initial mailbox obligation per recipient.
+- A lost response replays the original immutable result.
+
+## S6 — Relations, search, threads, and bounded pagination
+
+**Goal:** make retained history useful without leaking inaccessible content.
+
+### Build
+
+- Enforce same-space, backward-only relation rules in service and storage.
+- Implement deterministic sequence pagination and bounded thread projection.
+- Implement FTS5 search with ACL predicates inside SQL before rows, snippets, ranking, or counts leave storage.
+- Support deterministic `order=seq`; label ranked search best-effort under concurrent writes.
+- Enforce cursor route/filter/order fingerprints and separate traversal depth/node/edge budgets.
+- Add typed `aj search` and `aj thread` commands.
+
+### Test
+
+- Missing, self, forward, cross-space, and inaccessible relation targets.
+- Search for a token appearing only in unauthorized content; verify no result, snippet, count, or relation leak.
+- Cursor reuse with changed routes/filters/order and concurrent writes between pages.
+- Thread cycles and traversal-budget exhaustion.
+
+### Accept when
+
+- Sequence pages are deterministic and resumable.
+- Unauthorized records do not influence observable search output.
+- Ranked search never claims snapshot completeness.
+
+## S7 — Adapter registration, heartbeat, claims, and lease expiry
+
+**Goal:** make central mailbox custody claimable without yet injecting a runtime.
+
+### Build
+
+- Implement self-registration, heartbeat, generation fencing, bounded claim, and mailbox status.
+- Make restart with the same credential/installation idempotent; require admin compare-and-swap replacement for a different installation.
+- Claim only the authenticated principal's mailbox, rechecking current space membership before exposing content.
+- Suppress revoked pending items without returning their bodies.
+- Allow one active claim per adapter generation and at most 20 items.
+- Wait for long-poll notification outside transactions and blocking-worker permits, then retry the bounded claim transaction.
+
+### Test
+
+- Fake-clock state-machine tests and competing claims.
+- Registration replacement races and stale-generation heartbeat/claim rejection.
+- Revocation immediately before selection.
+- Lease expiry and lost claim response; the same attempt ID returns to pending.
+- Long-poll tests assert no SQL transaction remains open while waiting.
+
+### Accept when
+
+- Claims expose only the authenticated recipient's currently authorized records.
+- Stale installations cannot resume by heartbeat.
+- Lease expiry never fabricates a new attempt.
+
+## S8 — Host custody, telemetry, status, and requeue
+
+**Goal:** complete and prove the central delivery state machine.
+
+### Build
+
+- Implement generation-bound batch/partial custody commit with per-attempt idempotent results.
+- Advance to `host-accepted` only for an exact active claim/item/attempt binding.
+- Accept telemetry only after host custody, from the authenticated recipient adapter, with the four narrow telemetry states.
+- Make `event_id` replay idempotent and conflicting reuse an error.
+- Implement admin requeue as a retained new ordinal/new attempt, never history deletion.
+- Implement delivery-status visibility: authorized author sees all recipients; addressed recipient sees only itself; other readers get the same `404` as unauthorized record access.
+
+### Test
+
+- Partial commits, lost responses, repeated commits, stale generations, expired leases, wrong claim/item/attempt, and cross-principal attempts.
+- Telemetry before custody, invalid transitions, exact replay, and conflicting event replay.
+- Requeue failpoints around ordinal allocation and attempt creation.
+- Complete delivery-status authorization matrix.
+
+### Accept when
+
+- The central service never reports host custody without a valid commit.
+- Telemetry cannot advance pending or claimed attempts.
+- Lease retry preserves attempt identity; explicit requeue changes it and retains history.
+
+## S9 — Durable adapter spool and process lock
+
+**Goal:** make local custody crash-safe before any vendor runtime is touched.
+
+### Build
+
+- Replace `NotImplementedStore` with a local SQLite spool.
+- Persist the complete envelope, claim/mailbox/record/attempt IDs, installation, generation, custody confirmation, injection state, receipt/failure detail, and next-attempt time.
+- Implement idempotent transitions for put, custody confirmation, injection start, acceptance, retryable failure, route unavailable, and terminal failure.
+- Retain compact accepted/terminal tombstones to prevent accidental reinjection.
+- Implement bounded recoverable-row enumeration, item/byte/free-disk pressure, and an exclusive machine-local process lock.
+
+### Test
+
+- Reopen/recovery and conflicting-binding tests.
+- Child-process kill tests before commit, after commit, and during every state transition.
+- Two-process lock contention.
+- Corruption, disk full/reserve, item limit, and byte limit tests.
+
+### Accept when
+
+- A complete attempt survives process death.
+- Accepted/terminal tombstones never appear as injectable recovery work.
+- Pressure stops new claims before durable storage is exhausted.
+
+## S10 — Generic adapter orchestration
+
+**Goal:** implement custody-before-injection against fake boundaries.
+
+### Build
+
+- Implement register → heartbeat → claim → durable spool → custody commit → persist confirmation → fence recheck → route resolution → envelope rendering → injection → result persistence → telemetry.
+- Add bounded exponential retry with fake-clock scheduling.
+- Apply the default route only when `routing_key` is absent. Unknown or disabled explicit routes become `route-unavailable` and never fall back.
+- Keep runtime targets and route bindings local.
+- Keep correlated replies on the principal credential, never the delivery credential.
+
+### Test
+
+- Fake Journal, Spool, RouteResolver, and Runtime unit tests.
+- End-to-end temporary `journald` plus real spool tests.
+- Every crash boundary in `docs/protocol.md`, especially runtime acceptance followed by process death before receipt persistence.
+- Stale generation immediately before injection, route removal during recovery, revocation, and duplicate runtime send.
+- Exact envelope snapshot and resolved-route assertions.
+
+### Accept when
+
+- Runtime injection is structurally impossible before persisted custody confirmation.
+- The runtime receives the resolved private route and exact trusted/untrusted envelope.
+- Reported acceptance matches only the strongest receipt returned by the runtime boundary.
+
+## S11 — Executable fake-runtime conformance
+
+**Goal:** turn adapter semantics into a reusable gate for every runtime implementation.
+
+### Build
+
+- Implement the fake runtime described in `conformance/fake-runtime/README.md`.
+- Make `conformance/adapter/scenarios.yaml` executable rather than documentary.
+- Support availability toggles, duplicate acceptance, recorded envelopes, resolved-route inspection, and accept-then-crash behavior.
+- Run the same suite against the generic adapter and every future runtime adapter.
+
+### Test
+
+- Fencing, spool-before-custody, lost commit, restart, lease expiry, requeue, stale generation, route failure, telemetry ordering, revocation, and duplicate injection.
+- Use real child-process crashes for recovery claims, not only mocked errors.
+- Emit redacted persisted-state evidence keyed by scenario ID.
+
+### Accept when
+
+- Every scenario ID passes with durable-state evidence.
+- The suite demonstrates at-least-once behavior and visible duplicate risk rather than hiding it.
+- Hermes and Muse still identify as unresolved.
+
+## S12 — Operations, recovery, and safe read-only web
+
+**Goal:** make the runtime-neutral core operable and inspectable.
+
+### Build
+
+- Add stable authorized record URLs, timeline, thread, search, and delivery summaries.
+- Render untrusted Markdown with no raw HTML, safe schemes only, no external images, and a restrictive CSP.
+- Add transport-fact metrics: database/WAL size, pending age/count, claims, heartbeats, spool pressure, runtime failures, and backup age.
+- Complete restore fencing: close ingress, quiesce adapters, restore, invalidate claims/registrations, reconcile spools/checkpoints, run ACL/search/sequence/mailbox probes, then reopen.
+
+### Test
+
+- Browser/API tests for raw HTML, `javascript:`, `data:`, external images, forged envelopes, malicious snippets, and CSP.
+- Backup under write load and isolated restore verification of counts, hashes, ACLs, sequence heads, FTS, mailbox attempts, and registration invalidation.
+- Disk, WAL, and free-space pressure tests.
+
+### Accept when
+
+- No active content or unauthorized information is exposed.
+- A restore remains closed to traffic until every recovery probe passes.
+- Dashboards describe custody and runtime telemetry without inventing model-read states.
+
+## Conditional runtime adapters
+
+Hermes and Muse are separate, non-blocking workstreams after S11. Each adapter gets its own PR and release gate:
+
+1. record the supported runtime version;
+2. identify a supported injection surface;
+3. document busy-session and restart behavior;
+4. define the strongest honest acceptance receipt;
+5. keep opaque runtime targets in destination-local configuration;
+6. pass all S11 fake-runtime scenarios;
+7. pass a private Alpha → Journal → Beta → correlated-reply canary.
+
+If a surface cannot be revalidated, that adapter stays an explicit status-2 stub. One runtime's evidence never substitutes for the other's.
+
+## Test architecture
+
+Use progressively wider tests; do not replace lower layers with a giant end-to-end suite.
+
+| Layer | Purpose | Runs |
+| --- | --- | --- |
+| Domain/protocol unit | Validation, serialization, canonicalization, cursors, state enums | Every PR |
+| SQLite integration | Real migrations, transactions, FTS5, ACL predicates, backup | Every PR after S2 |
+| Router/service | Authorization and response semantics without process/network noise | Every PR after S3 |
+| Black-box process | Real listeners, Unix socket, CLI, shutdown, file permissions | Every PR after S3/S4 |
+| Security-negative | Wrong credentials, cross-principal access, non-leakage, secret scans | Every PR after S4 |
+| Crash/recovery | Kill at named durable boundaries and reopen real files | Every PR after S9 |
+| Adapter conformance | Shared scenario IDs and fake runtime | Every PR after S11 |
+| Private canary | Installed runtime version and correlated reply | Manual release gate |
+
+### Determinism requirements
+
+- Inject clocks, UUID sources, and random token sources at service boundaries.
+- Use test-only named failpoints around durable transitions.
+- Wait on explicit events or bounded conditions, never arbitrary multi-second sleeps.
+- Give every concurrency test a hard timeout and include state diagnostics on failure.
+- Keep production code free of test behavior unless behind a narrow injected interface.
+
+## CI evolution
+
+Preserve the current Rust 1.85 locked baseline on every PR:
+
+```bash
+cargo +1.85.0 fmt --all -- --check
+cargo +1.85.0 test --locked --workspace --all-targets
+cargo +1.85.0 clippy --locked --workspace --all-targets -- -D warnings
+cargo +1.85.0 build --locked --workspace
+python3 tests/migration_contract_test.py
+python3 scripts/validate_openapi.py api/openapi.yaml
+python3 scripts/public_hygiene.py
+```
+
+Add jobs only when their slice lands:
+
+1. `contract`: OpenAPI, Redocly, fixture coverage, Markdown, hygiene.
+2. `sqlite`: Rust integration, FTS5, migration rollback, backup/restore; Linux plus a macOS smoke job.
+3. `http`: temporary service, public/Unix listener isolation, auth, body limits, readiness.
+4. `security-negative`: credential matrix, revocation, search non-leakage, secret scans.
+5. `cli`: subprocess JSON fixtures, exit classes, file modes, no-secret output.
+6. `delivery-recovery`: deterministic failpoints and process crash/restart tests.
+7. `adapter-conformance`: every scenario ID against every implemented adapter.
+8. `browser-security`: only after S12.
+9. Manual/nightly: backup under load, isolated restore, and private runtime canaries.
+
+Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisfy a slice gate.
+
+## First three PRs
+
+### PR 1 — Contract execution and fixture coverage
+
+- Extend the existing validator with fixture parsing and operation/security/limit coverage.
+- Add deterministic contract mutations.
+- Add no production dependencies.
+- Preserve status-2 stubs.
+
+**Exit:** explicit coverage of all 27 paths/29 operations; every mutation fails for the intended reason.
+
+### PR 2 — Domain/protocol kernel
+
+- Complete append/read/list/search/common-error DTOs.
+- Add duplicate-key rejection, canonical append encoding, and cursor primitives.
+- Use only existing dependencies.
+
+**Exit:** stable wire fixtures and no need for downstream ad hoc JSON parsing.
+
+### PR 3 — SQLite kernel
+
+- Add pinned `rusqlite` and implement connection policy, migration runner, transaction helpers, FTS5 probe, and backup/restore primitives.
+- Keep HTTP handlers, credentials, and adapter behavior out.
+
+**Exit:** a real Rust process creates, migrates, queries, backs up, restores, and validates the existing schema.
+
+## Explicitly deferred
+
+- MCP, A2A, federation, brokers, PostgreSQL, HA, or multi-active adapters.
+- Task ownership, workflow execution, model spawning, or action authorization.
+- Exactly-once injection or `read`/`understood`/`completed` receipts.
+- Central runtime session/chat/hook identifiers.
+- Public import/provenance APIs or ordinary-client historical impersonation.
+- Artifact/blob storage, retention compaction, deletion semantics, or rich chat UI.
+- Automatic URL fetching, raw HTML, command execution, or authority inferred from record content.
