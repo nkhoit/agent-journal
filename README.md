@@ -2,9 +2,9 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: public Rust scaffold / implementation pending.**
+> **Status: public Rust scaffold with an executable S0 contract gate; product implementation pending.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, SQLite migration, Rust crate boundaries, adapter guidance, fixtures, and executable stubs. It does **not** yet provide a functioning server, CLI protocol client, enrollment flow, database driver, web UI, or runtime injection. The binaries intentionally exit with status 2 and say so explicitly. Hermes and Muse injection surfaces remain unresolved and require revalidation against supported runtime releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, SQLite migration, Rust crate boundaries, adapter guidance, fixtures, and executable stubs. S0 validates the exact 27-path/29-operation OpenAPI surface and its security, limits, identity, and required-field rules; parses the client and adapter fixtures; verifies operation coverage; and runs deterministic contract mutations. It does **not** provide a functioning server, CLI protocol client, enrollment flow, database driver, web UI, or runtime injection. The binaries intentionally exit with status 2 and say so explicitly. Every later implementation slice remains unimplemented; Hermes and Muse injection surfaces remain unresolved and require revalidation against supported runtime releases.
 
 ## Product model
 
@@ -34,7 +34,7 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Area | Status |
 | --- | --- |
 | Product design and v1 decisions | Documented in `docs/design.md` |
-| OpenAPI 3.1 contract | Initial contract present; server/client parity is an implementation gate |
+| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 27-path/29-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations; server/client parity remains unimplemented |
 | SQLite schema | Initial migration present; driver and transactional repositories are pending |
 | Rust domain, protocol, service, storage, adapter, and client boundaries | Scaffolded and tested without network or database implementations |
 | `journald`, `aj`, `aj-admin`, runtime adapters | Explicit not-implemented stubs; binaries exit 2 |
@@ -103,7 +103,7 @@ python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs the Rust format, locked test, clippy, and build gates, the migration contract, the deterministic OpenAPI structural/reference check, optional pinned Redocly standards lint, Markdown checks when available, and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands are safe to run without credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; the executable S0 OpenAPI gate for the exact 27-path/29-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands are safe to run without credentials.
 
 The current binaries are compile checks, not services:
 
@@ -118,13 +118,14 @@ The runtime-specific adapter binaries also exit 2. A non-zero stub is deliberate
 
 ## Implementation sequence
 
-1. Freeze the OpenAPI schemas, error vocabulary, limits, and conformance fixtures.
-2. Implement the Rust SQLite connection policy, numbered migrations, transactional repositories, and typed authorization.
-3. Implement `journald` HTTP handlers, request IDs, bounded pagination/search, idempotency, and the protected admin socket.
-4. Implement `aj` and `aj enroll` against the same typed client and fixtures; add crash, ACL, and security tests.
-5. Implement the generic adapter core and local spool; prove custody semantics with a fake runtime.
-6. Revalidate Muse and Hermes runtime injection surfaces on supported releases; implement adapters only after their canary gates pass.
-7. Add safe read-only web views, operations/backup tooling, and migration evidence.
+S0 is executable only as a contract gate. Every remaining slice below is unimplemented:
+
+1. Implement the Rust SQLite connection policy, numbered migrations, transactional repositories, and typed authorization.
+2. Implement `journald` HTTP handlers, request IDs, bounded pagination/search, idempotency, and the protected admin socket.
+3. Implement `aj` and `aj enroll` against the same typed client and fixtures; add crash, ACL, and security tests.
+4. Implement the generic adapter core and local spool; prove custody semantics with a fake runtime.
+5. Revalidate Muse and Hermes runtime injection surfaces on supported releases; implement adapters only after their canary gates pass.
+6. Add safe read-only web views, operations/backup tooling, and migration evidence.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).
 

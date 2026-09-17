@@ -7,4 +7,4 @@ This directory contains public-safe, generic fixtures for black-box clients and 
 - `client/requests.yaml` lists representative protocol operations and bounded limits.
 - `fake-runtime/README.md` defines the fake runtime behavior required before vendor canaries.
 
-The client contract fixtures become executable in S0; the fake-runtime and adapter scenarios become executable in S11. A test may use localhost and generated per-test IDs, but must never commit captured production traces or secrets.
+The executable S0 contract gate parses the client and adapter fixtures and verifies OpenAPI operation coverage; it does not execute client requests or adapter scenarios. Fake-runtime and adapter behavior remain unimplemented for S11. A test may use localhost and generated per-test IDs, but must never commit captured production traces or secrets.

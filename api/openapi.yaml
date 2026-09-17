@@ -545,6 +545,10 @@ paths:
         The response therefore contains all entries for an authorized author,
         or one entry for an addressed recipient; it never returns a mixed
         partial view.
+      x-agent-journal-delivery-status-visibility:
+        author: all-recipient-entries
+        addressed_recipient: own-entry-only
+        other_reader: not-found
       security: [{ principalClient: [] }]
       parameters:
         - $ref: '#/components/parameters/RecordID'
