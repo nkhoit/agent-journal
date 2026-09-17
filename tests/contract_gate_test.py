@@ -121,6 +121,17 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("appendRecord", "request schema")
 
+    def test_append_request_rejects_additional_media_types(self) -> None:
+        document = self.load_yaml(self.openapi)
+        operation = document["paths"]["/v1/spaces/{space}/records"]["post"]
+        content = operation["requestBody"]["content"]
+        content["application/xml"] = {
+            "schema": {"$ref": "#/components/schemas/AppendRecordRequest"}
+        }
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects("appendRecord", "application/xml")
+
     def test_append_response_schema_reference_is_enforced(self) -> None:
         document = self.load_yaml(self.openapi)
         operation = document["paths"]["/v1/spaces/{space}/records"]["post"]
@@ -144,6 +155,16 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects("AppendRecordRequest", "type")
+
+    def test_adapter_provision_request_rejects_credential_property(self) -> None:
+        document = self.load_yaml(self.openapi)
+        provision_request = document["components"]["schemas"][
+            "AdapterProvisionRequest"
+        ]
+        provision_request["properties"]["credential"] = {"type": "string"}
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects("AdapterProvisionRequest", "credential")
 
     def test_limit_parameter_maximum_is_enforced(self) -> None:
         document = self.load_yaml(self.openapi)
@@ -232,6 +253,23 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("createEnrollmentTicket", "Unix-socket")
 
+    def test_admin_operation_rejects_inline_authorization_header(self) -> None:
+        document = self.load_yaml(self.openapi)
+        operation = document["paths"]["/v1/admin/enrollment-tickets"]["post"]
+        operation.setdefault("parameters", []).append(
+            {
+                "name": "X-Admin-Authorization",
+                "in": "header",
+                "required": True,
+                "schema": {"type": "string"},
+            }
+        )
+        self.write_yaml(self.openapi, document)
+
+        self.assert_gate_rejects(
+            "createEnrollmentTicket", "X-Admin-Authorization"
+        )
+
     def test_private_identifier_in_conformance_data_is_rejected(self) -> None:
         scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
         scenarios = self.load_yaml(scenarios_path)
@@ -244,6 +282,14 @@ class ContractGateTest(unittest.TestCase):
         self.assert_gate_rejects(
             "private fixture identifier", "adapter/scenarios.yaml"
         )
+
+    def test_empty_adapter_scenarios_are_rejected(self) -> None:
+        scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
+        scenarios = self.load_yaml(scenarios_path)
+        scenarios["cases"] = []
+        self.write_yaml(scenarios_path, scenarios)
+
+        self.assert_gate_rejects("adapter", "coverage")
 
 
 if __name__ == "__main__":

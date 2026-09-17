@@ -129,6 +129,10 @@ REQUEST_SCHEMA_FIELDS = {
         {"kind", "content"},
     ),
     "EnrollmentExchangeRequest": ({"instance_id"}, {"instance_id"}),
+    "AdapterProvisionRequest": (
+        {"principal_id", "adapter_id"},
+        {"principal_id", "adapter_id"},
+    ),
     "AdapterRegisterRequest": ({"instance_id"}, {"instance_id"}),
     "AdapterHeartbeatRequest": (
         {"instance_id", "generation"},
@@ -213,6 +217,50 @@ DELIVERY_STATUS_VISIBILITY = {
     "addressed_recipient": "own-entry-only",
     "other_reader": "not-found",
 }
+EXPECTED_ADMIN_PARAMETER_REFS = {
+    "createEnrollmentTicket": (),
+    "provisionAdapter": (),
+    "listAdapters": (
+        "#/components/parameters/Cursor",
+        "#/components/parameters/Limit",
+    ),
+    "replaceAdapter": ("#/components/parameters/AdapterID",),
+    "getAdminMailboxStatus": (
+        "#/components/parameters/PrincipalPath",
+        "#/components/parameters/Cursor",
+        "#/components/parameters/Limit",
+    ),
+    "createPrincipal": (),
+    "createSpace": (),
+    "grantMembership": (),
+    "rotateCredential": (),
+    "requeueMailboxItem": ("#/components/parameters/MailboxItemID",),
+}
+EXPECTED_ADAPTER_CASES = {
+    "register-heartbeat-fencing",
+    "spool-before-custody",
+    "lost-commit-response",
+    "restart-recovery",
+    "lease-expiry",
+    "explicit-requeue",
+    "stale-generation",
+    "unknown-route",
+    "resolved-route-injection",
+    "telemetry-before-custody",
+    "telemetry-cross-principal",
+    "duplicate-runtime-send",
+    "revocation",
+}
+EXPECTED_ADAPTER_OPERATIONS = {
+    "registerAdapter",
+    "heartbeatAdapter",
+    "replaceAdapter",
+    "claimMailbox",
+    "commitHostCustody",
+    "recordDeliveryEvent",
+    "requeueMailboxItem",
+    "grantMembership",
+}
 
 
 def fail(message: str) -> None:
@@ -278,6 +326,33 @@ def collect_operations(paths: dict[str, Any]) -> dict[str, tuple[str, str, dict[
                     fail(f"admin operation {operation_id} missing protected Unix-socket authorization")
                 if "administration" not in operation.get("tags", []):
                     fail(f"admin operation {operation_id} must use the administration tag")
+                parameters = operation.get("parameters", [])
+                if not isinstance(parameters, list):
+                    fail(f"admin operation {operation_id} parameters must be a list")
+                parameter_refs: list[str] = []
+                for parameter in parameters:
+                    if (
+                        not isinstance(parameter, dict)
+                        or set(parameter) != {"$ref"}
+                        or not isinstance(parameter["$ref"], str)
+                    ):
+                        inline_name = (
+                            parameter.get("name")
+                            if isinstance(parameter, dict)
+                            else repr(parameter)
+                        )
+                        fail(
+                            f"admin operation {operation_id} must not declare inline "
+                            f"parameter {inline_name!r}; X-Admin-Authorization headers "
+                            "are forbidden"
+                        )
+                    parameter_refs.append(parameter["$ref"])
+                expected_parameter_refs = EXPECTED_ADMIN_PARAMETER_REFS[operation_id]
+                if tuple(parameter_refs) != expected_parameter_refs:
+                    fail(
+                        f"admin operation {operation_id} parameters must be "
+                        f"{list(expected_parameter_refs)}"
+                    )
             elif (
                 path_name.startswith("/v1/admin/")
                 or "administration" in operation.get("tags", [])
@@ -510,10 +585,15 @@ def validate_request_contract(
             fail(f"{schema_name} request schema type must be object")
         actual_properties = schema.get("properties")
         actual_required = schema.get("required", [])
-        if not isinstance(actual_properties, dict) or set(actual_properties) != expected_properties:
+        actual_property_names = (
+            set(actual_properties) if isinstance(actual_properties, dict) else set()
+        )
+        if actual_property_names != expected_properties:
+            missing = sorted(expected_properties - actual_property_names)
+            unexpected = sorted(actual_property_names - expected_properties)
             fail(
-                f"{schema_name} request fields must be "
-                f"{sorted(expected_properties)}"
+                f"{schema_name} request fields drifted; "
+                f"missing={missing}, unexpected={unexpected}"
             )
         if set(actual_required) != expected_required:
             fail(
@@ -540,11 +620,14 @@ def validate_operation_schemas(
             schema_name, required = expected_request
             if not isinstance(request_body, dict):
                 fail(f"{operation_id} must use request schema {schema_name}")
-            actual_schema = (
-                request_body.get("content", {})
-                .get("application/json", {})
-                .get("schema")
-            )
+            content = request_body.get("content")
+            if not isinstance(content, dict) or set(content) != {"application/json"}:
+                media_types = sorted(content) if isinstance(content, dict) else []
+                fail(
+                    f"{operation_id} request must use only application/json; "
+                    f"got media types {media_types}"
+                )
+            actual_schema = content["application/json"].get("schema")
             expected_reference = f"#/components/schemas/{schema_name}"
             if (
                 request_body.get("required") is not required
@@ -559,11 +642,13 @@ def validate_operation_schemas(
         response = operation.get("responses", {}).get(success_status)
         actual_schema = None
         if isinstance(response, dict):
-            actual_schema = (
-                response.get("content", {})
-                .get("application/json", {})
-                .get("schema")
-            )
+            content = response.get("content")
+            if not isinstance(content, dict) or set(content) != {"application/json"}:
+                fail(
+                    f"{operation_id} {success_status} response must use "
+                    "the JSON media type only"
+                )
+            actual_schema = content["application/json"].get("schema")
         expected_reference = f"#/components/schemas/{response_schema}"
         if actual_schema != {"$ref": expected_reference}:
             fail(
@@ -673,6 +758,7 @@ def validate_fixtures(
     client_entries: dict[str, dict[str, Any]] = {}
     adapter_case_ids: set[str] = set()
     adapter_limits: dict[str, Any] | None = None
+    adapter_covered: set[str] = set()
     mappings = 0
     for fixture_path in fixture_files:
         try:
@@ -782,6 +868,7 @@ def validate_fixtures(
                     if operation_id not in operations:
                         fail(f"unknown fixture operationId {operation_id!r} in {fixture_path}")
                     covered.add(operation_id)
+                    adapter_covered.add(operation_id)
                     mappings += 1
 
     uncovered = set(operations) - covered
@@ -789,6 +876,21 @@ def validate_fixtures(
     if uncovered or missing_client_coverage:
         missing = sorted(uncovered | missing_client_coverage)
         fail(f"fixture coverage missing operations: {missing}")
+
+    if adapter_case_ids != EXPECTED_ADAPTER_CASES:
+        missing = sorted(EXPECTED_ADAPTER_CASES - adapter_case_ids)
+        unexpected = sorted(adapter_case_ids - EXPECTED_ADAPTER_CASES)
+        fail(
+            "adapter fixture coverage must preserve all scenario IDs; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    if adapter_covered != EXPECTED_ADAPTER_OPERATIONS:
+        missing = sorted(EXPECTED_ADAPTER_OPERATIONS - adapter_covered)
+        unexpected = sorted(adapter_covered - EXPECTED_ADAPTER_OPERATIONS)
+        fail(
+            "adapter fixture operation coverage drifted; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
 
     expected_client_metadata = {
         "appendRecord": {
