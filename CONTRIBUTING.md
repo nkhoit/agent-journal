@@ -20,7 +20,7 @@ make check
 
 Rust code must pass `cargo fmt --all -- --check`, `cargo test --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, and `cargo build --locked --workspace`. `make check` also runs the stdlib-only migration contract, deterministic OpenAPI structural/reference check, optional pinned Redocly lint, Markdown checks, and public-hygiene scan. Keep tests deterministic and avoid credentials.
 
-The workspace deliberately has no async runtime, HTTP framework, SQLite driver, or `async-trait` dependency yet. The protocol crate pins `base64`, `hmac`, and `sha2` for the versioned HMAC-SHA-256 cursor codec and pins Jiff without timezone-database features for RFC 3339 wire validation. Add any further dependency only with an exercised use case, a pinned version, and a documentation update explaining the choice. Do not add `tokio`, `axum`, or `rusqlite` merely to fill a boundary.
+The workspace deliberately has no async runtime, HTTP framework, ORM, connection pool, or `async-trait` dependency yet. The protocol crate pins `base64`, `hmac`, and `sha2` for authenticated cursors and Jiff without timezone-database features for RFC 3339 validation. The storage crate pins `rusqlite` with only bundled SQLite/FTS5 and online-backup features. Add any further dependency only with an exercised use case, a pinned version, and a documentation update explaining the choice. Do not add `tokio`, `axum`, or a pool merely to fill a boundary.
 
 ## Change expectations
 
