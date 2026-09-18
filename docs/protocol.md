@@ -326,12 +326,22 @@ The ordinary record delivery-status endpoint returns all recipient-scoped entrie
 2. Claim a bounded batch.
 3. Persist full attempt payload and attempt ID to the local durable spool.
 4. Commit host custody using the exact claim, item, attempt, and generation bindings.
-5. Reconfirm active registration before each local injection.
-6. Resolve the local allowlisted `(space, routing_key)` binding.
-7. Inject the envelope and resolved private `Route` via the supported runtime surface.
-8. Persist the strongest runtime acceptance or failure event.
+5. Persist exact custody confirmation in the local spool.
+6. Reconfirm active registration before each local injection.
+7. Resolve the local allowlisted `(space, routing_key)` binding.
+8. Persist injection-start, then inject the envelope and resolved private `Route` via the supported runtime surface.
+9. Persist the strongest runtime acceptance or failure event.
 
 A lost commit response is recovered by retrying the same attempt. A crash after runtime acceptance and before telemetry can cause a duplicate runtime turn; stable `record_id` is the deduplication hint.
+
+If the exact old custody retry returns `lease-expired`, the same unconfirmed
+attempt may be reclaimed under a new claim. The local spool's explicit
+`reconcile_expired_claim` operation atomically replaces only that claim binding
+and its deduplication fingerprint, preserving the full payload and installation/
+generation fence. Never infer absent custody from a timeout or local clock, and
+never rebind confirmed or completed rows. The new claim still requires central
+commit and durable local confirmation before injection. See
+[local reconciliation requirements](adapter-authoring.md#local-state).
 
 ## Errors
 

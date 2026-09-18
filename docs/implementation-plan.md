@@ -329,6 +329,31 @@ Local spool durability and runtime injection remain S9–S11, not S8 guarantees.
 
 **Goal:** make local custody crash-safe before any vendor runtime is touched.
 
+**Implemented:** `SqliteStore` persists complete attempts in local schema version 1
+using SQLite rollback journals with `synchronous=EXTRA`. A nonblocking `fs2`
+machine-local lock lives for the connection's lifetime. The pinned `fs2` dependency
+also provides cross-platform filesystem free-space checks. Admission checks count
+retained rows/serialized bytes and reserve disk headroom; callers can check the
+maximum proposed batch before claiming. Transitions remain available under logical
+admission pressure and fail atomically on actual SQLite exhaustion.
+
+Recovery is keyset-paginated (1–100 rows), includes unconfirmed custody, and honors
+persisted retry times. Accepted, route-unavailable, and terminal outcomes are final.
+Explicit compaction drops terminal body payloads but preserves bindings, receipts,
+failure detail, and an original SHA-256 fingerprint for duplicate-put validation.
+Real-file tests kill a child before and after each put/custody/start/result/retry/
+compaction commit, and cover process contention, corruption, SQLite full rollback,
+and exact byte/item/reserve limits. No central schema, HTTP, or credential changes.
+S10 orchestration and S11 runtime conformance remain separate gates.
+
+An explicit `reconcile_expired_claim` transition handles restart after durable
+put but before custody when lease expiry reissues the same attempt. It requires
+an exact authoritative `lease-expired` custody result and changes only the claim
+binding of an untouched unconfirmed row, atomically with its fingerprint.
+Tests cover restart, rejection of changed bindings or uncertain custody, confirmed
+and completed rows, capacity/SQLite rollback, and process death on both sides of
+reconciliation commit. Authenticated central reconciliation remains S10.
+
 ### Build
 
 - Replace `NotImplementedStore` with a local SQLite spool.

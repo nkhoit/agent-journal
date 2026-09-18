@@ -27,6 +27,7 @@ repository = "https://github.com/nkhoit/agent-journal"
 [workspace.dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "tokio", "tracing"] }
 base64 = "=0.22.1"
+fs2 = "=0.4.3"
 hmac = "=0.12.1"
 jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["backup", "bundled"] }
