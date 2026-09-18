@@ -1,11 +1,11 @@
 # Operations
 
-This is an operations checklist for the future implementation. The current repository has no runnable service and therefore no production health claim.
+The repository now has a runnable S3 service shell with live/ready health checks, but no product or administrative handlers. Health success proves process and SQLite schema availability only; it is not a production acceptance claim.
 
 ## Deployment shape
 
 - One `journald` application container and one persistent local SQLite volume.
-- Private HTTPS ingress only; administrative mutations on a protected local Unix socket.
+- Private HTTPS ingress only; `journald`'s plain HTTP listener stays behind that ingress. Administrative mutations use a mode-`0600` Unix socket inside an existing private directory.
 - Non-root process, read-only image filesystem, bounded CPU/memory/PIDs, rotated logs, and explicit health checks.
 - SQLite on service-host-local storage, never SMB/NFS.
 - Pin release image digests after acceptance; keep release bytes separate from mutable config, secrets, and state.
