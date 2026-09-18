@@ -4,8 +4,8 @@ info:
   version: 0.1.0
   description: |
     Runtime-neutral v1 contract for a permissioned append-only journal and
-    reliable attention delivery. This repository is a scaffold: the contract
-    is normative, but the shipped binaries intentionally return not implemented.
+    reliable attention delivery. This contract is normative; README.md tracks
+    implemented slices. Custody and runtime delivery remain unimplemented.
 servers:
   - url: https://journal.example.invalid
     description: Documentation placeholder only; deployments choose a private HTTPS origin.
@@ -390,6 +390,10 @@ paths:
       tags: [adapters]
       operationId: registerAdapter
       summary: Register this adapter installation and obtain a fencing generation
+      description: >-
+        Assert the installation bound to the delivery credential and renew its
+        60-second lease without changing generation. An expired lease may be
+        renewed; revoked credentials and different installations cannot register.
       security: [{ deliveryAdapter: [] }]
       requestBody:
         required: true
@@ -412,6 +416,7 @@ paths:
       tags: [adapters]
       operationId: heartbeatAdapter
       summary: Renew adapter heartbeat and fencing lease
+      description: Requires the authenticated installation, current generation, and an unexpired registration lease.
       security: [{ deliveryAdapter: [] }]
       requestBody:
         required: true
@@ -426,6 +431,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AdapterRegistration' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '409': { $ref: '#/components/responses/Conflict' }
   /v1/admin/adapters/{adapter_id}/replace:
@@ -433,6 +439,12 @@ paths:
       tags: [administration]
       operationId: replaceAdapter
       summary: Fence and replace an adapter installation
+      description: >-
+        Compare the current generation, require a different installation, advance
+        generation, cancel active claims without replacing attempts, revoke both
+        old enrollment credential lineages and outstanding tickets, and transfer
+        enrollment ownership. Fresh enrollment for the new installation is required
+        and advances generation again. Old-generation retries return 409.
       security: []
       x-agent-journal-authorization: protected-unix-socket-peer-credentials
       x-agent-journal-public-https: false
@@ -451,6 +463,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AdapterRegistration' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -460,6 +473,13 @@ paths:
       tags: [delivery]
       operationId: claimMailbox
       summary: Claim a bounded batch of attention items
+      description: >-
+        Select only currently authorized records for the authenticated recipient.
+        One active claim per generation; another request, including after a lost
+        response, returns 409 until expiry. Leases last at most 30 seconds and never
+        outlive the registration lease. Expiry preserves attempt IDs. Empty timeout
+        results are closed committed claims with no items or custody. Long polling
+        waits outside transactions and blocking-worker permits.
       security: [{ deliveryAdapter: [] }]
       requestBody:
         required: true
@@ -539,6 +559,7 @@ paths:
       tags: [delivery]
       operationId: getMailboxStatus
       summary: List the authenticated adapter mailbox status
+      description: One recipient entry and a null cursor, after reconciling expired claims and revoked memberships; no record bodies.
       security: [{ deliveryAdapter: [] }]
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -551,6 +572,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MailboxStatusPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/records/{record_id}/delivery-status:
     get:
@@ -606,6 +628,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MailboxStatusPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }

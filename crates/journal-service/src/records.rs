@@ -279,7 +279,7 @@ impl BootstrapService {
         ).optional()?.ok_or(BootstrapError::Unauthorized)
     }
 
-    fn cursor_codec(&self, tx: &Transaction<'_>) -> Result<CursorCodec, BootstrapError> {
+    pub(super) fn cursor_codec(&self, tx: &Transaction<'_>) -> Result<CursorCodec, BootstrapError> {
         let secret: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT secret FROM journal_secrets WHERE name='cursor'",
@@ -616,7 +616,7 @@ fn permitted(
     }
 }
 
-fn record(tx: &Transaction<'_>, id: &str) -> Result<Record, BootstrapError> {
+pub(super) fn record(tx: &Transaction<'_>, id: &str) -> Result<Record, BootstrapError> {
     let mut record = tx.query_row("SELECT id,space_id,space_seq,author_principal_id,kind,content,run_id,created_at,routing_key FROM records WHERE id=?", [id], |r|Ok(Record {
         id:r.get(0)?,space_id:r.get(1)?,seq:r.get(2)?,author:r.get(3)?,kind:r.get(4)?,content:r.get(5)?,run_id:r.get(6)?,created_at:r.get(7)?,routing_key:r.get(8)?,attention:vec![],relations:vec![],
     })).optional()?.ok_or(BootstrapError::NotFound)?;

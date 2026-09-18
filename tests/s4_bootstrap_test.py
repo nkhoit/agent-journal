@@ -222,6 +222,10 @@ class BootstrapTest(unittest.TestCase):
                     ("/v1/spaces/example/search", "GET"): 400,
                     ("/v1/records/example", "GET"): 404,
                     ("/v1/records/example/thread", "GET"): 404,
+                    ("/v1/adapters/self/register", "POST"): 400,
+                    ("/v1/adapters/self/heartbeat", "POST"): 400,
+                    ("/v1/mailbox/claims", "POST"): 400,
+                    ("/v1/mailbox/status", "GET"): 200,
                 }
                 self.assertEqual(self.request(path, good["secret"], method)[0],
                                  implemented.get((path, method), 501))

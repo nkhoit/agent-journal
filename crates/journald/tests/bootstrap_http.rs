@@ -103,7 +103,7 @@ async fn enrollment_authentication_and_public_admin_isolation() {
         (
             "/v1/mailbox/status",
             Some(credentials.delivery_adapter_secret.secret.as_str()),
-            StatusCode::NOT_IMPLEMENTED,
+            StatusCode::OK,
         ),
         (
             "/v1/mailbox/status",

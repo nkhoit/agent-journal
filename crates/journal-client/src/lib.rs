@@ -43,6 +43,98 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    pub fn register_adapter(
+        &self,
+        token: &str,
+        input: &journal_protocol::AdapterRegisterRequest,
+    ) -> Result<journal_protocol::AdapterRegistration, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/adapters/self/register", input, Some(token))
+    }
+
+    pub fn heartbeat_adapter(
+        &self,
+        token: &str,
+        input: &journal_protocol::AdapterHeartbeatRequest,
+    ) -> Result<journal_protocol::AdapterRegistration, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/adapters/self/heartbeat", input, Some(token))
+    }
+
+    pub fn claim_mailbox(
+        &self,
+        token: &str,
+        input: &journal_protocol::ClaimRequest,
+    ) -> Result<journal_protocol::ClaimResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/mailbox/claims", input, Some(token))
+    }
+
+    pub fn mailbox_status(
+        &self,
+        token: &str,
+        query: &journal_protocol::PageQuery,
+    ) -> Result<journal_protocol::MailboxStatusPage, ClientError> {
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/mailbox/status?{}",
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn replace_adapter(
+        &self,
+        adapter: &str,
+        input: &journal_protocol::AdapterReplaceRequest,
+    ) -> Result<journal_protocol::AdapterRegistration, ClientError> {
+        journal_protocol::AdapterPath {
+            adapter_id: adapter.into(),
+        }
+        .validate()
+        .map_err(|_| ClientError::InvalidRequest)?;
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json(
+            &format!(
+                "/v1/admin/adapters/{}/replace",
+                journal_protocol::path_segment(adapter)
+            ),
+            input,
+            None,
+        )
+    }
+
+    pub fn admin_mailbox_status(
+        &self,
+        principal: &str,
+        query: &journal_protocol::PageQuery,
+    ) -> Result<journal_protocol::MailboxStatusPage, ClientError> {
+        journal_protocol::domain::validate_identifier("principal", principal)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        let response = self.send(Request::new(
+            "GET",
+            format!(
+                "/v1/admin/mailboxes/{}/status?{}",
+                journal_protocol::path_segment(principal),
+                journal_protocol::query_string(&query.pairs())
+            ),
+            vec![],
+        ))?;
+        if response.status != 200 {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
+    }
+
     fn principal<O: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         token: &str,

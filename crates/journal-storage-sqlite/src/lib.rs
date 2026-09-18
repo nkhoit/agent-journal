@@ -8,7 +8,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-pub const MIGRATION_VERSION: i64 = 4;
+pub const MIGRATION_VERSION: i64 = 5;
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BACKUP_PAGES_PER_STEP: i32 = 128;
@@ -37,6 +37,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 4,
         sql: include_str!("../../../migrations/0004_thread_index.sql"),
+    },
+    Migration {
+        version: 5,
+        sql: include_str!("../../../migrations/0005_claim_credentials.sql"),
     },
 ];
 

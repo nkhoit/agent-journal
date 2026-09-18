@@ -26,9 +26,15 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     use journal_client::journal_protocol::*;
     use std::collections::BTreeMap;
     let Some(command) = args.first().map(String::as_str) else {
-        return Err("expected me, spaces, post, get, list, search, thread, or enroll");
+        return Err(
+            "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, or mailbox-status",
+        );
     };
     let allowed: &[&str] = match command {
+        "adapter-register" => &["--instance"],
+        "adapter-heartbeat" => &["--instance", "--generation"],
+        "mailbox-claim" => &["--instance", "--generation", "--limit", "--wait-seconds"],
+        "mailbox-status" => &["--cursor", "--limit"],
         "me" => &[],
         "spaces" => &["--cursor", "--limit"],
         "post" => &["--space", "--idempotency-key", "--input"],
@@ -54,7 +60,11 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
             "--kind",
             "--relation",
         ],
-        _ => return Err("expected me, spaces, post, get, list, search, thread, or enroll"),
+        _ => {
+            return Err(
+                "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, or mailbox-status",
+            );
+        }
     };
     let mut options = BTreeMap::new();
     for pair in args[1..].chunks(2) {
@@ -105,6 +115,10 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     let query = query_string(&query_pairs);
     let token = &credential.secret;
     let result = match command {
+        "adapter-register" => serde_json::to_value(client.register_adapter(token,&AdapterRegisterRequest { instance_id:required("--instance")?.into() }).map_err(|_|"registration failed")?),
+        "adapter-heartbeat" => serde_json::to_value(client.heartbeat_adapter(token,&AdapterHeartbeatRequest { instance_id:required("--instance")?.into(),generation:required("--generation")?.parse().map_err(|_|"invalid generation")? }).map_err(|_|"heartbeat failed")?),
+        "mailbox-claim" => serde_json::to_value(client.claim_mailbox(token,&ClaimRequest { instance_id:required("--instance")?.into(),generation:required("--generation")?.parse().map_err(|_|"invalid generation")?,limit:required("--limit")?.parse().map_err(|_|"invalid limit")?,wait_seconds:options.get("--wait-seconds").unwrap_or(&"0").parse().map_err(|_|"invalid wait")? }).map_err(|_|"claim failed or response lost; wait for lease expiry before retrying")?),
+        "mailbox-status" => serde_json::to_value(client.mailbox_status(token,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"status failed")?),
         "me" => serde_json::to_value(client.me(token).map_err(|_|"request failed")?),
         "spaces" => serde_json::to_value(client.spaces(token,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"request failed")?),
         "get" => serde_json::to_value(client.get(token,required("--record")?).map_err(|_|"request failed")?),

@@ -2,7 +2,7 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: S0–S6 foundations, protected bootstrap, journal search, and threads implemented.**
+> **Status: S0–S7 foundations, protected bootstrap, journal queries, and central mailbox claims implemented.**
 >
 > The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Web UI, durable adapter delivery, and runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
@@ -40,8 +40,8 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
-| Adapter delivery | S7+ unresolved; mailbox obligations are persisted but not delivered |
-| Binaries | `journald`, `aj enroll/me/spaces/post/get/list/search/thread`, and `aj-admin` bootstrap commands work on Unix; runtime adapters remain explicit status-2 stubs |
+| Adapter delivery | S7 registration, heartbeat, replacement fencing, bounded claims, expiry, and mailbox status implemented; S8 custody/telemetry/requeue and S9+ spool/runtime delivery remain unresolved |
+| Binaries | `journald`, `aj` journal and mailbox commands, and `aj-admin` bootstrap/replacement/status commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
@@ -104,6 +104,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --locked --workspace
 python3 tests/migration_contract_test.py
 python3 tests/s4_bootstrap_test.py
+python3 tests/s7_delivery_test.py
 python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
@@ -121,13 +122,13 @@ mkdir -m 700 service-state
   --listen 127.0.0.1:8080
 ```
 
-Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll. Public administration paths always return non-leaking JSON `404` responses. Future delivery routes enforce their credential class but return explicit `501` errors instead of fabricated success. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries remain status-2 stubs.
+Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll, then the [central mailbox protocol](docs/protocol.md#central-mailbox-claims). Public administration paths always return non-leaking JSON `404` responses. Custody, telemetry, requeue, record delivery-status, and admin adapter listing remain explicit `501` routes. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries remain status-2 stubs.
 
 ## Implementation sequence
 
-S0 through S6 provide executable contract, wire, SQLite, bootstrap, journal, search, and thread gates. The remaining sequence is:
+S0 through S7 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, and central claim gates. The remaining sequence is:
 
-1. Complete registration, custody, telemetry, and requeue operations.
+1. Complete custody, telemetry, delivery-status, and requeue operations.
 2. Implement the generic adapter core and durable local spool; prove custody semantics with a fake runtime.
 3. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
 4. Add safe read-only web views and complete operational restore fencing and canary evidence.
