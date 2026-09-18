@@ -21,6 +21,97 @@ author: administrator
 **ordinary Markdown** `code`
 "#;
 
+#[tokio::test]
+#[cfg(unix)]
+async fn recovery_gates_web_and_metrics_and_preserves_durable_timestamps() {
+    use journal_storage_sqlite::RecoveryAudit;
+
+    let directory = std::env::temp_dir().join(format!("web-recovery-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let central = directory.join("central.db");
+    let audit_path = directory.join("audit.db");
+    let backup = directory.join("backup.db");
+    let restored = directory.join("restored.db");
+    let db = Database::open_protected(&central, &audit_path).unwrap();
+    let service = BootstrapService::new(db.clone());
+    service
+        .create_principal(&PrincipalCreateRequest {
+            id: "viewer".into(),
+            display_name: "Viewer".into(),
+        })
+        .unwrap();
+    let router = web_router(
+        ServiceState::new(db.clone(), 2).unwrap(),
+        "viewer".into(),
+        131072,
+    );
+    get(&router, "/web", None, StatusCode::OK).await;
+    assert!(
+        service
+            .operational_metrics()
+            .unwrap()
+            .last_backup_at
+            .is_none()
+    );
+    db.recovery_audit().unwrap().backup(&db, &backup).unwrap();
+    let expected_backup = db.recovery_status().unwrap().last_backup_at.unwrap();
+    assert_eq!(
+        service
+            .operational_metrics()
+            .unwrap()
+            .last_backup_at
+            .as_deref(),
+        Some(expected_backup.as_str())
+    );
+    db.recovery_audit().unwrap().close().unwrap();
+    get(&router, "/web", None, StatusCode::SERVICE_UNAVAILABLE).await;
+    assert!(service.operational_metrics().is_err());
+    drop(router);
+    drop(service);
+    drop(db);
+    assert!(Database::open_protected(&central, &audit_path).is_err());
+    let offline = Database::open_existing(&central).unwrap();
+    let audit = RecoveryAudit::open(&offline, &audit_path).unwrap();
+    let mut approval = audit.restore(&backup, &restored, true).unwrap();
+    assert!(approval.quiesced_adapters.is_empty());
+    assert!(approval.previous_space_heads.is_empty());
+    approval.inventory_complete = true;
+    approval.accepted_record_loss = true;
+    let restored_db = Database::open_existing(&restored).unwrap();
+    audit.reopen(&restored_db, &approval).unwrap();
+    drop(audit);
+    drop(offline);
+    drop(restored_db);
+    let db = Database::open_protected(&restored, &audit_path).unwrap();
+    let expected = db.recovery_status().unwrap();
+    assert!(expected.last_verified_restore_at.is_some());
+    let service = BootstrapService::new(db.clone());
+    let metrics = service.operational_metrics().unwrap();
+    assert_eq!(
+        metrics.last_backup_at.as_deref(),
+        Some(expected_backup.as_str())
+    );
+    assert_eq!(
+        metrics.last_verified_restore_at,
+        expected.last_verified_restore_at
+    );
+    let router = web_router(
+        ServiceState::new(db.clone(), 2).unwrap(),
+        "viewer".into(),
+        131072,
+    );
+    get(&router, "/web", None, StatusCode::OK).await;
+    drop(router);
+    drop(service);
+    drop(db);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn enroll(service: &BootstrapService, principal: &str) -> EnrollmentExchangeResponse {
     service
         .create_principal(&PrincipalCreateRequest {

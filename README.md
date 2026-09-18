@@ -45,8 +45,8 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, and `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
-| Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
-| Operational observability | Protected aggregate `aj-admin metrics`, local spool pressure snapshots, and deterministic SQLite-full/WAL/free-reserve tests implemented. Backup-age evidence, deployment capacity measurements, and physical-volume exhaustion acceptance remain unresolved |
+| Recovery, crash, security, and live canaries | Protected external audit, offline restore fencing, exact-state reopen approval, and storage process-kill tests are implemented. Combined protected web/startup and metrics recovery tests require Unix; supported-host and live deployment acceptance remain unverified |
+| Operational observability | Protected aggregate `aj-admin metrics` includes durable external backup/verified-reopen timestamps; local spool pressure snapshots and deterministic SQLite-full/WAL/free-reserve tests are implemented. Deployment capacity measurements and physical-volume exhaustion acceptance remain unresolved |
 
 ## Quick architecture
 
@@ -138,7 +138,7 @@ Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provis
 S0 through S11 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, central delivery, durable spool, orchestration, and fake-runtime conformance gates. The remaining sequence is:
 
 1. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
-2. Complete operational restore fencing and canary evidence; validate the optional shared web listener on the deployment platform.
+2. Validate integrated recovery fencing and the optional shared web listener on Unix, then collect deployment capacity and canary evidence.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).
 

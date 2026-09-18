@@ -471,9 +471,9 @@ No public API, central or spool migration, or credential-class change is introdu
 
 Implemented operational subset: protected aggregate metrics and local spool
 pressure snapshots, with deterministic SQLite-full rollback, pinned-reader WAL
-growth, and exact free-reserve boundary tests. Backup/verified-restore timestamp
-evidence, real-volume exhaustion, deployment load/capacity measurements, and
-the recovery gates remain unresolved. This is not S12 acceptance.
+growth, and exact free-reserve boundary tests. Backup/verified-restore timestamps
+use durable protected external recovery events. Real-volume exhaustion and
+deployment load/capacity measurements remain unresolved. This is not S12 acceptance.
 
 The web slice provides a separate opt-in loopback HTML listener with a configured
 shared viewer principal behind protected Tailscale ingress. Timeline, stable
@@ -492,6 +492,12 @@ explicit complete surviving spool/client reconciliation; the tool does not
 automatically repair those independent stores. See [protected recovery](recovery.md).
 Unix daemon/CLI gates and deployment canaries must run on their supported hosts;
 this workstream alone does not complete all S12 acceptance.
+
+Combined recovery tests in `journald/tests/web_http.rs` and `service_shell.rs`
+check durable metrics timestamps across backup/restore, closed-gate web reads,
+and rejection of shared-viewer startup before listeners bind. They run in the
+Linux CI workspace test gate, not on Windows. Security snapshot growth and
+serialized mutation overhead remain unmeasured deployment acceptance items.
 
 ### Build
 

@@ -8,7 +8,8 @@ Protected host-local `GET /v1/admin/metrics` returns the fixed-shape
 `OperationalMetrics` snapshot, also available through `aj-admin metrics`.
 It has no public HTTPS route or bearer authorization. Pending and heartbeat
 ages derive from server sample and persisted timestamps; backup/restore
-timestamps remain null when durable evidence is unavailable. See
+timestamps come from durable protected external recovery evidence and remain
+null only when unknown or storage is unprotected. See
 [operations](operations.md#protected-operational-snapshots) for metric semantics.
 
 - All protocol API endpoints use `/v1` and JSON. Health endpoints are `/health/live` and `/health/ready`. Optional HTML views use a separate listener and `/web` namespace, not the normative JSON API.

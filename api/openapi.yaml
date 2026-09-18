@@ -1176,11 +1176,11 @@ components:
         last_backup_at:
           type: [string, 'null']
           format: date-time
-          description: Null until durable successful-backup evidence is available; never inferred from file mtime.
+          description: Successful-backup timestamp from the durable protected external recovery audit; null only when unknown or storage is unprotected, never inferred from file mtime.
         last_verified_restore_at:
           type: [string, 'null']
           format: date-time
-          description: Null until durable verified-restore evidence is available.
+          description: Verified-reopen timestamp from the durable protected external recovery audit; null only when unknown or storage is unprotected.
 
     AdapterProvisionRequest:
       type: object

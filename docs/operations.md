@@ -101,7 +101,7 @@ Collection never runs a checkpoint or processes expired leases.
 | Claims | `outstanding_claims` counts unexpired active leases. `expired_active_claims` counts elapsed active leases; `expired_claims` is retained closed history, not current backlog. Alert on sustained elapsed active leases with stalled delivery. |
 | Adapter heartbeat age | Compute age from `oldest_active_heartbeat_at`; null means no active registration. `stale_registrations_with_pending > 0` is an actionable stale lease with pending attention. |
 | Runtime failure events | `runtime_failure_events` counts retained retryable, terminal, and route-unavailable events, not unique failed items. Replayed event IDs do not increment it. Alert on sustained increases and inspect protected delivery status. It may decrease after restore; do not assume a process-lifetime monotonic counter. |
-| Backup and verified restore age | `last_backup_at` and `last_verified_restore_at` are null until durable evidence is wired in. Display unavailable and alert on missing backup evidence according to policy, never as age zero or healthy. Do not substitute file mtime. |
+| Backup and verified restore age | `last_backup_at` and `last_verified_restore_at` come from durable protected external recovery events. They are null only when unknown or storage is unprotected. Display unavailable and alert on missing backup evidence according to policy, never as age zero or healthy. Do not substitute file mtime. |
 
 Negative timestamp differences indicate clock skew and must display unknown,
 not a negative or silently clamped healthy age. Sample modestly (for example

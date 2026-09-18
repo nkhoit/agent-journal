@@ -408,7 +408,11 @@ async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
         viewer: "viewer".into(),
     });
     assert!(Server::bind(configuration.clone()).await.is_err());
-    let db = Database::open(temporary.path("journal.db")).unwrap();
+    let db = Database::open_protected(
+        temporary.path("journal.db"),
+        temporary.path("journal.recovery.db"),
+    )
+    .unwrap();
     journal_service::BootstrapService::new(db.clone())
         .create_principal(&journal_protocol::PrincipalCreateRequest {
             id: "viewer".into(),
@@ -428,6 +432,7 @@ async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
         (public_address, "/web", "404"),
         (web_address, "/v1/spaces", "404"),
         (web_address, "/v1/admin/principals", "404"),
+        (web_address, "/v1/admin/metrics", "404"),
     ] {
         let response = tcp_request(
             address,
@@ -439,6 +444,34 @@ async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
             response.starts_with(&format!("HTTP/1.1 {status}")),
             "{response}"
         );
+    }
+
+    #[tokio::test]
+    async fn closed_recovery_prevents_shared_viewer_startup() {
+        let temporary = TempDir::new("web-recovery-startup");
+        let mut configuration = config(&temporary);
+        configuration.web = Some(journald::WebConfig {
+            address: "127.0.0.1:0".parse().unwrap(),
+            viewer: "viewer".into(),
+        });
+        let db = Database::open_protected(
+            &configuration.database_path,
+            configuration.database_path.with_extension("recovery.db"),
+        )
+        .unwrap();
+        journal_service::BootstrapService::new(db.clone())
+            .create_principal(&journal_protocol::PrincipalCreateRequest {
+                id: "viewer".into(),
+                display_name: "Viewer".into(),
+            })
+            .unwrap();
+        db.recovery_audit().unwrap().close().unwrap();
+        drop(db);
+        assert!(matches!(
+            Server::bind(configuration).await,
+            Err(ServerError::Database(StorageError::RecoveryClosed(_)))
+        ));
+        assert!(!temporary.path("admin.sock").exists());
     }
     shutdown_tx.send(()).unwrap();
     serving.await.unwrap().unwrap();
