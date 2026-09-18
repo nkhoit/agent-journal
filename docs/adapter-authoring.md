@@ -34,7 +34,7 @@ Enrollment credentials are separate principal-client and delivery-adapter secret
 A durable spool persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `recoverable` returns unfinished rows after restart; accepted, route-unavailable, and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
 
 `journal-adapter-spool::SqliteStore::open(path, limits)` implements local schema
-version 1 with SQLite `journal_mode=DELETE` and `synchronous=EXTRA`. Use one fixed
+version 2 with SQLite `journal_mode=DELETE` and `synchronous=EXTRA`. Use one fixed
 database path in an existing private directory on a machine-local filesystem;
 network filesystems and hard-link aliases are unsupported. Symlink database and
 lock paths are rejected. The persistent `.lock` sidecar is exclusively locked
@@ -70,7 +70,7 @@ old puts then fail, and exact new puts/reconciliation retries are idempotent whi
 unconfirmed. Growth remains subject to admission limits. It does not confirm
 custody: commit the new claim centrally and persist its confirmation before injection.
 The caller is responsible for authenticated result provenance and fresh-claim
-validation; fetching results and coordinating these steps remain S10, not spool I/O.
+validation; the generic orchestrator performs those authenticated client operations.
 `mark_retryable` atomically stores failure detail and next retry time; the shared
 port's `mark_injection_failed` retryable variant has no delay. Receipt and failure
 strings are capped at 4,096 UTF-8 bytes. `recoverable_after` offers keyset pagination
@@ -83,10 +83,73 @@ period is over. It drops the body but retains IDs, claim/installation/generation
 metadata, custody, outcome and receipt/detail. A tombstone returned by `get` is not
 a complete injectable envelope. Unknown schema versions and malformed databases
 fail closed; never delete or recreate a spool to recover accepted custody. This
-first local schema has no upgrade/rollback conversion. Back up while the owner is
-stopped and restore only with compatible software and central fencing reconciliation.
-Route configuration, credential persistence, and orchestration remain outside this
-store's schema and belong to the S10 adapter composition.
+schema upgrades version 1 atomically, retaining its rows and original put fingerprints.
+Legacy rows retain their original envelopes; no missing full record or already-reported
+terminal event is invented. Version 1 binaries reject version 2. There is no downgrade:
+back up while the owner is stopped and restore only with compatible software and
+central fencing reconciliation. Route configuration and credential persistence remain
+outside this store's schema.
+
+## Generic orchestration
+
+Compose `journal-adapter-core::Adapter` with `DeliveryJournal`, an open
+`SqliteStore`, a `RouteResolver`, a `Runtime`, and a `Clock`. `DeliveryJournal`
+owns only the delivery credential and delegates to `journal-client::Client`;
+there is no reply/publish operation on this port. Enroll and persist the installation
+and credentials through the existing protected bootstrap before constructing it.
+Runtime-specific binaries still exit with status 2.
+
+Call `tick` from one synchronous owner, outside an async executor thread. Each
+tick performs at most one recovery row or one single-item claim. A caller owns
+shutdown and idle polling cadence. `Progress::Backoff` means no network/runtime
+work occurred. A transient `JournalUnavailable` is returned, not hidden, after
+persisting its next eligible time. Other errors stop processing and require
+caller/operator handling. In particular, fencing, authorization, unexpected
+responses, and spool failures must not be treated as runtime acceptance.
+
+Before each claim, admission checks one item and a conservative 1 MiB serialized
+bound for the retained complete record plus envelope, including worst-case JSON
+escaping. The bound trades throughput for predictable admission. `put` checks
+the actual bytes again. A single-item batch preserves the exact original custody
+request across every crash without a second batch journal. A lost claim response
+has no replay key; claim conflicts back off until central expiry. Reconciliation
+never substitutes a new claim for an uncertain old custody response.
+
+Recovery uses a one-row keyset cursor and wraps after a pass. Delayed runtime rows
+do not block later rows. Custody confirmation is reread from durable storage before
+routing. The active registration is checked again after injection-start persistence
+and immediately before the runtime call. A forced replacement can still race that
+last check; no local design can eliminate the check-to-send window.
+
+Only an absent key selects the default route. An explicitly empty, unknown, or
+disabled key produces a final `route-unavailable` outcome. Route configuration
+changes are observed on recovery, but never revive final attempts. The runtime
+receives the resolved private `Route`, the structured `Envelope`, and its rendered
+text. Metadata values are JSON-quoted, so newlines cannot forge metadata headers.
+Run attribution, route labels, and the body remain data, never authority. Structured
+metadata/body separation is authoritative; textual body delimiters are not a parser
+or security boundary. See the executable
+[rendered snapshot](../conformance/adapter/orchestrated-envelope.txt).
+
+`RuntimeUnavailable` schedules a retry; `RuntimeRejected` records a final failure.
+A successful runtime return asserts runtime acceptance only. Implementations must
+return a bounded, non-secret acceptance reference, not a raw vendor response.
+It is stored locally and never copied to central telemetry, since references may
+identify private runtime targets. Arbitrary runtime error text is discarded.
+Central detail is empty; the state itself is
+the strongest honest result. Unexpected runtime errors propagate without inventing
+a receipt. Death after runtime acceptance but before result persistence leaves an
+in-flight row that may send again.
+
+`AdapterSpool::finish` atomically stores the result, retry count/time, and exact
+pending event. A SHA-256 event ID derives from attempt ID and a durable event
+sequence. Its timestamp and payload are immutable while pending. Outbox enumeration
+includes terminal rows independently of ordinary injection recovery; an event
+must be acknowledged before another injection for that attempt. Compaction rejects
+pending events. Retryable runtime delay doubles from 1 to 256 seconds; transport
+delay uses the same cap and a durable scheduler row, including across restart.
+No retry loop sleeps inside a transaction. Telemetry outages conservatively pause
+network processing rather than allowing an unbounded local event backlog.
 
 ## Configuration shape
 
@@ -99,9 +162,15 @@ are available through typed `journal-client` methods. A lost claim response is n
 replayed: another claim conflicts until its lease expires. Re-registration with the
 same valid installation credential keeps the generation; replacement requires protected
 administration and fresh enrollment. See the [claim protocol](protocol.md#central-mailbox-claims).
+
+A heartbeat conflict permits one same-installation registration retry per fence
+check. The adapter retains its previous authority and accepts renewal only if the
+principal, adapter, installation, and generation are unchanged and active.
+Transport outages can therefore outlast the registration lease without stranding
+durable custody or telemetry work; replacement and revocation still fail closed.
 S8 custody commits, post-custody telemetry, status, and protected requeue are
 available through typed clients and CLIs. S9 local durable spooling is implemented;
-connecting it to this sequence remains S10.
+the generic S10 composition connects it to this sequence.
 Central commit is an assertion of existing local durability, not proof that a
 CLI user has spooled the payload. Retry the exact claim/item/attempt after a lost
 commit response. Retryable runtime failures may later report acceptance on the

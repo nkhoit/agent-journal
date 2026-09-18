@@ -272,6 +272,21 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("expected-envelope.txt", "from_principal")
 
+    def test_expected_envelope_requires_stable_attempt_and_quoted_metadata(self) -> None:
+        envelope_path = self.conformance / "adapter" / "expected-envelope.txt"
+        original = envelope_path.read_text(encoding="utf-8")
+        for field in ("mailbox_item_id", "attempt_id"):
+            envelope_path.write_text(
+                "\n".join(line for line in original.splitlines() if not line.startswith(field + ":")) + "\n",
+                encoding="utf-8",
+            )
+            self.assert_gate_rejects("expected-envelope.txt", field)
+        envelope_path.write_text(
+            original.replace('from_principal: "agent-source"', "from_principal: agent-source"),
+            encoding="utf-8",
+        )
+        self.assert_gate_rejects("expected-envelope.txt", "JSON quoted")
+
     def test_expected_envelope_rejects_renamed_from_principal(self) -> None:
         envelope_path = self.conformance / "adapter" / "expected-envelope.txt"
         envelope = envelope_path.read_text(encoding="utf-8")

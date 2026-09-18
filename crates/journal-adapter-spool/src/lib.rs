@@ -9,7 +9,8 @@ use std::{
 
 use fs2::FileExt;
 use journal_adapter_core::{
-    CoreError, CoreResult, CustodyResult, CustodyResultState, InjectionState, Spool, SpoolItem,
+    AdapterSpool, Backoff, CoreError, CoreResult, CustodyResult, CustodyResultState, EventRequest,
+    InjectionState, Spool, SpoolItem,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -47,7 +48,29 @@ impl Default for Limits {
 struct Inner {
     connection: Connection,
     // Keep the lock until after the database connection has closed.
-    _lock: File,
+    lock: OwnerLock,
+}
+
+struct OwnerLock {
+    file: File,
+    released: bool,
+}
+
+impl OwnerLock {
+    fn release(&mut self) -> std::io::Result<()> {
+        if !self.released {
+            FileExt::unlock(&self.file)?;
+            self.released = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        // Closing alone leaves flock held by descriptors inherited across fork.
+        let _ = self.release();
+    }
 }
 
 pub struct SqliteStore {
@@ -116,6 +139,10 @@ impl SqliteStore {
         }
         let lock = options.open(lock_path).map_err(unavailable)?;
         lock.try_lock_exclusive().map_err(unavailable)?;
+        let lock = OwnerLock {
+            file: lock,
+            released: false,
+        };
         let connection = Connection::open(&path).map_err(unavailable)?;
         connection
             .busy_timeout(std::time::Duration::ZERO)
@@ -140,7 +167,7 @@ impl SqliteStore {
             )
             .map_err(unavailable)?;
         if !((version == 0 && application == 0 && tables == 0)
-            || (version == 1 && application == APPLICATION_ID))
+            || ((1..=2).contains(&version) && application == APPLICATION_ID))
         {
             return Err(unavailable("unsupported spool database"));
         }
@@ -169,18 +196,33 @@ impl SqliteStore {
                 )
                 .map_err(unavailable)?;
         }
+        if version < 2 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE attempts ADD COLUMN event_pending INTEGER NOT NULL DEFAULT 0 CHECK(event_pending IN (0,1));
+                 CREATE INDEX outbox ON attempts(event_pending, attempt_id);
+                 CREATE TABLE scheduler (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL) STRICT;
+                 INSERT INTO scheduler VALUES(1, '{\"failures\":0,\"until\":null}');
+                 PRAGMA user_version=2;
+                 COMMIT;"
+            ).map_err(unavailable)?;
+        }
         Ok(Self {
-            inner: Mutex::new(Some(Inner {
-                connection,
-                _lock: lock,
-            })),
+            inner: Mutex::new(Some(Inner { connection, lock })),
             directory,
             limits,
         })
     }
 
     pub fn close(&self) -> CoreResult<()> {
-        self.inner.lock().map_err(unavailable)?.take();
+        if let Some(Inner {
+            connection,
+            mut lock,
+        }) = self.inner.lock().map_err(unavailable)?.take()
+        {
+            drop(connection);
+            lock.release().map_err(unavailable)?;
+        }
         Ok(())
     }
 
@@ -253,11 +295,12 @@ impl SqliteStore {
     }
 
     fn save(transaction: &Transaction<'_>, item: &SpoolItem) -> CoreResult<()> {
+        item.validate_binding()?;
         let data = serde_json::to_string(item).map_err(unavailable)?;
         let retry = item.next_runtime_try_at.map(time_key).transpose()?;
         transaction.execute(
-            "UPDATE attempts SET item=?2, bytes=?3, terminal=?4, retry_at=?5 WHERE attempt_id=?1",
-            params![item.attempt_id, data, data.len() as i64, terminal(item.injection_state), retry],
+            "UPDATE attempts SET item=?2, bytes=?3, terminal=?4, retry_at=?5, event_pending=?6 WHERE attempt_id=?1",
+            params![item.attempt_id, data, data.len() as i64, terminal(item.injection_state), retry, item.pending_event.is_some()],
         ).map_err(unavailable)?;
         Ok(())
     }
@@ -356,10 +399,11 @@ impl SqliteStore {
             &binding.instance_id,
             binding.generation,
             |item| {
-                if !terminal(item.injection_state) {
+                if !terminal(item.injection_state) || item.pending_event.is_some() {
                     return Err(unavailable("cannot compact unfinished attempt"));
                 }
                 item.envelope.body.clear();
+                item.record = None;
                 Ok(())
             },
         )
@@ -415,6 +459,9 @@ impl Spool for SqliteStore {
             || !item.runtime_receipt.is_empty()
             || !item.failure_detail.is_empty()
             || item.next_runtime_try_at.is_some()
+            || item.pending_event.is_some()
+            || item.event_sequence != 0
+            || item.runtime_failures != 0
         {
             return Err(unavailable("put requires a complete new pending attempt"));
         }
@@ -523,6 +570,11 @@ impl Spool for SqliteStore {
             if !item.custody_confirmed {
                 return Err(CoreError::CustodyNotConfirmed);
             }
+            if item.pending_event.is_some() {
+                return Err(unavailable(
+                    "telemetry must be acknowledged before another injection",
+                ));
+            }
             if terminal(item.injection_state) {
                 return Err(unavailable("attempt outcome is final"));
             }
@@ -576,6 +628,166 @@ impl Spool for SqliteStore {
     }
 }
 
+impl AdapterSpool for SqliteStore {
+    fn check_capacity(&self, items: u64, bytes: u64) -> CoreResult<()> {
+        Self::check_capacity(self, items, bytes)
+    }
+
+    fn find(&self, attempt: &str) -> CoreResult<Option<SpoolItem>> {
+        self.with_connection(|connection| {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attempts WHERE attempt_id=?1)",
+                    [attempt],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if exists {
+                Self::load(connection, attempt).map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn work_after(&self, now: SystemTime, after: Option<&str>) -> CoreResult<Option<SpoolItem>> {
+        let now = time_key(now)?;
+        self.with_connection(|connection| {
+            let id: Option<String> = connection
+                .query_row(
+                    "SELECT attempt_id FROM attempts WHERE (?1 IS NULL OR attempt_id>?1)
+                 AND (event_pending=1 OR (terminal=0 AND (retry_at IS NULL OR retry_at<=?2)))
+                 ORDER BY attempt_id LIMIT 1",
+                    params![after, now],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(unavailable)?;
+            id.map(|id| Self::load(connection, &id)).transpose()
+        })
+    }
+
+    fn finish(&self, before: &SpoolItem, after: &SpoolItem) -> CoreResult<()> {
+        let event = after
+            .pending_event
+            .as_ref()
+            .ok_or_else(|| unavailable("missing outcome event"))?;
+        event.validate()?;
+        if !before.ready_for_injection()
+            || before.pending_event.is_some()
+            || event.attempt_id != before.attempt_id
+            || event.generation != before.generation
+            || after.event_sequence
+                != before
+                    .event_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| unavailable("event sequence overflow"))?
+            || after.runtime_receipt.len() > MAX_DETAIL_BYTES
+            || after.failure_detail.len() > MAX_DETAIL_BYTES
+        {
+            return Err(unavailable("invalid result transition"));
+        }
+        let mut expected = before.clone();
+        expected.injection_state = after.injection_state;
+        expected.runtime_receipt.clone_from(&after.runtime_receipt);
+        expected.failure_detail.clone_from(&after.failure_detail);
+        expected.next_runtime_try_at = after.next_runtime_try_at;
+        expected.event_sequence = after.event_sequence;
+        expected.runtime_failures = after.runtime_failures;
+        expected.pending_event.clone_from(&after.pending_event);
+        if expected != *after {
+            return Err(unavailable("result changed immutable binding"));
+        }
+        let valid_state = match after.injection_state {
+            InjectionState::Accepted => {
+                before.injection_state == InjectionState::InFlight
+                    && event.state
+                        == journal_adapter_core::OutcomeState::AdapterReportedRuntimeAccepted
+            }
+            InjectionState::RetryableFailure => {
+                event.state == journal_adapter_core::OutcomeState::AdapterReportedRetryableFailure
+                    && after.next_runtime_try_at.is_some()
+            }
+            InjectionState::RouteUnavailable => {
+                event.state == journal_adapter_core::OutcomeState::RouteUnavailable
+            }
+            InjectionState::TerminalFailure => {
+                event.state == journal_adapter_core::OutcomeState::AdapterReportedTerminalFailure
+            }
+            _ => false,
+        };
+        if !valid_state {
+            return Err(unavailable("outcome does not match telemetry"));
+        }
+        self.update(
+            &before.attempt_id,
+            &before.instance_id,
+            before.generation,
+            |item| {
+                if *item == *after {
+                    return Ok(());
+                }
+                if *item != *before {
+                    return Err(unavailable("concurrent result change"));
+                }
+                *item = after.clone();
+                Ok(())
+            },
+        )
+    }
+
+    fn acknowledge_event(&self, attempt: &str, event: &EventRequest) -> CoreResult<()> {
+        let binding = self.get(attempt)?;
+        self.update(attempt, &binding.instance_id, binding.generation, |item| {
+            if item.pending_event.as_ref() != Some(event) {
+                return Err(unavailable("event acknowledgement mismatch"));
+            }
+            item.pending_event = None;
+            Ok(())
+        })
+    }
+
+    fn suppress(&self, binding: &SpoolItem) -> CoreResult<()> {
+        self.update(
+            &binding.attempt_id,
+            &binding.instance_id,
+            binding.generation,
+            |item| {
+                if item.custody_confirmed || item.injection_state != InjectionState::Pending {
+                    return Err(unavailable("cannot suppress custodied attempt"));
+                }
+                item.injection_state = InjectionState::TerminalFailure;
+                item.failure_detail = "custody suppressed-revoked".into();
+                Ok(())
+            },
+        )
+    }
+
+    fn backoff(&self) -> CoreResult<Backoff> {
+        self.with_connection(|connection| {
+            let value: String = connection
+                .query_row("SELECT value FROM scheduler WHERE id=1", [], |row| {
+                    row.get(0)
+                })
+                .map_err(unavailable)?;
+            serde_json::from_str(&value).map_err(unavailable)
+        })
+    }
+
+    fn set_backoff(&self, backoff: &Backoff) -> CoreResult<()> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(unavailable)?;
+            transaction
+                .execute(
+                    "UPDATE scheduler SET value=?1 WHERE id=1",
+                    [serde_json::to_string(backoff).map_err(unavailable)?],
+                )
+                .map_err(unavailable)?;
+            Self::commit(transaction)
+        })
+    }
+}
+
 #[cfg(test)]
 fn checkpoint(phase: &str) {
     if std::env::var("SPOOL_CRASH_PHASE").is_ok_and(|value| value == phase) {
@@ -589,3 +801,6 @@ fn checkpoint(phase: &str) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod orchestration_tests;

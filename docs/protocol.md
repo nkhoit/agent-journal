@@ -343,6 +343,14 @@ never rebind confirmed or completed rows. The new claim still requires central
 commit and durable local confirmation before injection. See
 [local reconciliation requirements](adapter-authoring.md#local-state).
 
+The generic adapter uses single-item claims and a durable outcome/telemetry outbox.
+An accepted or final local result is never reinjected merely because reporting
+failed. The exact event ID, timestamp, and payload are retried until acknowledged.
+Runtime acceptance before local result persistence remains an ambiguous send and
+can duplicate a turn after restart. Local schema 2 adds outbox indexing and
+transport scheduling; the central schema and HTTP contract are unchanged. See
+[generic orchestration](adapter-authoring.md#generic-orchestration).
+
 ## Errors
 
 Errors use:

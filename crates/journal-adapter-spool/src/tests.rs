@@ -32,6 +32,10 @@ impl Drop for Fixture {
 
 fn item() -> SpoolItem {
     SpoolItem {
+        record: None,
+        pending_event: None,
+        event_sequence: 0,
+        runtime_failures: 0,
         mailbox_item_id: "item-1".into(),
         attempt_id: "attempt-1".into(),
         claim_id: "claim-1".into(),
@@ -64,6 +68,54 @@ fn confirm(store: &SqliteStore) {
     store
         .confirm_custody("attempt-1", "claim-1", "instance-1", 1)
         .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn inherited_lock_descriptor_does_not_keep_closed_spool_locked() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    for explicit in [false, true] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let inherited = store
+            .inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .lock
+            .file
+            .try_clone()
+            .unwrap();
+        // Stdio safely duplicates the same open file description into a child,
+        // without running Rust after fork in a multithreaded test process.
+        let mut child = Command::new("python3")
+            .args([
+                "-c",
+                "import time; print('ready', flush=True); time.sleep(60)",
+            ])
+            .stdin(Stdio::from(inherited))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        if explicit {
+            store.close().unwrap();
+        }
+        drop(store);
+        let reopened = SqliteStore::open(fixture.0.join("spool.db"), Limits::default());
+        let still_alive = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(still_alive);
+        reopened.unwrap().close().unwrap();
+    }
 }
 
 fn start(store: &SqliteStore) {
@@ -568,7 +620,7 @@ fn malformed_rows_and_foreign_schema_fail_closed() {
     assert!(store.recoverable(SystemTime::now(), 1).is_err());
     drop(store);
     let connection = Connection::open(fixture.0.join("spool.db")).unwrap();
-    connection.execute_batch("PRAGMA user_version=2").unwrap();
+    connection.execute_batch("PRAGMA user_version=3").unwrap();
     drop(connection);
     assert!(SqliteStore::open(fixture.0.join("spool.db"), Limits::default()).is_err());
 }
@@ -622,6 +674,13 @@ fn crash_child() {
             )
             .unwrap(),
         "compact" => store.compact("attempt-1").unwrap(),
+        "outcome" => outcome(&store),
+        "ack-event" => store
+            .acknowledge_event(
+                "attempt-1",
+                &store.get("attempt-1").unwrap().pending_event.unwrap(),
+            )
+            .unwrap(),
         _ => panic!("unknown operation"),
     }
 }
@@ -633,6 +692,52 @@ fn child(fixture: &Fixture, operation: &str) -> Command {
         .env("SPOOL_CHILD_PATH", &fixture.0)
         .env("SPOOL_CHILD_OPERATION", operation);
     command
+}
+
+fn outcome(store: &SqliteStore) {
+    let before = store.get("attempt-1").unwrap();
+    let mut after = before.clone();
+    after.injection_state = InjectionState::Accepted;
+    after.runtime_receipt = "receipt".into();
+    after.event_sequence = 1;
+    after.pending_event = Some(journal_adapter_core::EventRequest {
+        attempt_id: before.attempt_id.clone(),
+        event_id: "event-1".into(),
+        generation: 1,
+        occurred_at: "2023-11-14T22:13:20Z".into(),
+        state: journal_adapter_core::OutcomeState::AdapterReportedRuntimeAccepted,
+        detail: Default::default(),
+    });
+    store.finish(&before, &after).unwrap();
+}
+
+#[test]
+fn schema_one_upgrade_preserves_put_fingerprint_and_tombstones() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    confirm(&store);
+    start(&store);
+    store
+        .mark_injected("attempt-1", "instance-1", 1, "receipt")
+        .unwrap();
+    drop(store);
+    let connection = Connection::open(fixture.0.join("spool.db")).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX outbox; ALTER TABLE attempts DROP COLUMN event_pending;
+        DROP TABLE scheduler; PRAGMA user_version=1;",
+        )
+        .unwrap();
+    drop(connection);
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    assert_eq!(
+        store.get("attempt-1").unwrap().injection_state,
+        InjectionState::Accepted
+    );
+    assert!(store.work_after(SystemTime::now(), None).unwrap().is_none());
+    assert_eq!(store.backoff().unwrap(), Backoff::default());
 }
 
 #[test]
@@ -656,6 +761,8 @@ fn kill_before_and_after_every_commit() {
         "route",
         "terminal",
         "compact",
+        "outcome",
+        "ack-event",
     ] {
         for phase in ["before", "after"] {
             let fixture = Fixture::new();
@@ -673,6 +780,9 @@ fn kill_before_and_after_every_commit() {
                 store
                     .mark_injected("attempt-1", "instance-1", 1, "receipt")
                     .unwrap();
+            }
+            if operation == "ack-event" {
+                outcome(&store);
             }
             let before = store.get("attempt-1").ok();
             drop(store);
@@ -725,6 +835,18 @@ fn kill_before_and_after_every_commit() {
                         assert_eq!(saved.injection_state, InjectionState::TerminalFailure)
                     }
                     "compact" => assert!(saved.envelope.body.is_empty()),
+                    "outcome" => {
+                        assert_eq!(saved.injection_state, InjectionState::Accepted);
+                        assert!(saved.pending_event.is_some());
+                        assert_eq!(
+                            store.work_after(SystemTime::now(), None).unwrap(),
+                            Some(saved)
+                        );
+                    }
+                    "ack-event" => {
+                        assert_eq!(saved.injection_state, InjectionState::Accepted);
+                        assert!(saved.pending_event.is_none());
+                    }
                     _ => unreachable!(),
                 }
             }

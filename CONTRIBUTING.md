@@ -37,6 +37,18 @@ and filesystem free-space checks. `cargo test --locked -p journal-adapter-spool`
 runs real-file recovery, child-process termination at durable boundaries, lock
 contention, corruption, and pressure/full-database rollback tests without a runtime.
 
+S10 uses the existing pinned client, Jiff, and SHA-256 dependencies in adapter core
+for real delivery transport, adapter timestamps, and stable local event identity.
+`cargo test --locked -p journal-adapter-spool` also exercises orchestration against
+fake journal/runtime boundaries and kills real child processes across send/report
+boundaries. `cargo test --locked -p journald --test adapter_orchestration` composes
+real HTTP, the typed client, and the spool; Unix additionally launches `journald`.
+These tests are in the ordinary workspace gate. Unix subprocess tests need native
+private-directory permissions, not a Windows-mounted WSL directory that ignores chmod.
+Run the ordinary parallel gate on Linux. The spool explicitly unlocks its sidecar
+after closing SQLite, including when another process inherited the lock descriptor.
+The Unix regression holds that descriptor in a live child during close and reopen.
+
 ## Change expectations
 
 - Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.
