@@ -5,7 +5,8 @@ use journal_client::{Client, HttpTransport, private_file};
 use journal_runtime_hermes::HermesRuntime;
 use std::{
     ffi::OsString,
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -256,8 +257,15 @@ fn read_routes(path: &Path) -> Result<StaticRoutes, RunError> {
             path.display()
         )));
     }
-    let bytes =
-        fs::read(path).map_err(|error| RunError::Io(format!("{}: {error}", path.display())))?;
+    if metadata.len() > MAX_ROUTES_BYTES {
+        return Err(RunError::Config("routes file is too large".into()));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(path)
+        .map_err(|error| RunError::Io(format!("{}: {error}", path.display())))?
+        .take(MAX_ROUTES_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| RunError::Io(format!("{}: {error}", path.display())))?;
     if bytes.len() as u64 > MAX_ROUTES_BYTES {
         return Err(RunError::Config("routes file is too large".into()));
     }
@@ -365,5 +373,25 @@ mod tests {
     fn parser_rejects_unknown_and_unbounded_polling() {
         assert!(Config::parse(["--unknown"].into_iter().map(OsString::from)).is_err());
         assert!(Config::parse(["--poll-seconds", "0"].into_iter().map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn routes_file_is_rejected_before_an_unbounded_read() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "agent-journal-oversized-routes-{}-{nonce}",
+            std::process::id()
+        ));
+        let file = fs::File::create(&path).expect("create sparse routes file");
+        file.set_len(MAX_ROUTES_BYTES + 1)
+            .expect("size sparse routes file");
+        assert!(matches!(
+            read_routes(&path),
+            Err(RunError::Config(message)) if message == "routes file is too large"
+        ));
+        fs::remove_file(path).expect("remove sparse routes file");
     }
 }
