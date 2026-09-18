@@ -16,7 +16,9 @@ use tokio::task::JoinSet;
 
 use crate::config::Config;
 #[cfg(unix)]
-use crate::http::{ServiceState, admin_router_with_timeout, public_router_with_timeout};
+use crate::http::{
+    ServiceState, admin_router_with_timeout, public_router_with_timeout, web_router_with_timeout,
+};
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -48,6 +50,10 @@ pub enum ServerError {
     InsecureAdminDirectory(PathBuf),
     #[error("public listener failed: {0}")]
     ServePublic(io::Error),
+    #[error("web listener failed: {0}")]
+    ServeWeb(io::Error),
+    #[error("cannot initialize web listener: {0}")]
+    WebInitialization(&'static str),
     #[error("administrative listener failed: {0}")]
     ServeAdmin(io::Error),
     #[error("listener task failed: {0}")]
@@ -68,6 +74,7 @@ pub struct Server {
     max_body_bytes: usize,
     body_read_timeout: Duration,
     shutdown_timeout: Duration,
+    web_listener: Option<(tokio::net::TcpListener, String)>,
 }
 
 #[cfg(unix)]
@@ -94,11 +101,37 @@ impl Server {
             ));
         }
         validate_admin_socket_parent(&config.admin_socket_path)?;
+        if config.web.as_ref().is_some_and(|web| !web.validate()) {
+            return Err(ServerError::InvalidConfig(
+                "web requires a loopback address and valid viewer",
+            ));
+        }
 
         let database_path = config.database_path.clone();
         let database = tokio::task::spawn_blocking(move || Database::open(database_path)).await??;
         let state = ServiceState::new(database, config.blocking_limit)
             .map_err(|_| ServerError::InvalidConfig("blocking limit must be positive"))?;
+        let web_listener = if let Some(web) = config.web {
+            let viewer = web.viewer.clone();
+            state
+                .blocking()
+                .execute(move |database| {
+                    Ok(journal_service::BootstrapService::new(database.clone())
+                        .shared_viewer(&viewer)
+                        .spaces(&journal_protocol::PageQuery::new(None, Some(1))))
+                })
+                .await
+                .map_err(|_| ServerError::WebInitialization("viewer check unavailable"))?
+                .map_err(|_| {
+                    ServerError::WebInitialization("viewer must be an existing active principal")
+                })?;
+            let listener = tokio::net::TcpListener::bind(web.address)
+                .await
+                .map_err(ServerError::ServeWeb)?;
+            Some((listener, web.viewer))
+        } else {
+            None
+        };
 
         let public_listener = tokio::net::TcpListener::bind(config.public_address)
             .await
@@ -141,6 +174,7 @@ impl Server {
             max_body_bytes: config.max_body_bytes,
             body_read_timeout: config.body_read_timeout,
             shutdown_timeout: config.shutdown_timeout,
+            web_listener,
         })
     }
 
@@ -150,6 +184,13 @@ impl Server {
 
     pub fn admin_socket_path(&self) -> &Path {
         self.admin_socket.path()
+    }
+
+    pub fn web_address(&self) -> io::Result<Option<SocketAddr>> {
+        self.web_listener
+            .as_ref()
+            .map(|(listener, _)| listener.local_addr())
+            .transpose()
     }
 
     pub async fn serve<S>(self, shutdown: S) -> Result<(), ServerError>
@@ -164,7 +205,7 @@ impl Server {
             shutdown_rx.clone(),
         );
         let admin_router = admin_router_with_timeout(
-            self.state,
+            self.state.clone(),
             self.max_body_bytes,
             self.body_read_timeout,
             shutdown_rx.clone(),
@@ -177,6 +218,22 @@ impl Server {
             admin_router.layer(axum::Extension(crate::http::AdminOwner(admin_owner)));
         let shutdown_timeout = self.shutdown_timeout;
         let mut listeners = JoinSet::new();
+        if let Some((listener, viewer)) = self.web_listener {
+            let router = web_router_with_timeout(
+                self.state,
+                viewer,
+                self.max_body_bytes,
+                self.body_read_timeout,
+                shutdown_rx.clone(),
+            );
+            let web_shutdown = shutdown_rx.clone();
+            listeners.spawn(async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(wait_for_shutdown(web_shutdown))
+                    .await
+                    .map_err(ServerError::ServeWeb)
+            });
+        }
         let public_shutdown = shutdown_rx.clone();
         listeners.spawn(async move {
             axum::serve(self.public_listener, public_router)

@@ -11,7 +11,7 @@ ages derive from server sample and persisted timestamps; backup/restore
 timestamps remain null when durable evidence is unavailable. See
 [operations](operations.md#protected-operational-snapshots) for metric semantics.
 
-- All application endpoints use `/v1` and JSON. Health endpoints are `/health/live` and `/health/ready`.
+- All protocol API endpoints use `/v1` and JSON. Health endpoints are `/health/live` and `/health/ready`. Optional HTML views use a separate listener and `/web` namespace, not the normative JSON API.
 - Successful responses include a request identifier either in the `X-Request-ID` header and, for errors, in the error body.
 - Collection responses have `items` and nullable opaque `next_cursor`.
 - `limit` is bounded. Clients must follow `next_cursor` and must not manufacture cursors.
@@ -84,6 +84,20 @@ Results use `(space_seq, id)` order. Cursors bind the authenticated principal
 and requested anchor record, and ACLs are rechecked on every page.
 
 ## Credential classes
+
+The opt-in shared HTML viewer is not a credential class. Its host-configured
+principal selects read-only authority on a separate loopback listener. It never
+changes bearer authentication for `/v1`. See [browser access](security-model.md#shared-read-only-browser-access).
+HTML routes are `GET /web`, `GET /web/spaces/{space}`,
+`GET /web/spaces/{space}/search`, `GET /web/records/{record_id}`,
+`GET /web/records/{record_id}/thread`, and
+`GET /web/records/{record_id}/delivery-status`. GET routes also support HEAD;
+other methods are refused. Public API and admin paths are absent from the HTML
+router. Record URLs use immutable IDs. Timeline, search, thread, and delivery
+pagination reuse the strict bounded API query codecs, opaque cursors, and ACL
+policies. Record pages reject query parameters. Search snippets remain plain
+untrusted text. The JSON OpenAPI path/operation surface and persisted schema are
+unchanged; HTML is documented here rather than added to the JSON contract.
 
 | Class | Transport | Scope |
 | --- | --- | --- |

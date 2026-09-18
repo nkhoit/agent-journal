@@ -177,13 +177,22 @@ impl BootstrapService {
         record: &str,
         query: &PageQuery,
     ) -> Result<DeliveryStatusPage, BootstrapError> {
+        self.delivery_status_as(ReadIdentity::Bearer(token), record, query)
+    }
+
+    pub(super) fn delivery_status_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        record: &str,
+        query: &PageQuery,
+    ) -> Result<DeliveryStatusPage, BootstrapError> {
         RecordPath {
             record_id: record.into(),
         }
         .validate()?;
         query.validate()?;
         self.transaction(|tx| {
-            let actor=self.journal_actor(tx,token)?;
+            let actor=self.read_actor(tx,identity)?;
             let author: String=tx.query_row("SELECT r.author_principal_id FROM records r
                 JOIN memberships p ON p.space_id=r.space_id AND p.principal_id=? AND p.can_read=1
                 WHERE r.id=? AND (r.author_principal_id=? OR EXISTS(

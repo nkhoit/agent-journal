@@ -59,6 +59,18 @@ semantics. This gate is included in `make check` and CI.
 
 ## Change expectations
 
+The read-only HTML renderer pins `pulldown-cmark` 0.13.0 with default features
+disabled and emits only its own narrow HTML allowlist. Run
+`cargo test --locked -p journald --test web_http` for shared-viewer ACL, disabled
+principal, delivery-scope, query, and listener-isolation checks. Unix workspace
+tests also bind the actual optional listener and check startup/shutdown isolation.
+Install `tests/browser-requirements.txt` and Chromium with
+`python -m playwright install chromium`, then run `make browser-security`.
+The dedicated CI browser job installs the pinned Playwright browser and executes
+real DOM/CSP/request tests. This separate gate is required for rendering changes;
+`make check` alone does not run a browser. The ephemeral fixture never prints
+credentials or uploads browser captures.
+
 - Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.
 - Make idempotency, authorization, limits, and failure states visible in types and tests.
 - Keep not-implemented areas honest. A status-2 stub is preferable to an unverified integration that claims delivery.

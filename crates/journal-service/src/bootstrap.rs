@@ -86,6 +86,62 @@ pub struct AuthenticatedCredential {
 
 pub type CredentialRotation = CredentialRotationResponse;
 
+#[derive(Clone, Copy)]
+enum ReadIdentity<'a> {
+    Bearer(&'a str),
+    ConfiguredViewer(&'a str),
+}
+
+/// Host-configured read-only authority. Never construct from request data.
+pub struct SharedViewer<'a> {
+    service: &'a BootstrapService,
+    principal: &'a str,
+}
+
+impl SharedViewer<'_> {
+    pub fn record(&self, id: &str) -> Result<journal_domain::Record, BootstrapError> {
+        self.service
+            .get_record_as(ReadIdentity::ConfiguredViewer(self.principal), id)
+    }
+
+    pub fn spaces(&self, query: &PageQuery) -> Result<SpacePage, BootstrapError> {
+        self.service
+            .list_spaces_as(ReadIdentity::ConfiguredViewer(self.principal), query)
+    }
+
+    pub fn records(
+        &self,
+        space: &str,
+        query: &ListRecordsQuery,
+    ) -> Result<RecordPage, BootstrapError> {
+        self.service
+            .list_records_as(ReadIdentity::ConfiguredViewer(self.principal), space, query)
+    }
+
+    pub fn search(
+        &self,
+        space: &str,
+        query: &SearchRecordsQuery,
+    ) -> Result<SearchPage, BootstrapError> {
+        self.service
+            .search_records_as(ReadIdentity::ConfiguredViewer(self.principal), space, query)
+    }
+
+    pub fn thread(&self, id: &str, query: &PageQuery) -> Result<RecordPage, BootstrapError> {
+        self.service
+            .get_thread_as(ReadIdentity::ConfiguredViewer(self.principal), id, query)
+    }
+
+    pub fn delivery(
+        &self,
+        id: &str,
+        query: &PageQuery,
+    ) -> Result<DeliveryStatusPage, BootstrapError> {
+        self.service
+            .delivery_status_as(ReadIdentity::ConfiguredViewer(self.principal), id, query)
+    }
+}
+
 #[derive(Clone)]
 pub struct BootstrapService {
     database: Database,
@@ -115,6 +171,34 @@ impl BootstrapService {
             last_backup_at: None,
             last_verified_restore_at: None,
         })
+    }
+
+    pub fn shared_viewer<'a>(&'a self, principal: &'a str) -> SharedViewer<'a> {
+        SharedViewer {
+            service: self,
+            principal,
+        }
+    }
+
+    fn read_actor(
+        &self,
+        tx: &Transaction<'_>,
+        identity: ReadIdentity<'_>,
+    ) -> Result<String, BootstrapError> {
+        match identity {
+            ReadIdentity::Bearer(token) => self.journal_actor(tx, token),
+            ReadIdentity::ConfiguredViewer(principal) => {
+                journal_domain::validate_identifier("viewer", principal)
+                    .map_err(|_| BootstrapError::InvalidJournal)?;
+                tx.query_row(
+                    "SELECT id FROM principals WHERE id=? AND disabled_at IS NULL",
+                    [principal],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(BootstrapError::NotFound)
+            }
+        }
     }
 
     pub fn new(database: Database) -> Self {

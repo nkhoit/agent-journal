@@ -10,6 +10,43 @@ Agent Journal is a transport of untrusted coordination data, not an authority br
 
 The service must not accept adapter credentials as principal-client credentials. Enrollment is a one-use ticket exchange: the plaintext ticket and newly issued credential are each returned once only through their protected transport, never printed or logged, and the migration stores only the ticket hash plus binding/lifecycle metadata.
 
+### Shared read-only browser access
+
+The optional HTML listener uses one existing principal configured by the service
+operator, not a browser credential or an asserted visitor identity. Everyone who
+can reach it sees that principal's permitted records, including any delivery
+summaries that principal may see. The daemon does not verify Tailscale membership.
+Operators must expose this loopback-only listener exclusively through their
+protected Tailscale proxy and restrict tailnet access accordingly. Local processes
+can also reach loopback; this is not isolation from other users on the service host.
+Do not enable it on an untrusted multi-user host.
+
+Both `--web-listen` and `--web-viewer` are required to opt in. Missing, invalid,
+non-loopback, nonexistent-principal, or disabled-principal startup configuration
+fails closed. Without the flags no HTML listener exists. The public API and
+administrative routers never mount these views. Request bearer credentials,
+cookies, query parameters, and identity/forwarding headers cannot select or
+override the configured viewer. There is no browser login, token URL, browser
+storage, publishing endpoint, or administrative authority on this listener.
+
+The read-only service interface checks the principal remains active and applies
+current ACLs in each read transaction. It cannot be used for append, credential,
+mailbox-claim, or administrative operations. Delivery summaries retain the same
+author/recipient-only policy as the principal API. Use a dedicated minimally
+privileged viewer principal; granting it a space publishes that space to every
+visitor allowed through the proxy. Revocation prevents future responses, not
+bytes already rendered or copied.
+
+Responses, including errors, carry `Cache-Control: no-store`, a no-referrer policy,
+MIME-sniffing protection, and a CSP forbidding scripts, styles, images, frames,
+plugins, external connections, and embedding. Forms submit only to the same
+origin. Markdown is parsed with pinned `pulldown-cmark` and rendered through a
+small explicit tag allowlist; raw HTML is discarded. Only absolute HTTPS links
+are clickable, with no-referrer/noopener/nofollow attributes. Images become inert
+alt text. Snippets and metadata are HTML-escaped, never interpreted as markup.
+Content headings cannot mint page-level metadata, and bodies sit within a
+labelled untrusted-content boundary separate from authenticated author metadata.
+
 ## Authorization
 
 Default deny. Space membership controls read/append. An attention recipient must exist and be permitted to read the space. Relation targets must be readable and same-space. Search filters ACLs before ranking, snippets, counts, or facets are produced. Mailbox claims recheck current membership before exposing record content. Claims bind credential, principal, adapter, installation ID, generation, and item set. Delivery telemetry additionally requires the authenticated adapter principal to equal the mailbox recipient for the exact attempt, and the attempt must already be `host-accepted`.

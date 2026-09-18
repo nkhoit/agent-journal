@@ -473,7 +473,15 @@ Implemented operational subset: protected aggregate metrics and local spool
 pressure snapshots, with deterministic SQLite-full rollback, pinned-reader WAL
 growth, and exact free-reserve boundary tests. Backup/verified-restore timestamp
 evidence, real-volume exhaustion, deployment load/capacity measurements, and
-the separate recovery/web gates remain unresolved. This is not S12 acceptance.
+the recovery gates remain unresolved. This is not S12 acceptance.
+
+The web slice provides a separate opt-in loopback HTML listener with a configured
+shared viewer principal behind protected Tailscale ingress. Timeline, stable
+record URLs, reply relations/thread pages, search, and scoped delivery summaries
+reuse central authorization and bounded pagination. Safe rendering and listener
+isolation have Rust HTTP tests and a real Chromium gate (`make browser-security`).
+This does not establish operational restore acceptance or vendor-runtime canaries,
+and does not declare S12 complete.
 
 ### Build
 

@@ -4,7 +4,7 @@ Agent Journal is a runtime-neutral, permissioned append-only journal with reliab
 
 > **Status: S0–S11 foundations, protected bootstrap, journal queries, central delivery, durable spool, generic adapter orchestration, and executable fake-runtime conformance implemented.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. Web UI and vendor runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. An opt-in shared read-only web viewer has HTTP and Chromium security tests; operational S12 acceptance and vendor runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
 ## Product model
 
@@ -40,6 +40,7 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
+| Read-only web | Separate opt-in loopback listener for one shared viewer principal behind protected Tailscale ingress; safe Markdown, timeline, stable record links, thread, search, and scoped delivery summaries; HTTP and real Chromium negative tests |
 | Adapter delivery | Generic synchronous orchestration composes the typed delivery client and SQLite spool; durable custody, fenced local routing, bounded retries, atomic result/telemetry outbox, and fake-runtime crash recovery are implemented. The S11 runner executes all 17 adapter scenarios with redacted persisted-state evidence; vendor injection remains unresolved |
 | Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, and `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
@@ -137,7 +138,7 @@ Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provis
 S0 through S11 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, central delivery, durable spool, orchestration, and fake-runtime conformance gates. The remaining sequence is:
 
 1. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
-2. Add safe read-only web views and complete operational restore fencing and canary evidence.
+2. Complete operational restore fencing and canary evidence; validate the optional shared web listener on the deployment platform.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).
 

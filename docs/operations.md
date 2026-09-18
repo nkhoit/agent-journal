@@ -10,6 +10,42 @@ The repository implements journal, central delivery, and protected Unix administ
 - SQLite on service-host-local storage, never SMB/NFS.
 - Pin release image digests after acceptance; keep release bytes separate from mutable config, secrets, and state.
 
+## Optional shared read-only web viewer
+
+Create an ordinary principal using protected administration and grant only the
+space-read memberships intended for all browser visitors. No bearer credential
+or adapter enrollment is needed for this viewer. Enable the separate listener:
+
+```sh
+journald --database service-state/journal.db \
+  --admin-socket service-state/admin.sock \
+  --listen 127.0.0.1:8080 \
+  --web-listen 127.0.0.1:8081 --web-viewer viewer
+```
+
+Configure the protected Tailscale HTTPS proxy to forward only to the loopback
+web listener, then visit `/web`. The daemon neither configures Tailscale nor
+verifies visitor tailnet membership. Restrict proxy reachability with tailnet
+policy; never publish this listener through an unrestricted ingress or public
+Tailscale sharing feature. Every allowed visitor, and any local process that can
+reach the loopback port, receives the configured principal's current read view.
+Use a trusted single-user service host and a dedicated least-privilege principal.
+
+The paired flags are required; non-loopback bindings and missing/disabled
+principals are startup errors. Without both flags web remains disabled. Revoke
+memberships or disable the principal to stop subsequent reads; remove the flags
+and restart to remove the listener. Browser requests cannot select a principal
+through headers, cookies, or query parameters. The web port has no JSON API,
+publishing, metrics, or administration routes, and the API port has no HTML views.
+Stable `/web/records/{id}` links still recheck authorization on every request.
+Delivery summaries expose only the viewer's author/recipient scope.
+
+Keep this listener closed alongside API ingress during recovery. It shares the
+service database and bounded blocking executor; it must never be routed to an
+independent database handle to bypass recovery fencing. The Unix daemon owns
+listener startup and graceful shutdown. Windows HTTP/Chromium tests exercise
+routers, not the Unix protected service deployment.
+
 ## Health and alerts
 
 ### Structured operational logs

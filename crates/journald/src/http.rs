@@ -24,6 +24,12 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 mod delivery;
 use delivery::*;
 
+#[path = "web.rs"]
+mod web;
+pub use web::web_router;
+#[cfg(unix)]
+pub(crate) use web::web_router_with_timeout;
+
 #[derive(Debug, Clone)]
 pub struct ServiceState {
     blocking: BlockingExecutor,

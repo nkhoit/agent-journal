@@ -58,6 +58,15 @@ impl BootstrapService {
         space: &str,
         query: &SearchRecordsQuery,
     ) -> Result<SearchPage, BootstrapError> {
+        self.search_records_as(ReadIdentity::Bearer(token), space, query)
+    }
+
+    pub(super) fn search_records_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        space: &str,
+        query: &SearchRecordsQuery,
+    ) -> Result<SearchPage, BootstrapError> {
         query.validate()?;
         let mut connection = self.database.connect_read_only()?;
         // Existing databases initialize this key lazily. Only that one-time
@@ -74,7 +83,7 @@ impl BootstrapService {
                 CursorCodec::new(&secret).map_err(|_| BootstrapError::CorruptJournal)?
             }
             None => self.transaction(|tx| {
-                let actor = self.journal_actor(tx, token)?;
+                let actor = self.read_actor(tx, identity)?;
                 permitted(tx, &actor, space, false)?;
                 self.cursor_codec(tx)
             })?,
@@ -82,7 +91,7 @@ impl BootstrapService {
         let transaction = connection.transaction()?;
         let tx = &transaction;
         {
-            let actor = self.journal_actor(tx, token)?;
+            let actor = self.read_actor(tx, identity)?;
             permitted(tx, &actor, space, false)?;
             // Server timestamps have whole-second precision. Round the lower
             // bound upward without SQLite's millisecond date rounding.
@@ -213,9 +222,18 @@ impl BootstrapService {
         id: &str,
         query: &PageQuery,
     ) -> Result<RecordPage, BootstrapError> {
+        self.get_thread_as(ReadIdentity::Bearer(token), id, query)
+    }
+
+    pub(super) fn get_thread_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        id: &str,
+        query: &PageQuery,
+    ) -> Result<RecordPage, BootstrapError> {
         query.validate()?;
         self.transaction(|tx| {
-            let actor = self.journal_actor(tx, token)?;
+            let actor = self.read_actor(tx, identity)?;
             let space: String = tx
                 .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
                     r.get(0)
@@ -400,8 +418,16 @@ impl BootstrapService {
     }
 
     pub fn get_record(&self, token: &str, id: &str) -> Result<Record, BootstrapError> {
+        self.get_record_as(ReadIdentity::Bearer(token), id)
+    }
+
+    pub(super) fn get_record_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        id: &str,
+    ) -> Result<Record, BootstrapError> {
         self.transaction(|tx| {
-            let actor = self.journal_actor(tx, token)?;
+            let actor = self.read_actor(tx, identity)?;
             let space: String = tx
                 .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
                     r.get(0)
@@ -422,9 +448,17 @@ impl BootstrapService {
     }
 
     pub fn list_spaces(&self, token: &str, query: &PageQuery) -> Result<SpacePage, BootstrapError> {
+        self.list_spaces_as(ReadIdentity::Bearer(token), query)
+    }
+
+    pub(super) fn list_spaces_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        query: &PageQuery,
+    ) -> Result<SpacePage, BootstrapError> {
         query.validate()?;
         self.transaction(|tx| {
-            let actor = self.journal_actor(tx, token)?;
+            let actor = self.read_actor(tx, identity)?;
             let codec = self.cursor_codec(tx)?;
             let scope = scope(CursorRoute::Spaces, &(&actor,))?;
             let after = identifier_position(&codec, &scope, query)?;
@@ -459,9 +493,18 @@ impl BootstrapService {
         space: &str,
         query: &ListRecordsQuery,
     ) -> Result<RecordPage, BootstrapError> {
+        self.list_records_as(ReadIdentity::Bearer(token), space, query)
+    }
+
+    pub(super) fn list_records_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        space: &str,
+        query: &ListRecordsQuery,
+    ) -> Result<RecordPage, BootstrapError> {
         query.validate()?;
         self.transaction(|tx| {
-            let actor = self.journal_actor(tx, token)?;
+            let actor = self.read_actor(tx, identity)?;
             permitted(tx, &actor, space, false)?;
             let codec = self.cursor_codec(tx)?;
             let filters = serde_json::to_vec(&(

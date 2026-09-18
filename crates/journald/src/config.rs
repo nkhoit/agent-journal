@@ -20,6 +20,20 @@ pub struct Config {
     pub max_body_bytes: usize,
     pub body_read_timeout: Duration,
     pub shutdown_timeout: Duration,
+    pub web: Option<WebConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebConfig {
+    pub address: SocketAddr,
+    pub viewer: String,
+}
+
+impl WebConfig {
+    pub fn validate(&self) -> bool {
+        self.address.ip().is_loopback()
+            && journal_protocol::domain::validate_identifier("viewer", &self.viewer).is_ok()
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -49,6 +63,8 @@ impl Config {
         let mut admin_socket_path = None;
         let mut blocking_limit = None;
         let mut max_body_bytes = None;
+        let mut web_address = None;
+        let mut web_viewer = None;
         let mut arguments = arguments.into_iter().map(Into::into);
 
         while let Some(argument) = arguments.next() {
@@ -72,6 +88,32 @@ impl Config {
                 "--admin-socket" => {
                     set_once(&mut admin_socket_path, PathBuf::from(value), &option)?;
                 }
+                "--web-listen" => {
+                    let text = value.to_string_lossy().into_owned();
+                    let parsed = text
+                        .parse::<SocketAddr>()
+                        .map_err(|_| ConfigError::Invalid {
+                            option: option.clone(),
+                            value: text.clone(),
+                        })?;
+                    if !parsed.ip().is_loopback() {
+                        return Err(ConfigError::Invalid {
+                            option,
+                            value: text,
+                        });
+                    }
+                    set_once(&mut web_address, parsed, &option)?;
+                }
+                "--web-viewer" => {
+                    let text = value.to_string_lossy().into_owned();
+                    journal_protocol::domain::validate_identifier("viewer", &text).map_err(
+                        |_| ConfigError::Invalid {
+                            option: option.clone(),
+                            value: text.clone(),
+                        },
+                    )?;
+                    set_once(&mut web_viewer, text, &option)?;
+                }
                 "--blocking-limit" => {
                     let text = value.to_string_lossy().into_owned();
                     let parsed = parse_blocking_limit(&option, &text)?;
@@ -86,6 +128,12 @@ impl Config {
             }
         }
 
+        let web = match (web_address, web_viewer) {
+            (None, None) => None,
+            (Some(address), Some(viewer)) => Some(WebConfig { address, viewer }),
+            (Some(_), None) => return Err(ConfigError::Missing("--web-viewer")),
+            (None, Some(_)) => return Err(ConfigError::Missing("--web-listen")),
+        };
         Ok(Self {
             database_path: database_path.ok_or(ConfigError::Missing("--database"))?,
             public_address: public_address.unwrap_or_else(|| {
@@ -96,12 +144,14 @@ impl Config {
             max_body_bytes: max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
             body_read_timeout: DEFAULT_BODY_READ_TIMEOUT,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            web,
         })
     }
 
     pub const fn usage() -> &'static str {
         "Usage: journald --database PATH --admin-socket PATH [--listen ADDRESS] \
-         [--blocking-limit COUNT] [--max-body-bytes BYTES]"
+         [--blocking-limit COUNT] [--max-body-bytes BYTES] \
+         [--web-listen LOOPBACK_ADDRESS --web-viewer PRINCIPAL]"
     }
 }
 
@@ -137,6 +187,29 @@ fn parse_blocking_limit(option: &str, value: &str) -> Result<usize, ConfigError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_web_requires_explicit_loopback_and_principal_pair() {
+        let base = ["--database", "journal.db", "--admin-socket", "admin.sock"];
+        assert!(Config::parse(base).unwrap().web.is_none());
+        for extra in [
+            vec!["--web-listen", "127.0.0.1:8081"],
+            vec!["--web-viewer", "viewer"],
+            vec!["--web-listen", "0.0.0.0:8081", "--web-viewer", "viewer"],
+            vec!["--web-listen", "[::]:8081", "--web-viewer", "viewer"],
+            vec!["--web-listen", "127.0.0.1:8081", "--web-viewer", ""],
+        ] {
+            assert!(Config::parse(base.into_iter().chain(extra)).is_err());
+        }
+        let config = Config::parse(base.into_iter().chain([
+            "--web-listen",
+            "127.0.0.1:8081",
+            "--web-viewer",
+            "viewer",
+        ]))
+        .unwrap();
+        assert!(config.web.unwrap().validate());
+    }
 
     #[test]
     fn parses_required_and_bounded_options() {
