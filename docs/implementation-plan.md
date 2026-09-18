@@ -56,7 +56,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ### Accept when
 
-- CI reports the expected 27 paths and 29 operations plus fixture coverage.
+- CI reports the expected 29 paths and 31 operations plus fixture coverage.
 - Failure mutations fail deterministically.
 - All binaries remain honest not-implemented stubs.
 
@@ -140,6 +140,8 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ## S4 — Protected administration, authentication, and enrollment
 
+**Status:** implemented and verified on Unix. `tests/s4_bootstrap_test.py` bootstraps a fresh daemon entirely through the CLIs, exercises the credential-class matrix, inspects secret outputs and persisted digests, and forces lost-response and post-commit file failures through deterministic forwarding proxies. Rust integration tests cover transaction rollback, subprocess termination, concurrent exchange, expiry, revocation, and installation ownership. S5+ remains unresolved.
+
 **Goal:** create the security bootstrap needed to test every later endpoint honestly.
 
 ### Build
@@ -150,6 +152,8 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 - Implement one-use enrollment exchange in one transaction: hash lookup and expiry check, ticket consume, adapter/principal binding, separate credential issuance, and hash-only persistence.
 - Implement the corresponding `aj-admin` Unix-socket methods and `aj enroll --ticket-file`.
 - Write credentials atomically to separate mode-`0600` destinations and never print their values.
+- Rotate by immediate atomic revoke-and-replace, returning the replacement secret once through the protected Unix socket.
+- Provide empty-`204` credential revocation and enrollment recovery operations. Recovery revokes both credential lineages, including rotations, before fresh-ticket enrollment for the same installation; consumed tickets never replay and another installation cannot take over.
 
 ### Test
 
@@ -159,6 +163,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 - Assert failed enrollment cannot leave a consumed ticket with missing credentials.
 - Subprocess tests inspect argv, stdout, stderr, traces, and SQLite rows for secrets.
 - Unix-socket permissions and peer-access failure tests.
+- Lost enrollment responses and post-commit file-write failures require explicit administrator recovery; lost rotation output requires revoking the inaccessible replacement.
 
 ### Accept when
 
@@ -443,7 +448,7 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 - Add no production dependencies.
 - Preserve status-2 stubs.
 
-**Exit:** explicit coverage of all 27 paths/29 operations; every mutation fails for the intended reason.
+**Exit:** explicit coverage of all 29 paths/31 operations; every mutation fails for the intended reason.
 
 ### PR 2 — Domain/protocol kernel
 

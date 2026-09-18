@@ -62,9 +62,23 @@ class ContractGateTest(unittest.TestCase):
         result = self.run_gate()
         output = f"{result.stdout}\n{result.stderr}"
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("27 paths", output)
-        self.assertIn("29 operations", output)
+        self.assertIn("29 paths", output)
+        self.assertIn("31 operations", output)
         self.assertIn("fixture coverage", output.casefold())
+
+    def test_rotation_requires_one_time_response(self) -> None:
+        document = self.load_yaml(self.openapi)
+        response = document["paths"]["/v1/admin/credentials/rotate"]["post"]["responses"]["200"]
+        response["content"]["application/json"]["schema"]["$ref"] = "#/components/schemas/CredentialMetadata"
+        self.write_yaml(self.openapi, document)
+        self.assert_gate_rejects("CredentialRotationResponse")
+
+    def test_recovery_must_not_return_content(self) -> None:
+        document = self.load_yaml(self.openapi)
+        response = document["paths"]["/v1/admin/enrollment/recover"]["post"]["responses"]["204"]
+        response["content"] = {"application/json": {"schema": {"type": "object"}}}
+        self.write_yaml(self.openapi, document)
+        self.assert_gate_rejects("204", "content")
 
     def test_uncovered_client_operation_is_rejected(self) -> None:
         requests_path = self.conformance / "client" / "requests.yaml"

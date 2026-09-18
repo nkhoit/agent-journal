@@ -43,6 +43,8 @@ EXPECTED_OPERATIONS = {
     "createSpace": ("POST", "/v1/admin/spaces"),
     "grantMembership": ("POST", "/v1/admin/memberships"),
     "rotateCredential": ("POST", "/v1/admin/credentials/rotate"),
+    "revokeCredential": ("POST", "/v1/admin/credentials/revoke"),
+    "recoverEnrollment": ("POST", "/v1/admin/enrollment/recover"),
     "requeueMailboxItem": ("POST", "/v1/admin/mailbox-items/{item_id}/requeue"),
 }
 EXPECTED_PATHS = {path for _, path in EXPECTED_OPERATIONS.values()}
@@ -111,6 +113,8 @@ REQUIRED_RESPONSE_FIELDS = {
     "MailboxStatus": {"principal_id", "pending", "oldest_pending_at"},
     "MailboxStatusPage": {"items", "next_cursor"},
     "CredentialMetadata": {"credential_id", "principal_id", "class", "rotated_at"},
+    "CredentialRotationResponse": {"metadata", "replacement_secret"},
+    "OneTimeReplacementSecret": {"credential_id", "secret"},
     "EnrollmentTicketCreateResponse": {
         "principal_id", "adapter_id", "expires_at", "enrollment_ticket",
     },
@@ -124,6 +128,9 @@ REQUIRED_RESPONSE_FIELDS = {
     "RequeueResponse": {"mailbox_item_id", "attempt_id", "state"},
 }
 REQUEST_SCHEMA_FIELDS = {
+    "CredentialRotateRequest": ({"credential_id", "reason"}, {"credential_id"}),
+    "CredentialRevokeRequest": ({"credential_id", "reason"}, {"credential_id"}),
+    "EnrollmentRecoveryRequest": ({"adapter_id", "instance_id"}, {"adapter_id", "instance_id"}),
     "AppendRecordRequest": (
         {"kind", "content", "run_id", "attention", "routing_key", "relations"},
         {"kind", "content"},
@@ -168,6 +175,8 @@ EXPECTED_REQUESTS = {
     "createSpace": ("SpaceCreateRequest", True),
     "grantMembership": ("MembershipRequest", True),
     "rotateCredential": ("CredentialRotateRequest", True),
+    "revokeCredential": ("CredentialRevokeRequest", True),
+    "recoverEnrollment": ("EnrollmentRecoveryRequest", True),
     "requeueMailboxItem": ("RequeueRequest", False),
 }
 EXPECTED_SUCCESS_RESPONSES = {
@@ -198,7 +207,9 @@ EXPECTED_SUCCESS_RESPONSES = {
     "createPrincipal": ("201", "Principal"),
     "createSpace": ("201", "Space"),
     "grantMembership": ("200", "Membership"),
-    "rotateCredential": ("200", "CredentialMetadata"),
+    "rotateCredential": ("200", "CredentialRotationResponse"),
+    "revokeCredential": ("204", None),
+    "recoverEnrollment": ("204", None),
     "requeueMailboxItem": ("200", "RequeueResponse"),
 }
 PAGINATED_OPERATIONS = {
@@ -234,6 +245,8 @@ EXPECTED_ADMIN_PARAMETER_REFS = {
     "createSpace": (),
     "grantMembership": (),
     "rotateCredential": (),
+    "revokeCredential": (),
+    "recoverEnrollment": (),
     "requeueMailboxItem": ("#/components/parameters/MailboxItemID",),
 }
 EXPECTED_ADAPTER_CASES = {
@@ -700,6 +713,10 @@ def validate_operation_schemas(
 
         success_status, response_schema = EXPECTED_SUCCESS_RESPONSES[operation_id]
         response = operation.get("responses", {}).get(success_status)
+        if response_schema is None:
+            if not isinstance(response, dict) or "content" in response:
+                fail(f"{operation_id} {success_status} response must have no content")
+            continue
         actual_schema = None
         if isinstance(response, dict):
             content = response.get("content")

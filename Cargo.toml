@@ -25,7 +25,7 @@ license = "Apache-2.0"
 repository = "https://github.com/nkhoit/agent-journal"
 
 [workspace.dependencies]
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "tokio", "tracing"] }
 base64 = "=0.22.1"
 hmac = "=0.12.1"
 jiff = { version = "=0.2.37", default-features = false, features = ["std"] }

@@ -2,9 +2,9 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: executable S0 contract gate, S1 typed wire kernel, S2 SQLite kernel, and S3 service shell; product APIs pending.**
+> **Status: S0–S4 foundations, protected administration, authentication, and enrollment implemented.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` shell. S3 adds isolated private HTTP and mode-`0600` Unix-socket routers, live/ready health checks, request IDs, bounded request bodies, bounded blocking SQLite work, structured logs, and graceful shutdown. It does **not** provide authentication, enrollment, service repositories, product handlers, a protocol client, web UI, or runtime injection. `aj`, `aj-admin`, and runtime adapters remain explicit status-2 stubs; Hermes and Muse injection surfaces remain unresolved and require revalidation on supported releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, one-use enrollment, credential-class separation, immediate rotation/revocation, and explicit same-installation recovery after lost responses or credential-file failures. S5+ record APIs, web UI, durable adapter delivery, and runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
 ## Product model
 
@@ -34,12 +34,13 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Area | Status |
 | --- | --- |
 | Product design and v1 decisions | Documented in `docs/design.md` |
-| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 27-path/29-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
+| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 29-path/31-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
 | Rust domain and protocol wire kernel | Executable: complete S1 DTOs, duplicate-key rejection, canonical append bytes, authenticated bounded cursors, and normative wire examples |
 | SQLite kernel | Executable: pinned bundled SQLite/FTS5 driver, numbered migrations, verified connection policy, explicit transactions, read-only connections, concurrent access, and isolated backup/restore verification |
-| Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, structured tracing, and graceful shutdown |
-| Product repositories, authentication, adapters, and client implementation | Scaffolded boundaries only; no product HTTP handlers or repositories |
-| Binaries | `journald` runs the S3 health shell; `aj`, `aj-admin`, and runtime adapters remain explicit status-2 stubs |
+| Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
+| Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
+| Record APIs and adapters | S5+ unresolved; no claim of working record or runtime delivery |
+| Binaries | `journald`, `aj enroll`, and `aj-admin` bootstrap commands work on Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
@@ -71,15 +72,15 @@ api/                         language-neutral OpenAPI and protocol fixtures
 crates/journal-domain/       constants, typed records, states, and validation
 crates/journal-protocol/     typed wire DTOs, strict JSON, canonical append, authenticated cursors
 crates/journal-storage-sqlite/ SQLite connections, migrations, transactions, FTS5, and backup/restore
-crates/journal-service/      service, authorization, mailbox, and clock ports
-crates/journal-client/       authenticated client seam without an HTTP stack
+crates/journal-service/      concrete bootstrap transactions/authentication and future journal ports
+crates/journal-client/       typed bootstrap client, HTTP/Unix transports, private credential files
 crates/journal-adapter-core/ registration, heartbeat, custody, routing, envelope ports
 crates/journal-adapter-spool/ crash-recovery contract and pending store
 crates/journal-runtime-hermes/ unresolved Hermes runtime boundary
 crates/journal-runtime-muse/ unresolved Muse runtime boundary
-crates/journald/             runnable S3 service shell; health routes only
-crates/aj/                   not-implemented principal CLI binary
-crates/aj-admin/             not-implemented protected-admin CLI binary
+crates/journald/             runnable shell, protected bootstrap handlers, authentication boundaries
+crates/aj/                   one-use enrollment CLI
+crates/aj-admin/             protected local provisioning, rotation, revocation, and recovery CLI
 crates/journal-adapter-hermes/ not-implemented Hermes adapter binary
 crates/journal-adapter-muse/ not-implemented Muse adapter binary
 migrations/                  numbered SQLite migrations
@@ -93,7 +94,7 @@ docs/                        design, protocol, security, operations, and plans
 
 ## Build and test
 
-Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. The workspace uses edition 2024 and pins `serde`, `serde_json`, `thiserror`, `base64`, `hmac`, `sha2`, Jiff, `rusqlite`, Tokio, Axum, Tower, and tracing. Tokio/Axum/Tower provide the S3 listener and bounded async shell; tracing emits structured JSON process and request events. The cryptographic and encoding crates implement bounded HMAC-SHA-256 cursors; timezone-database-free Jiff parsing validates RFC 3339 wire timestamps; `rusqlite` uses only bundled SQLite/FTS5 and online-backup features. No ORM, connection pool, or `async-trait` is selected.
+Requirements: Rust 1.85 or newer, Python 3, and a POSIX shell. Unix is required for protected administration and private credential files; Windows builds fail those operations explicitly rather than weakening permissions. The workspace uses edition 2024 and pins `serde`, `serde_json`, `thiserror`, `base64`, `hmac`, `sha2`, Jiff, `rusqlite`, Tokio, Axum, Tower, tracing, `getrandom`, and `reqwest`. Tokio/Axum/Tower provide listeners and bounded blocking work; tracing emits redacted structured process and request metadata. OS randomness supplies 256-bit bearer secrets, SHA-256 supplies stored digests, and the client uses HTTP/HTTPS or the protected Unix socket without redirects or automatic retries. `rusqlite` uses bundled SQLite/FTS5 and online-backup features. No ORM, connection pool, or `async-trait` is selected.
 
 ```bash
 cargo fmt --all -- --check
@@ -101,13 +102,14 @@ cargo test --locked --workspace --all-targets
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --locked --workspace
 python3 tests/migration_contract_test.py
+python3 tests/s4_bootstrap_test.py
 python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; the executable S0 OpenAPI gate for the exact 27-path/29-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands are safe to run without credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S0 OpenAPI gate for the exact 29-path/31-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
 
-`journald` is a runnable health shell. Its TCP listener is plain HTTP and must remain behind private HTTPS ingress; it defaults to loopback. The administrative socket requires an existing private parent directory and is created mode `0600`.
+`journald` serves health, enrollment, authenticated identity, and protected administration. Its TCP listener is plain HTTP and must remain behind private HTTPS ingress; it defaults to loopback. The administrative socket requires an existing private parent directory, is created mode `0600`, and verifies the kernel-reported peer UID.
 
 ```bash
 cargo build --locked --workspace --bins
@@ -116,19 +118,17 @@ mkdir -m 700 service-state
   --database service-state/journal.db \
   --admin-socket service-state/admin.sock \
   --listen 127.0.0.1:8080
-./target/debug/aj             # prints not implemented; exits 2
-./target/debug/aj-admin       # prints not implemented; exits 2
 ```
 
-Only `/health/live` and `/health/ready` are implemented. All product and administrative operations return non-leaking JSON `404` responses. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries also exit 2.
+Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll. Public administration paths always return non-leaking JSON `404` responses. Future record and delivery routes enforce their credential class but return explicit `501` errors instead of fabricated success. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries remain status-2 stubs.
 
 ## Implementation sequence
 
-S0 through S3 are executable contract, wire, SQLite, and service-shell gates. The remaining sequence is:
+S0 through S4 are executable contract, wire, SQLite, service-shell, and security-bootstrap gates. The remaining sequence is:
 
-1. Implement administration, authentication, credential rotation, and enrollment.
-2. Implement append/read/list/search, idempotency, authorization, and mailbox verticals.
-3. Implement `aj`, `aj-admin`, and enrollment against the typed client.
+1. Implement append/read/list/search, idempotency, authorization, and mailbox verticals.
+2. Add corresponding product commands to `aj` and typed client methods.
+3. Complete registration, custody, telemetry, and requeue operations.
 4. Implement the generic adapter core and durable local spool; prove custody semantics with a fake runtime.
 5. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
 6. Add safe read-only web views and complete operational restore fencing and canary evidence.

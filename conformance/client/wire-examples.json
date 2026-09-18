@@ -215,6 +215,23 @@
       "class": "principal-client",
       "rotated_at": "2026-01-01T00:00:00Z"
     },
+    "OneTimeReplacementSecret": {
+      "credential_id": "credential-2",
+      "secret": "replacement-example"
+    },
+    "CredentialRotationResponse": {
+      "metadata": {
+        "credential_id": "credential-1",
+        "principal_id": "agent-alpha",
+        "class": "principal-client",
+        "rotated_at": "2026-01-01T00:00:00Z",
+        "replacement_credential_id": "credential-2"
+      },
+      "replacement_secret": {
+        "credential_id": "credential-2",
+        "secret": "replacement-example"
+      }
+    },
     "RequeueResponse": {
       "mailbox_item_id": "mailbox-1",
       "attempt_id": "attempt-2",

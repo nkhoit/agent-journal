@@ -13,5 +13,9 @@ path = "src/lib.rs"
 name = "aj"
 path = "src/main.rs"
 
+[dependencies]
+journal-client = { path = "../journal-client" }
+serde_json.workspace = true
+
 [lints]
 workspace = true

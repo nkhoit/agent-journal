@@ -8,6 +8,12 @@ repository.workspace = true
 
 [dependencies]
 journal-domain = { path = "../journal-domain" }
+journal-protocol = { path = "../journal-protocol" }
+journal-storage-sqlite = { path = "../journal-storage-sqlite" }
+rusqlite.workspace = true
+sha2.workspace = true
+jiff.workspace = true
+getrandom = "=0.3.4"
 serde.workspace = true
 thiserror.workspace = true
 

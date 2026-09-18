@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 journal-protocol = { path = "../journal-protocol" }
+journal-service = { path = "../journal-service" }
 journal-storage-sqlite = { path = "../journal-storage-sqlite" }
 serde.workspace = true
 serde_json.workspace = true

@@ -1,14 +1,21 @@
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
 
-use journal_storage_sqlite::{Database, StorageError};
+#[cfg(unix)]
+use journal_storage_sqlite::Database;
+use journal_storage_sqlite::StorageError;
 use thiserror::Error;
+#[cfg(unix)]
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::JoinError;
+#[cfg(unix)]
+use tokio::task::JoinSet;
 
 use crate::config::Config;
+#[cfg(unix)]
 use crate::http::{ServiceState, admin_router_with_timeout, public_router_with_timeout};
 
 #[derive(Debug, Error)]
@@ -162,6 +169,12 @@ impl Server {
             self.body_read_timeout,
             shutdown_rx.clone(),
         );
+        use std::os::unix::fs::MetadataExt;
+        let admin_owner = std::fs::metadata(self.admin_socket.path())
+            .map_err(ServerError::ServeAdmin)?
+            .uid();
+        let admin_router =
+            admin_router.layer(axum::Extension(crate::http::AdminOwner(admin_owner)));
         let shutdown_timeout = self.shutdown_timeout;
         let mut listeners = JoinSet::new();
         let public_shutdown = shutdown_rx.clone();
@@ -173,10 +186,13 @@ impl Server {
         });
         let admin_shutdown = shutdown_rx;
         listeners.spawn(async move {
-            axum::serve(self.admin_listener, admin_router)
-                .with_graceful_shutdown(wait_for_shutdown(admin_shutdown))
-                .await
-                .map_err(ServerError::ServeAdmin)
+            axum::serve(
+                self.admin_listener,
+                admin_router.into_make_service_with_connect_info::<crate::http::AdminPeer>(),
+            )
+            .with_graceful_shutdown(wait_for_shutdown(admin_shutdown))
+            .await
+            .map_err(ServerError::ServeAdmin)
         });
         tracing::info!(
             event = "service_ready",
@@ -241,6 +257,7 @@ fn validate_admin_socket_parent(path: &Path) -> Result<(), ServerError> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     if !*shutdown.borrow() {
         let _ = shutdown.changed().await;

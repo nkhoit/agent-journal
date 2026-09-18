@@ -591,6 +591,8 @@ POST /v1/admin/principals
 POST /v1/admin/spaces
 POST /v1/admin/memberships
 POST /v1/admin/credentials/rotate
+POST /v1/admin/credentials/revoke
+POST /v1/admin/enrollment/recover
 POST /v1/admin/mailbox-items/{item_id}/requeue
 ```
 

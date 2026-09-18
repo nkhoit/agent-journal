@@ -297,6 +297,7 @@ paths:
       tags: [adapters]
       operationId: exchangeEnrollmentTicket
       summary: Exchange a one-use enrollment ticket for separately scoped client and adapter credentials
+      description: Consumed tickets never replay. A lost response or failed credential-file write requires protected administrator recovery revoking both credential lineages, then a fresh ticket for the same installation. A different installation cannot take over an existing registration.
       security: [{ enrollmentTicket: [] }]
       requestBody:
         required: true
@@ -668,6 +669,7 @@ paths:
       tags: [administration]
       operationId: rotateCredential
       summary: Rotate and revoke a credential
+      description: Atomically revoke the old credential immediately and issue a replacement of the same class, binding, and expiration. Write the returned secret atomically to mode-0600 storage without stdout. A lost response or failed post-commit file write requires administrator revocation of the inaccessible replacement; secrets cannot be retrieved again. If its identifier is lost, enrollment recovery revokes both lineages using the known adapter and installation before fresh enrollment.
       security: []
       x-agent-journal-authorization: protected-unix-socket-peer-credentials
       x-agent-journal-public-https: false
@@ -678,16 +680,62 @@ paths:
             schema: { $ref: '#/components/schemas/CredentialRotateRequest' }
       responses:
         '200':
-          description: Non-secret credential metadata. Secret delivery is deployment-channel specific.
+          description: Old credential revoked and replacement issued atomically. Replacement secret returned once through the protected Unix socket; never replayed or logged.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestID' }
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/CredentialMetadata' }
+              schema: { $ref: '#/components/schemas/CredentialRotationResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/admin/credentials/revoke:
+    post:
+      tags: [administration]
+      operationId: revokeCredential
+      summary: Revoke a credential immediately
+      security: []
+      x-agent-journal-authorization: protected-unix-socket-peer-credentials
+      x-agent-journal-public-https: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialRevokeRequest' }
+      responses:
+        '204':
+          description: Credential revoked; no response body.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/admin/enrollment/recover:
+    post:
+      tags: [administration]
+      operationId: recoverEnrollment
+      summary: Revoke both enrollment credential lineages for the same installation
+      description: Revoke principal-client and delivery-adapter credentials, including replacements. A fresh ticket must be issued separately for the same installation. Consumed tickets never replay and recovery cannot authorize another installation to take over.
+      security: []
+      x-agent-journal-authorization: protected-unix-socket-peer-credentials
+      x-agent-journal-public-https: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollmentRecoveryRequest' }
+      responses:
+        '204':
+          description: Both credential lineages revoked; no response body or replacement secrets.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /v1/admin/mailbox-items/{item_id}/requeue:
     post:
       tags: [administration]
@@ -1229,6 +1277,33 @@ components:
         class: { type: string, enum: [principal-client, delivery-adapter] }
         rotated_at: { type: string, format: date-time }
         replacement_credential_id: { type: string, maxLength: 128 }
+    CredentialRevokeRequest:
+      type: object
+      required: [credential_id]
+      additionalProperties: false
+      properties:
+        credential_id: { type: string, maxLength: 128 }
+        reason: { type: string, maxLength: 512 }
+    CredentialRotationResponse:
+      type: object
+      required: [metadata, replacement_secret]
+      properties:
+        metadata: { $ref: '#/components/schemas/CredentialMetadata' }
+        replacement_secret: { $ref: '#/components/schemas/OneTimeReplacementSecret' }
+    OneTimeReplacementSecret:
+      type: object
+      required: [credential_id, secret]
+      description: One-time replacement credential of the class in metadata; write atomically to mode-0600 storage, never stdout or logs.
+      properties:
+        credential_id: { type: string, maxLength: 128 }
+        secret: { type: string, minLength: 1, maxLength: 512, x-agent-journal-one-time-secret: true }
+    EnrollmentRecoveryRequest:
+      type: object
+      required: [adapter_id, instance_id]
+      additionalProperties: false
+      properties:
+        adapter_id: { type: string, minLength: 1, maxLength: 128 }
+        instance_id: { type: string, minLength: 1, maxLength: 128 }
     EnrollmentTicketCreateRequest:
       type: object
       required: [principal_id, adapter_id, ttl_seconds]
