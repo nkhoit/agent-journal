@@ -559,6 +559,44 @@ pub struct CredentialMetadata {
     pub replacement_credential_id: Option<String>,
 }
 
+pub type CredentialRevokeRequest = CredentialRotateRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRotationResponse {
+    pub metadata: CredentialMetadata,
+    pub replacement_secret: OneTimeReplacementSecret,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneTimeReplacementSecret {
+    pub credential_id: String,
+    pub secret: String,
+}
+
+impl fmt::Debug for OneTimeReplacementSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OneTimeReplacementSecret")
+            .field("credential_id", &self.credential_id)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollmentRecoveryRequest {
+    pub adapter_id: String,
+    pub instance_id: String,
+}
+
+impl EnrollmentRecoveryRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        validate_identifier("adapter_id", &self.adapter_id)?;
+        validate_identifier("instance_id", &self.instance_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrollmentTicketCreateRequest {

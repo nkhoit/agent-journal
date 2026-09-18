@@ -29,6 +29,8 @@ Implement the shared ports in `crates/journal-adapter-core` and the durable cont
 
 ## Local state
 
+Enrollment credentials are separate principal-client and delivery-adapter secrets. Persist each atomically in mode-`0600` storage without printing it. Lost enrollment responses or failed credential writes require protected administrator recovery that revokes both credential lineages, followed by a fresh ticket for the same installation. Never replay a consumed ticket or use recovery to claim another installation's registration.
+
 A minimal durable spool has `inbound_attempts`, `route_bindings`, and `adapter_meta`. Each inbound row persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `recoverable` returns unfinished rows after restart; accepted and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
 
 `journal-adapter-spool` currently exposes this contract and a `NotImplementedStore`; it does not claim durable storage. The future implementation must fsync the full row before host-custody commit and prove recovery with crash tests.

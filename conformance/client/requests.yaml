@@ -95,3 +95,9 @@ operations:
   - operation_id: requeueMailboxItem
     method: POST
     path: /v1/admin/mailbox-items/{item_id}/requeue
+  - operation_id: revokeCredential
+    method: POST
+    path: /v1/admin/credentials/revoke
+  - operation_id: recoverEnrollment
+    method: POST
+    path: /v1/admin/enrollment/recover

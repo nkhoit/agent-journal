@@ -9,6 +9,9 @@ use journal_domain::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod bootstrap;
+pub use bootstrap::*;
+
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error("validation failed: {0}")]

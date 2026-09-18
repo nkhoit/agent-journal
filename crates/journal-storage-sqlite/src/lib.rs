@@ -8,7 +8,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-pub const MIGRATION_VERSION: i64 = 1;
+pub const MIGRATION_VERSION: i64 = 2;
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BACKUP_PAGES_PER_STEP: i32 = 128;
@@ -21,10 +21,16 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: INITIAL_MIGRATION,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: INITIAL_MIGRATION,
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("../../../migrations/0002_enrollment_recovery.sql"),
+    },
+];
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -379,6 +385,7 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
             });
         }
     }
+    verify_schema(&transaction)?;
     transaction
         .commit()
         .map_err(|source| StorageError::Migration {

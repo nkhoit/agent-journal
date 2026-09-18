@@ -115,6 +115,8 @@ async fn public_router_hides_every_administrative_path() {
         "/v1/admin/spaces",
         "/v1/admin/memberships",
         "/v1/admin/credentials/rotate",
+        "/v1/admin/credentials/revoke",
+        "/v1/admin/enrollment/recover",
         "/v1/admin/mailbox-items/item-1/requeue",
     ];
 
@@ -434,7 +436,7 @@ async fn bound_server_serves_both_transports_survives_disconnect_and_shuts_down(
         b"POST /v1/admin/principals HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert!(admin.starts_with("HTTP/1.1 404 Not Found"), "{admin}");
+    assert!(admin.starts_with("HTTP/1.1 400 Bad Request"), "{admin}");
 
     shutdown_tx.send(()).expect("request shutdown");
     timeout(Duration::from_secs(2), serving)
@@ -592,7 +594,7 @@ async fn server_startup_rejects_bad_database_and_admin_socket_paths() {
         .connect()
         .expect("connect newer-schema database")
         .execute(
-            "UPDATE schema_migrations SET version = ?1",
+            "UPDATE schema_migrations SET version = ?1 WHERE version = (SELECT max(version) FROM schema_migrations)",
             [MIGRATION_VERSION + 1],
         )
         .expect("advance schema version");
@@ -639,6 +641,7 @@ fn start_journald(temporary: &TempDir) -> (std::process::Child, mpsc::Receiver<S
 
     let admin_socket = temporary.path("admin.sock");
     let mut child = Command::new(env!("CARGO_BIN_EXE_journald"))
+        .env("JOURNAL_LOG_LEVEL", "info")
         .args([
             "--database",
             temporary.path("journal.db").to_str().unwrap(),

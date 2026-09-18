@@ -1,13 +1,27 @@
-//! Transport seam for the authenticated client. Request construction and
-//! network behavior are intentionally pending.
+//! Typed bootstrap client with HTTP and protected Unix-socket transports.
+
+pub mod private_file;
+mod transport;
+pub use transport::HttpTransport;
 
 use journal_protocol::{Request, Response, Transport, TransportError};
 use thiserror::Error;
 
 pub use journal_protocol;
 
+pub use journal_protocol::{
+    CredentialRotationResponse as RotationResponse, EnrollmentRecoveryRequest,
+    OneTimeReplacementSecret as ReplacementSecret,
+};
+
 #[derive(Debug, Error)]
 pub enum ClientError {
+    #[error("HTTP request failed with status {status}")]
+    Http { status: u16 },
+    #[error("invalid JSON payload")]
+    Json,
+    #[error("invalid request")]
+    InvalidRequest,
     #[error("journal service unavailable")]
     Unavailable,
     #[error("transport: {0}")]
@@ -16,6 +30,7 @@ pub enum ClientError {
 
 pub struct Client {
     transport: Option<Box<dyn Transport>>,
+    last_request_id: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -28,17 +43,143 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    fn json<I: serde::Serialize, O: serde::de::DeserializeOwned + serde::Serialize>(
+        &self,
+        path: &str,
+        input: &I,
+        bearer: Option<&str>,
+    ) -> Result<O, ClientError> {
+        let mut request = Request::new(
+            "POST",
+            path,
+            serde_json::to_vec(input).map_err(|_| ClientError::Json)?,
+        );
+        request
+            .headers
+            .insert("Content-Type".into(), "application/json".into());
+        if let Some(bearer) = bearer {
+            if bearer.is_empty() || !bearer.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(ClientError::InvalidRequest);
+            }
+            request
+                .headers
+                .insert("Authorization".into(), format!("Bearer {bearer}"));
+        }
+        let response = self.send(request)?;
+        if !(200..300).contains(&response.status) {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
+    }
+
+    pub fn create_principal(
+        &self,
+        input: &journal_protocol::PrincipalCreateRequest,
+    ) -> Result<journal_protocol::domain::Principal, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/principals", input, None)
+    }
+
+    pub fn create_space(
+        &self,
+        input: &journal_protocol::SpaceCreateRequest,
+    ) -> Result<journal_protocol::domain::Space, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/spaces", input, None)
+    }
+
+    pub fn set_membership(
+        &self,
+        input: &journal_protocol::MembershipRequest,
+    ) -> Result<journal_protocol::Membership, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/memberships", input, None)
+    }
+
+    pub fn provision_adapter(
+        &self,
+        input: &journal_protocol::AdapterProvisionRequest,
+    ) -> Result<journal_protocol::AdapterProvisionResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/adapters", input, None)
+    }
+
+    pub fn create_ticket(
+        &self,
+        input: &journal_protocol::EnrollmentTicketCreateRequest,
+    ) -> Result<journal_protocol::EnrollmentTicketCreateResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/enrollment-tickets", input, None)
+    }
+
+    pub fn enroll(
+        &self,
+        ticket: &str,
+        input: &journal_protocol::EnrollmentExchangeRequest,
+    ) -> Result<journal_protocol::EnrollmentExchangeResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/enrollment/exchange", input, Some(ticket))
+    }
+
+    pub fn rotate(
+        &self,
+        input: &journal_protocol::CredentialRotateRequest,
+    ) -> Result<RotationResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/credentials/rotate", input, None)
+    }
+
+    pub fn revoke(
+        &self,
+        input: &journal_protocol::CredentialRotateRequest,
+    ) -> Result<(), ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.mutate("/v1/admin/credentials/revoke", input)
+    }
+
+    pub fn recover_enrollment(&self, input: &EnrollmentRecoveryRequest) -> Result<(), ClientError> {
+        journal_protocol::domain::validate_identifier("adapter_id", &input.adapter_id)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        journal_protocol::domain::validate_identifier("instance_id", &input.instance_id)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        self.mutate("/v1/admin/enrollment/recover", input)
+    }
+
+    fn mutate(&self, path: &str, input: &impl serde::Serialize) -> Result<(), ClientError> {
+        let mut request = Request::new(
+            "POST",
+            path,
+            serde_json::to_vec(input).map_err(|_| ClientError::Json)?,
+        );
+        request
+            .headers
+            .insert("Content-Type".into(), "application/json".into());
+        let response = self.send(request)?;
+        if !(200..300).contains(&response.status) {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        Ok(())
+    }
+
     pub fn new<T>(transport: T) -> Self
     where
         T: Transport + 'static,
     {
         Self {
             transport: Some(Box::new(transport)),
+            last_request_id: std::sync::Mutex::new(None),
         }
     }
 
     pub fn without_transport() -> Self {
-        Self { transport: None }
+        Self {
+            transport: None,
+            last_request_id: std::sync::Mutex::new(None),
+        }
     }
 
     pub fn transport_configured(&self) -> bool {
@@ -46,12 +187,39 @@ impl Client {
     }
 
     pub fn send(&self, request: Request) -> Result<Response, ClientError> {
-        self.transport
+        if let Ok(mut id) = self.last_request_id.lock() {
+            *id = None;
+        }
+        let response = self
+            .transport
             .as_ref()
             .ok_or(ClientError::Unavailable)?
             .send(request)
-            .map_err(ClientError::Transport)
+            .map_err(ClientError::Transport)?;
+        if let Ok(mut id) = self.last_request_id.lock() {
+            *id = response
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("x-request-id"))
+                .map(|(_, value)| value)
+                .filter(|value| safe_request_id(value))
+                .cloned();
+        }
+        Ok(response)
     }
+
+    /// Correlation for sequential CLI calls, not concurrent request attribution.
+    pub fn last_request_id(&self) -> Option<String> {
+        self.last_request_id.lock().ok().and_then(|id| id.clone())
+    }
+}
+
+fn safe_request_id(value: &str) -> bool {
+    value.len() <= 80
+        && value.split('-').count() == 3
+        && value
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -61,5 +229,18 @@ mod tests {
     #[test]
     fn missing_transport_is_not_reported_as_configured() {
         assert!(!Client::without_transport().transport_configured());
+    }
+
+    #[test]
+    fn correlation_rejects_credentials_and_log_injection() {
+        assert!(safe_request_id("abc123-123-0"));
+        for value in [
+            "secret-canary",
+            "abc-1-0\ninjected",
+            "aa--bb",
+            &"e".repeat(64),
+        ] {
+            assert!(!safe_request_id(value));
+        }
     }
 }

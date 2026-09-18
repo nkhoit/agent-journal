@@ -34,6 +34,10 @@ Adapters place authenticated envelope metadata outside the body where the runtim
 
 ## Fencing and recovery
 
+Credential rotation is one atomic revoke-and-replace transaction with immediate revocation, not an overlap period. The replacement secret is returned once through protected Unix administration and written atomically to mode-`0600` storage without stdout or logging. A lost response or post-commit file-write failure requires administrator revocation of the inaccessible replacement; rollback or secret replay is not available.
+
+Enrollment response loss or failure to persist either credential requires protected enrollment recovery for the bound adapter and installation. Recovery revokes both principal-client and delivery-adapter credential lineages, including rotated descendants, before a fresh ticket is issued for that same installation. A consumed ticket is never replayable. A different installation cannot use recovery or a fresh ticket to take over the existing installation.
+
 Only one active adapter installation is allowed per principal in v1. Registration has a server-issued generation and `lease_expires_at`; heartbeats renew that lease. Replacement is compare-and-swap and fences later central operations from stale generations. Claims explicitly transition from `active` to `committed`, `expired`, or `cancelled`; the database permits only one active claim per adapter/generation, so expiry must be recorded before another claim is created. The unavoidable local check-to-send race means planned replacement should drain first and forced replacement must accept possible duplicate runtime turns.
 
 Central restore is a recovery event: close ingress, quiesce adapters, reconcile protected audit events, invalidate claims/registrations, advance generations, compare spools/checkpoints, run ACL and delivery probes, and reopen only after evidence is complete. If evidence is incomplete, remain read-only and rotate affected credentials.
@@ -41,3 +45,5 @@ Central restore is a recovery event: close ingress, quiesce adapters, reconcile 
 ## Audit and privacy
 
 Audit credential, ACL, adapter, requeue, tombstone, and backup/restore mutations. Keep protected mutation logs outside the SQLite recovery unit. Public examples contain no live identifiers. Stable URLs use immutable record IDs but reveal only records authorized to the requester.
+
+The current structured stderr events provide request-correlated operational diagnostics, not durable external audit. A `bootstrap_committed` event is emitted after a successful central transaction, but its absence cannot establish rollback or safe retry. Neither stderr nor the SQLite-local credential audit satisfies the protected external recovery-log requirement; that remains an operations acceptance gate.

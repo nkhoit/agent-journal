@@ -25,6 +25,8 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" clippy --locked --workspace --all-targets -- -D warnings
       - name: Build workspace
         run: cargo +"$RUST_TOOLCHAIN" build --locked --workspace
+      - name: Protected bootstrap and recovery acceptance
+        run: python3 tests/s4_bootstrap_test.py
       - name: Migration contract
         run: python3 tests/migration_contract_test.py
       - name: Public hygiene

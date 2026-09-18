@@ -220,7 +220,10 @@ fn failed_migration_rolls_back_and_can_be_retried() {
     drop(connection);
 
     let database = Database::open(&path).expect("retry migration");
-    assert_eq!(database.schema_version().expect("schema version"), 1);
+    assert_eq!(
+        database.schema_version().expect("schema version"),
+        MIGRATION_VERSION
+    );
 }
 
 #[test]
@@ -241,7 +244,6 @@ fn concurrent_database_open_serializes_initial_migration() {
                 Database::open(path.as_path())
             }));
         }
-
         for thread in threads {
             thread
                 .join()
@@ -249,6 +251,72 @@ fn concurrent_database_open_serializes_initial_migration() {
                 .expect("concurrent database open");
         }
     }
+}
+#[test]
+fn version_one_upgrade_preserves_installation_and_credential_recovery_scope() {
+    let temporary = TempDir::new("enrollment-upgrade");
+    let path = temporary.database("journal.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
+        .unwrap();
+    connection.execute_batch("
+                INSERT INTO principals VALUES ('principal-test','Test','now',NULL);
+                INSERT INTO adapter_identities VALUES ('adapter-test','principal-test','now');
+                INSERT INTO adapter_registrations VALUES ('adapter-test','principal-test','installation-test',1,'active','now','later','now');
+                INSERT INTO credentials VALUES ('client-test','principal-test','principal-client','client-digest',NULL,'now',NULL,NULL);
+                INSERT INTO credentials VALUES ('delivery-test','principal-test','delivery-adapter','delivery-digest','adapter-test','now',NULL,NULL);
+            ").unwrap();
+    drop(connection);
+    let database = Database::open(&path).unwrap();
+    let connection = database.connect().unwrap();
+    let bound:i64=connection.query_row("SELECT count(*) FROM credentials WHERE enrollment_adapter_id='adapter-test' AND instance_id='installation-test'",[],|r|r.get(0)).unwrap();
+    assert_eq!(bound, 2);
+    let authorized:bool=connection.query_row("SELECT recovery_authorized FROM enrollment_installations WHERE adapter_id='adapter-test'",[],|r|r.get(0)).unwrap();
+    assert!(!authorized);
+    drop(connection);
+    assert_eq!(
+        Database::open(&path).unwrap().schema_version().unwrap(),
+        MIGRATION_VERSION
+    );
+}
+
+#[test]
+fn version_two_failure_rolls_back_columns_and_retains_version_one() {
+    let temporary = TempDir::new("enrollment-upgrade-rollback");
+    let path = temporary.database("journal.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
+        .unwrap();
+    connection
+        .execute_batch("CREATE TABLE enrollment_installations(conflict TEXT)")
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        Database::open(&path),
+        Err(StorageError::Migration { version: 2, .. })
+    ));
+    let connection = Connection::open(&path).unwrap();
+    let version: i64 = connection
+        .query_row("SELECT max(version) FROM schema_migrations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(version, 1);
+    assert!(
+        connection
+            .prepare("SELECT enrollment_adapter_id FROM credentials")
+            .is_err()
+    );
+    connection
+        .execute_batch("DROP TABLE enrollment_installations")
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        Database::open(&path).unwrap().schema_version().unwrap(),
+        MIGRATION_VERSION
+    );
 }
 
 #[test]
@@ -259,8 +327,8 @@ fn newer_schema_is_rejected_without_mutation() {
     let connection = database.connect().expect("connect");
     connection
         .execute(
-            "UPDATE schema_migrations SET version = 2 WHERE version = 1",
-            [],
+            "INSERT INTO schema_migrations(version,applied_at) VALUES (?, 'future')",
+            [MIGRATION_VERSION + 1],
         )
         .expect("advance schema artificially");
     drop(connection);
@@ -269,9 +337,9 @@ fn newer_schema_is_rejected_without_mutation() {
     assert!(matches!(
         Database::open(&path),
         Err(StorageError::IncompatibleSchema {
-            found: 2,
-            supported: 1
-        })
+            found,
+            supported
+        }) if found == MIGRATION_VERSION + 1 && supported == MIGRATION_VERSION
     ));
 }
 
@@ -385,7 +453,7 @@ fn backup_is_consistent_and_verified_in_isolation() {
     let restored_database = Database::open(&restored_path).expect("open restored database");
     assert_eq!(
         restored_database.schema_version().expect("restored schema"),
-        1
+        MIGRATION_VERSION
     );
     assert!(matches!(
         database.backup_to(&backup_path),

@@ -96,7 +96,51 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(OneTimeDeliveryAdapterSecret, "OneTimeDeliveryAdapterSecret");
     example!(EnrollmentExchangeResponse, "EnrollmentExchangeResponse");
     example!(CredentialMetadata, "CredentialMetadata");
+    example!(CredentialRotationResponse, "CredentialRotationResponse");
+    example!(OneTimeReplacementSecret, "OneTimeReplacementSecret");
     example!(RequeueResponse, "RequeueResponse");
+}
+
+#[test]
+fn bootstrap_recovery_requests_are_strict_and_rotation_secrets_are_redacted() {
+    let revoke: CredentialRevokeRequest =
+        serde_json::from_value(json!({"credential_id":"credential-1","reason":"recovery"}))
+            .unwrap();
+    revoke.validate().unwrap();
+    let recovery: EnrollmentRecoveryRequest =
+        serde_json::from_value(json!({"adapter_id":"adapter-1","instance_id":"instance-1"}))
+            .unwrap();
+    recovery.validate().unwrap();
+    assert!(serde_json::from_value::<EnrollmentRecoveryRequest>(
+        json!({"adapter_id":"adapter-1","instance_id":"instance-1","principal_id":"agent-alpha"})
+    ).is_err());
+    assert!(
+        EnrollmentRecoveryRequest {
+            adapter_id: "".into(),
+            instance_id: "instance-1".into(),
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        CredentialRevokeRequest {
+            credential_id: "credential-1".into(),
+            reason: Some("界".repeat(513)),
+        }
+        .validate()
+        .is_err()
+    );
+    let rotation: CredentialRotationResponse =
+        serde_json::from_value(wire_example("CredentialRotationResponse").clone()).unwrap();
+    assert!(!format!("{rotation:?}").contains("replacement-example"));
+    assert_required_fields::<CredentialRotationResponse>(
+        wire_example("CredentialRotationResponse").clone(),
+        &["metadata", "replacement_secret"],
+    );
+    assert_required_fields::<OneTimeReplacementSecret>(
+        wire_example("OneTimeReplacementSecret").clone(),
+        &["credential_id", "secret"],
+    );
 }
 
 #[test]
