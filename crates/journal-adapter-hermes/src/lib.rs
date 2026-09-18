@@ -191,15 +191,11 @@ pub fn run(config: Config) -> Result<(), RunError> {
     if config.once {
         adapter.tick().map(|_| ()).map_err(RunError::from)
     } else {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| RunError::Config(format!("cannot start runtime: {error}")))?;
-        runtime.block_on(run_loop(&mut adapter, config.poll_seconds))
+        run_loop(&mut adapter, config.poll_seconds)
     }
 }
 
-async fn run_loop<J, S, R, T, C>(
+fn run_loop<J, S, R, T, C>(
     adapter: &mut Adapter<'_, J, S, R, T, C>,
     poll_seconds: u64,
 ) -> Result<(), RunError>
@@ -210,17 +206,30 @@ where
     T: journal_adapter_core::Runtime,
     C: journal_adapter_core::Clock,
 {
-    let mut shutdown = ShutdownSignal::install()
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| RunError::Config(format!("cannot start runtime: {error}")))?;
+    let mut shutdown = runtime
+        .block_on(async { ShutdownSignal::install() })
         .map_err(|error| RunError::Config(format!("cannot install shutdown handler: {error}")))?;
     loop {
+        // `tick` performs synchronous journal and runtime HTTP. Keep it outside
+        // Tokio's context: reqwest::blocking may create/drop an internal runtime
+        // and must not run from within `Runtime::block_on`.
         match adapter.tick() {
             Ok(Progress::Idle | Progress::Worked | Progress::Backoff)
             | Err(CoreError::JournalUnavailable) => {}
             Err(error) => return Err(error.into()),
         }
-        tokio::select! {
-            _ = shutdown.wait() => return Ok(()),
-            _ = tokio::time::sleep(Duration::from_secs(poll_seconds)) => {}
+        let should_shutdown = runtime.block_on(async {
+            tokio::select! {
+                _ = shutdown.wait() => true,
+                _ = tokio::time::sleep(Duration::from_secs(poll_seconds)) => false,
+            }
+        });
+        if should_shutdown {
+            return Ok(());
         }
     }
 }
