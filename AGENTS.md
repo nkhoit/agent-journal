@@ -19,7 +19,7 @@ If artifacts conflict, do not silently choose one. Preserve the reviewed product
 
 ## Current status
 
-This repository is an implementation scaffold, not a working service. Check the status table in `README.md` before claiming anything works. A compiling crate, status-2 stub, or successful empty handler is not implementation evidence.
+The repository implements the journal service, protected Unix administration, central delivery, durable local spool, and generic adapter orchestration. Check the status table in `README.md` for acceptance evidence and unresolved work. Vendor runtime integration and S12 operational acceptance remain unresolved. A compiling crate, status-2 stub, or successful empty handler is not implementation evidence.
 
 Work in the slice order in `docs/implementation-plan.md`. Keep each change small enough to review and prove independently. Do not skip directly to Hermes or Muse integration: runtime adapters remain unresolved until the durable spool, generic orchestration, and fake-runtime conformance gates pass.
 
@@ -53,11 +53,11 @@ Never move runtime injection before durable local custody and central confirmati
 
 - `crates/journal-domain` — limits, domain states, validation, shared record types.
 - `crates/journal-protocol` — public wire DTOs and transport seam.
-- `crates/journal-storage-sqlite` — SQLite policy and future repositories.
+- `crates/journal-storage-sqlite` — SQLite policy, migrations, transactions, and backup/restore primitives.
 - `crates/journal-service` — authorization, service, mailbox, and clock boundaries.
 - `crates/journal-client` — typed authenticated client seam.
 - `crates/journal-adapter-core` — registration, fencing, routing, envelope, and orchestration boundaries.
-- `crates/journal-adapter-spool` — crash-recovery contract and future durable spool.
+- `crates/journal-adapter-spool` — durable SQLite spool, process lock, and crash recovery.
 - `crates/journal-runtime-*` — vendor-runtime boundaries; currently unresolved.
 - `crates/journald`, `crates/aj`, `crates/aj-admin` — service and CLI binaries.
 - `crates/journal-adapter-*` — runtime adapter binaries.

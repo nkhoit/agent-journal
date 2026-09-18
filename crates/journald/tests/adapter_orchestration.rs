@@ -23,9 +23,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::current_dir()
-            .unwrap()
-            .join("target")
+        let directory = std::env::var_os("AJ_CONFORMANCE_STATE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap().join("target"))
             .join(format!(
                 "adapter-http-{}-{}",
                 std::process::id(),
@@ -94,18 +94,10 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            return;
+        }
         std::fs::remove_dir_all(&self.directory).unwrap();
-    }
-}
-
-#[derive(Default)]
-struct Capture(RefCell<Vec<(Route, Envelope, String)>>);
-impl Runtime for Capture {
-    fn inject(&self, route: &Route, envelope: &Envelope, rendered: &str) -> CoreResult<String> {
-        self.0
-            .borrow_mut()
-            .push((route.clone(), envelope.clone(), rendered.into()));
-        Ok("runtime acceptance only".into())
     }
 }
 
@@ -191,7 +183,8 @@ fn exercise(f: &Fixture, endpoint: &str) {
     };
     let clock = TestClock(Cell::new(SystemTime::now()));
     let store = SqliteStore::open(f.directory.join("spool.db"), Limits::default()).unwrap();
-    let runtime = Capture::default();
+    let runtime =
+        journal_runtime_fake::FakeRuntime::durable(f.directory.join("acceptances.jsonl")).unwrap();
     let routes: StaticRoutes = [(
         "space/default".into(),
         Route {
@@ -212,11 +205,11 @@ fn exercise(f: &Fixture, endpoint: &str) {
     )
     .unwrap();
     assert_eq!(adapter.tick(), Err(CoreError::JournalUnavailable));
-    assert!(runtime.0.borrow().is_empty());
+    assert!(runtime.acceptances().is_empty());
     clock.0.set(clock.now() + Duration::from_secs(1));
     assert_eq!(adapter.tick(), Err(CoreError::JournalUnavailable));
     assert_eq!(journal.commits.borrow()[0], journal.commits.borrow()[1]);
-    let attempt = runtime.0.borrow()[0].1.attempt_id.clone();
+    let attempt = runtime.acceptances()[0].envelope.attempt_id.clone();
     assert!(store.get(&attempt).unwrap().pending_event.is_some());
     drop(adapter);
     drop(store);
@@ -233,9 +226,13 @@ fn exercise(f: &Fixture, endpoint: &str) {
     .unwrap();
     assert_eq!(adapter.tick().unwrap(), Progress::Worked);
     assert_eq!(journal.events.borrow()[0], journal.events.borrow()[1]);
-    let captured = runtime.0.borrow();
+    let captured = runtime.acceptances();
     assert_eq!(captured.len(), 1);
-    let (route, envelope, rendered) = &captured[0];
+    let journal_runtime_fake::Acceptance {
+        route,
+        envelope,
+        rendered,
+    } = &captured[0];
     assert_eq!(route.runtime_target, "private-target");
     assert_eq!(envelope.record_id, posted.record.id);
     assert_eq!(envelope.body, input.content);
@@ -259,12 +256,16 @@ fn exercise(f: &Fixture, endpoint: &str) {
         .unwrap();
     journal.revoke_at.set(journal.heartbeats.get() + 3);
     assert_eq!(adapter.tick(), Err(CoreError::JournalRejected(401)));
-    assert_eq!(runtime.0.borrow().len(), 1);
+    assert_eq!(runtime.acceptances().len(), 1);
 }
 
 #[test]
 fn real_http_client_spool_runtime_and_revocation() {
     let f = Fixture::new();
+    with_server(&f, |endpoint| exercise(&f, endpoint));
+}
+
+fn with_server(f: &Fixture, exercise: impl FnOnce(&str)) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();
@@ -285,9 +286,175 @@ fn real_http_client_spool_runtime_and_revocation() {
                     .unwrap();
             });
     });
-    exercise(&f, &endpoint);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| exercise(&endpoint)));
     stop.send(()).unwrap();
     thread.join().unwrap();
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[test]
+fn accept_then_crash_http_child() {
+    let Some(directory) = std::env::var_os("AJ_HTTP_CRASH_DIRECTORY") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let endpoint = std::env::var("AJ_HTTP_CRASH_ENDPOINT").unwrap();
+    let credential = std::env::var("AJ_HTTP_CRASH_CREDENTIAL").unwrap();
+    let journal = DeliveryJournal::new(
+        Client::new(HttpTransport::new(&endpoint).unwrap()),
+        credential,
+    );
+    let store = SqliteStore::open(directory.join("spool.db"), Limits::default()).unwrap();
+    let runtime =
+        journal_runtime_fake::FakeRuntime::durable(directory.join("acceptances.jsonl")).unwrap();
+    runtime.set_accept_then_crash(true);
+    let routes = crash_routes();
+    let clock = TestClock(Cell::new(SystemTime::now()));
+    Adapter::new(
+        &journal,
+        &store,
+        &routes,
+        &runtime,
+        &clock,
+        "installation".into(),
+    )
+    .unwrap()
+    .tick()
+    .unwrap();
+    panic!("runtime did not terminate child");
+}
+
+fn crash_routes() -> StaticRoutes {
+    [(
+        "space/default".into(),
+        Route {
+            key: "default".into(),
+            runtime_target: "private-test-target".into(),
+            enabled: true,
+        },
+    )]
+    .into_iter()
+    .collect()
+}
+
+#[test]
+fn real_http_accept_then_crash_recovers_same_attempt_with_duplicate_acceptance() {
+    let f = Fixture::new();
+    with_server(&f, |endpoint| {
+        let client = Client::new(HttpTransport::new(endpoint).unwrap());
+        let record = client
+            .append(
+                &f.principal,
+                "space",
+                "crash",
+                &wire::AppendRecordRequest {
+                    kind: "note".into(),
+                    content: "inert crash fixture".into(),
+                    attention: vec!["destination".into()],
+                    run_id: None,
+                    routing_key: None,
+                    relations: vec![],
+                },
+            )
+            .unwrap()
+            .record;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "accept_then_crash_http_child"])
+            .env("AJ_HTTP_CRASH_DIRECTORY", &f.directory)
+            .env("AJ_HTTP_CRASH_ENDPOINT", endpoint)
+            .env("AJ_HTTP_CRASH_CREDENTIAL", &f.delivery)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("runtime acceptance child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            status.code(),
+            Some(journal_runtime_fake::ACCEPT_THEN_CRASH_EXIT)
+        );
+        let runtime =
+            journal_runtime_fake::FakeRuntime::durable(f.directory.join("acceptances.jsonl"))
+                .unwrap();
+        let first = runtime.acceptances()[0].clone();
+        let accepted_before_crash = runtime.acceptances().len();
+        assert_eq!(accepted_before_crash, 1);
+        let store = SqliteStore::open(f.directory.join("spool.db"), Limits::default()).unwrap();
+        let saved = store.get(&first.envelope.attempt_id).unwrap();
+        assert!(saved.custody_confirmed);
+        assert_eq!(saved.injection_state, InjectionState::InFlight);
+        assert_eq!(
+            client
+                .delivery_status(&f.principal, &record.id, &wire::PageQuery::default())
+                .unwrap()
+                .items[0]
+                .state,
+            wire::domain::DeliveryState::HostAccepted
+        );
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            std::fs::copy(
+                f.directory.join("spool.db"),
+                f.directory.join("before-recovery.db"),
+            )
+            .unwrap();
+        }
+        let journal = DeliveryJournal::new(
+            Client::new(HttpTransport::new(endpoint).unwrap()),
+            f.delivery.clone(),
+        );
+        let clock = TestClock(Cell::new(SystemTime::now()));
+        let routes = crash_routes();
+        Adapter::new(
+            &journal,
+            &store,
+            &routes,
+            &runtime,
+            &clock,
+            "installation".into(),
+        )
+        .unwrap()
+        .tick()
+        .unwrap();
+        assert_eq!(runtime.acceptances().len(), 2);
+        assert_eq!(runtime.acceptances()[1], first);
+        assert_eq!(
+            store
+                .get(&first.envelope.attempt_id)
+                .unwrap()
+                .injection_state,
+            InjectionState::Accepted
+        );
+        assert_eq!(
+            client
+                .delivery_status(&f.principal, &record.id, &wire::PageQuery::default())
+                .unwrap()
+                .items[0]
+                .state,
+            wire::domain::DeliveryState::AdapterReportedRuntimeAccepted
+        );
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            std::fs::write(
+                f.directory.join("crash-evidence.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "phase": "runtime-accepted", "child_terminated": !status.success(),
+                    "accepted_before_crash": accepted_before_crash,
+                    "recovery_injections": runtime.acceptances().len() - accepted_before_crash
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+    });
 }
 
 #[cfg(unix)]

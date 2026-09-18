@@ -2,7 +2,7 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: S0–S10 foundations, protected bootstrap, journal queries, central delivery, durable spool, and generic adapter orchestration implemented.**
+> **Status: S0–S11 foundations, protected bootstrap, journal queries, central delivery, durable spool, generic adapter orchestration, and executable fake-runtime conformance implemented.**
 >
 > The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. Web UI and vendor runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
@@ -40,7 +40,7 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
-| Adapter delivery | Generic synchronous orchestration composes the typed delivery client and SQLite spool; durable custody, fenced local routing, bounded retries, atomic result/telemetry outbox, and fake-runtime crash recovery are implemented. S11 reusable conformance and vendor injection remain unresolved |
+| Adapter delivery | Generic synchronous orchestration composes the typed delivery client and SQLite spool; durable custody, fenced local routing, bounded retries, atomic result/telemetry outbox, and fake-runtime crash recovery are implemented. The S11 runner executes all 17 adapter scenarios with redacted persisted-state evidence; vendor injection remains unresolved |
 | Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, and `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
@@ -77,6 +77,7 @@ crates/journal-service/      bootstrap, authenticated records, and central deliv
 crates/journal-client/       typed bootstrap/journal client, HTTP/Unix transports, private credential files
 crates/journal-adapter-core/ orchestration, typed delivery bridge, routing, envelope ports
 crates/journal-adapter-spool/ durable SQLite spool, pressure gate, and process lock
+crates/journal-runtime-fake/ reusable acceptance capture and crash-injection runtime
 crates/journal-runtime-hermes/ unresolved Hermes runtime boundary
 crates/journal-runtime-muse/ unresolved Muse runtime boundary
 crates/journald/             runnable shell, protected bootstrap handlers, authentication boundaries
@@ -105,11 +106,17 @@ cargo build --locked --workspace
 python3 tests/migration_contract_test.py
 python3 tests/s4_bootstrap_test.py
 python3 tests/s7_delivery_test.py
+python3 scripts/adapter_conformance.py
 python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S0 OpenAPI gate for the exact 29-path/31-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 29-path/31-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
+
+`make adapter-conformance` writes redacted per-scenario JSON and a completion
+manifest under `target/adapter-conformance`. CI retains only those JSON artifacts.
+See the [fake-runtime contract](conformance/fake-runtime/README.md) for evidence
+privacy, crash semantics, and future runtime entrypoints.
 
 `journald` serves health, enrollment, authenticated identity, and protected administration. Its TCP listener is plain HTTP and must remain behind private HTTPS ingress; it defaults to loopback. The administrative socket requires an existing private parent directory, is created mode `0600`, and verifies the kernel-reported peer UID.
 
@@ -126,11 +133,10 @@ Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provis
 
 ## Implementation sequence
 
-S0 through S8 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, and central delivery gates. The remaining sequence is:
+S0 through S11 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, central delivery, durable spool, orchestration, and fake-runtime conformance gates. The remaining sequence is:
 
-1. Turn the generic adapter's tested fake boundaries into the reusable S11 runtime conformance runner.
-2. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
-3. Add safe read-only web views and complete operational restore fencing and canary evidence.
+1. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
+2. Add safe read-only web views and complete operational restore fencing and canary evidence.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).
 

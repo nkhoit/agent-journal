@@ -34,7 +34,11 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/delivery-tests");
+        let dir = std::env::var_os("AJ_CONFORMANCE_STATE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/delivery-tests")
+            });
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!(
             "{}-{}.db",
@@ -127,6 +131,9 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            return;
+        }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
         }
@@ -209,6 +216,30 @@ fn retryable_success_replay_and_requeue_keep_history_and_fence_old_attempts() {
     use domain::TelemetryState::*;
     let f = Fixture::new();
     f.append("one");
+    let (mailbox_id, attempt_id): (String, String) =
+        f.db.connect()
+            .unwrap()
+            .query_row(
+                "SELECT mailbox_item_id, attempt_id FROM delivery_attempts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert!(matches!(
+        f.service.record_delivery_event(
+            &f.delivery,
+            &mailbox_id,
+            &DeliveryEventRequest {
+                event_id: "pending-event".into(),
+                attempt_id,
+                generation: 1,
+                occurred_at: "2027-01-15T08:00:00Z".into(),
+                state: AdapterReportedRuntimeAccepted,
+                detail: Default::default(),
+            }
+        ),
+        Err(BootstrapError::Conflict)
+    ));
     let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
     let item = &claim.items[0];
     let retryable = event(item, "retryable", AdapterReportedRetryableFailure);

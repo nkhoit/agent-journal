@@ -670,6 +670,7 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "journal-adapter-core",
+ "journal-runtime-fake",
  "rusqlite",
  "serde_json",
  "sha2",
@@ -709,6 +710,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "journal-runtime-fake"
+version = "0.1.0"
+dependencies = [
+ "journal-adapter-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -758,6 +768,7 @@ dependencies = [
  "journal-adapter-spool",
  "journal-client",
  "journal-protocol",
+ "journal-runtime-fake",
  "journal-service",
  "journal-storage-sqlite",
  "serde",

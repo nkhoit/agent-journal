@@ -10,9 +10,9 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = std::env::current_dir()
-            .unwrap()
-            .join("target")
+        let path = std::env::var_os("AJ_CONFORMANCE_STATE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap().join("target"))
             .join(format!(
                 "orchestration-{}-{}",
                 std::process::id(),
@@ -27,6 +27,9 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            return;
+        }
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -275,6 +278,7 @@ impl FakeJournal<'_> {
 
 struct FakeRuntime<'a> {
     spool: &'a SqliteStore,
+    runtime: journal_runtime_fake::FakeRuntime,
     calls: RefCell<Vec<(Route, Envelope, String)>>,
     unavailable: Cell<bool>,
 }
@@ -282,6 +286,13 @@ impl<'a> FakeRuntime<'a> {
     fn new(spool: &'a SqliteStore) -> Self {
         Self {
             spool,
+            runtime: match std::env::var_os("ORCHESTRATION_CHILD_PATH") {
+                Some(path) => journal_runtime_fake::FakeRuntime::durable(
+                    PathBuf::from(path).join("acceptances.jsonl"),
+                )
+                .unwrap(),
+                None => journal_runtime_fake::FakeRuntime::default(),
+            },
             calls: RefCell::new(vec![]),
             unavailable: Cell::new(false),
         }
@@ -296,9 +307,8 @@ impl Runtime for FakeRuntime<'_> {
         self.calls
             .borrow_mut()
             .push((route.clone(), envelope.clone(), rendered.into()));
-        if self.unavailable.get() {
-            return Err(CoreError::RuntimeUnavailable("private detail".into()));
-        }
+        self.runtime.set_available(!self.unavailable.get());
+        let receipt = self.runtime.inject(route, envelope, rendered)?;
         if let Some(path) = std::env::var_os("ORCHESTRATION_CHILD_PATH") {
             use std::io::Write;
             let mut file = OpenOptions::new()
@@ -310,7 +320,7 @@ impl Runtime for FakeRuntime<'_> {
             file.sync_all().unwrap();
         }
         pause("runtime-accepted");
-        Ok("local receipt".into())
+        Ok(receipt)
     }
 }
 fn routes() -> StaticRoutes {
@@ -416,6 +426,17 @@ fn retry_schedule_is_durable_and_recovery_is_fair() {
         Some(clock.now() + Duration::from_secs(2))
     );
     assert_eq!(retry_delay(u64::MAX), Duration::from_secs(256));
+    runtime.unavailable.set(false);
+    clock.advance(2);
+    assert_eq!(adapter.tick().unwrap(), Progress::Idle);
+    adapter.tick().unwrap();
+    adapter.tick().unwrap();
+    for attempt in ["attempt-a", "attempt-b"] {
+        let saved = store.get(attempt).unwrap();
+        assert_eq!(saved.injection_state, InjectionState::Accepted);
+        assert!(saved.pending_event.is_none());
+    }
+    assert_eq!(runtime.runtime.acceptances().len(), 2);
 }
 
 #[test]
@@ -603,7 +624,14 @@ fn process_death_at_orchestration_boundaries_exposes_duplicate_risk() {
             std::thread::sleep(Duration::from_millis(5));
         }
         child.kill().unwrap();
-        child.wait().unwrap();
+        assert!(!child.wait().unwrap().success());
+        let accepted_before_crash = std::fs::read_to_string(f.0.join("acceptances.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .count();
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            std::fs::copy(f.0.join("spool.db"), f.0.join("before-recovery.db")).unwrap();
+        }
         let store = f.open();
         let clock = FakeClock::new();
         let j = FakeJournal::new(&store, vec![claim("a", None)]);
@@ -639,5 +667,18 @@ fn process_death_at_orchestration_boundaries_exposes_duplicate_risk() {
             store.get("attempt-a").unwrap().injection_state,
             InjectionState::Accepted
         );
+        if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
+            std::fs::write(
+                f.0.join("crash-evidence.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "phase": phase,
+                    "child_terminated": true,
+                    "recovery_injections": count,
+                    "accepted_before_crash": accepted_before_crash,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
     }
 }

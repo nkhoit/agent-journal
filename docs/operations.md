@@ -1,6 +1,6 @@
 # Operations
 
-The repository now has a runnable S3 service shell with live/ready health checks, but no product or administrative handlers. Health success proves process and SQLite schema availability only; it is not a production acceptance claim.
+The repository implements journal, central delivery, and protected Unix administrative handlers, plus durable local spooling and generic adapter orchestration. Health success proves process and SQLite schema availability only; it is not a production acceptance claim. Vendor runtime integration, protected external recovery audit, and service-level restore fencing remain unresolved; see the status table in [README.md](../README.md).
 
 ## Deployment shape
 

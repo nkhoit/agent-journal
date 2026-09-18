@@ -400,7 +400,7 @@ The local spool additionally kills before and after atomic result/outbox and
 acknowledgement commits. Acceptance-before-persistence visibly duplicates a send.
 Unix subprocess acceptance requires a filesystem that preserves private directory
 permissions; a Windows-mounted WSL checkout without those permissions fails closed.
-S11's reusable scenario runner and all vendor integrations remain separate.
+S11 adds the reusable scenario runner below; vendor integrations remain unresolved.
 
 ### Build
 
@@ -427,6 +427,24 @@ S11's reusable scenario runner and all vendor integrations remain separate.
 ## S11 — Executable fake-runtime conformance
 
 **Goal:** turn adapter semantics into a reusable gate for every runtime implementation.
+
+**Implemented:** `journal-runtime-fake` supplies inspectable resolved routes and
+exact envelopes, availability toggles, stable acceptance receipts, duplicate
+acceptance, and durable acceptance followed by child-process termination.
+`scripts/adapter_conformance.py` executes all 17 cases in
+`conformance/adapter/scenarios.yaml`, reusing the service delivery, S10 spool,
+and real HTTP orchestration assertions. Unknown, missing, duplicate, or changed
+scenario contracts, zero matching tests, and missing durable evidence fail closed.
+
+Each scenario produces allowlisted, redacted central/spool/runtime observations
+under `target/adapter-conformance`; a completion manifest is written only after
+every case passes. Real child-process crashes include acceptance before receipt
+persistence, followed by a restart that visibly accepts the same attempt twice.
+Identity relationships are anonymized within each execution; raw fixture databases
+are not publishable evidence. The runner and its regression tests are part of
+`make check` and CI. See the [runtime contract](../conformance/fake-runtime/README.md)
+for compatible future runtime entrypoints. Hermes and Muse remain status-2 stubs.
+No public API, central or spool migration, or credential-class change is introduced.
 
 ### Build
 

@@ -31,6 +31,16 @@ jobs:
         run: python3 tests/s5_records_test.py
       - name: Migration contract
         run: python3 tests/migration_contract_test.py
+      - name: Executable adapter conformance
+        run: |
+          python3 scripts/test_adapter_conformance.py
+          python3 scripts/adapter_conformance.py
+      - name: Retain redacted adapter evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adapter-conformance
+          path: target/adapter-conformance/*.json
+          if-no-files-found: error
       - name: Public hygiene
         run: python3 scripts/public_hygiene.py
 
