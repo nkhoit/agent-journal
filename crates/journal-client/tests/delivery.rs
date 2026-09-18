@@ -36,6 +36,52 @@ fn delivery_methods_validate_and_preserve_separate_authority() {
         })
     };
     let token = "a".repeat(64);
+    assert!(matches!(
+        client("/v1/claims/claim%2Fone/commit", true).commit_custody(
+            &token,
+            "claim/one",
+            &CommitRequest {
+                generation: 1,
+                items: vec![CommitItem {
+                    mailbox_item_id: "item".into(),
+                    attempt_id: "attempt".into()
+                }]
+            }
+        ),
+        Err(ClientError::Http { status: 409 })
+    ));
+    assert!(matches!(
+        client("/v1/mailbox-items/item%2Fone/events", true).record_delivery_event(
+            &token,
+            "item/one",
+            &DeliveryEventRequest {
+                event_id: "event".into(),
+                attempt_id: "attempt".into(),
+                generation: 1,
+                occurred_at: "2026-09-18T00:00:00Z".into(),
+                state: domain::TelemetryState::AdapterReportedRuntimeAccepted,
+                detail: Default::default()
+            }
+        ),
+        Err(ClientError::Http { status: 409 })
+    ));
+    assert!(matches!(
+        client("/v1/admin/mailbox-items/item%2Fone/requeue", false)
+            .requeue_mailbox_item("item/one", &RequeueRequest::default()),
+        Err(ClientError::Http { status: 409 })
+    ));
+    assert!(matches!(
+        client("/v1/records/record%2Fone/delivery-status?limit=1", true).delivery_status(
+            &token,
+            "record/one",
+            &PageQuery::new(None, Some(1))
+        ),
+        Err(ClientError::Http { status: 409 })
+    ));
+    assert!(matches!(
+        client("/v1/admin/adapters?limit=1", false).list_adapters(&PageQuery::new(None, Some(1))),
+        Err(ClientError::Http { status: 409 })
+    ));
     let register = AdapterRegisterRequest {
         instance_id: "installation".into(),
     };

@@ -267,7 +267,11 @@ impl BootstrapService {
         })
     }
 
-    fn journal_actor(&self, tx: &Transaction<'_>, token: &str) -> Result<String, BootstrapError> {
+    pub(super) fn journal_actor(
+        &self,
+        tx: &Transaction<'_>,
+        token: &str,
+    ) -> Result<String, BootstrapError> {
         if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(BootstrapError::Unauthorized);
         }
@@ -662,7 +666,7 @@ fn scope(route: CursorRoute, filters: &impl Serialize) -> Result<CursorScope, Bo
     ))
 }
 
-fn identifier_position(
+pub(super) fn identifier_position(
     codec: &CursorCodec,
     scope: &CursorScope,
     query: &PageQuery,
@@ -679,7 +683,7 @@ fn identifier_position(
     }
 }
 
-fn finish_page<T>(
+pub(super) fn finish_page<T>(
     mut items: Vec<T>,
     query: &PageQuery,
     codec: &CursorCodec,

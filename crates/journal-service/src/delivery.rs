@@ -4,7 +4,7 @@ const REGISTRATION_SECONDS: u64 = 60;
 const CLAIM_SECONDS: u64 = 30;
 
 impl BootstrapService {
-    fn delivery_actor(
+    pub(super) fn delivery_actor(
         &self,
         tx: &Transaction<'_>,
         token: &str,
@@ -253,14 +253,14 @@ fn deadline(instant: SystemTime, seconds: u64) -> Result<String, BootstrapError>
             .ok_or(BootstrapError::Clock)?,
     )
 }
-fn expired(value: &str, instant: SystemTime) -> Result<bool, BootstrapError> {
+pub(super) fn expired(value: &str, instant: SystemTime) -> Result<bool, BootstrapError> {
     let value: jiff::Timestamp = value.parse().map_err(|_| BootstrapError::CorruptJournal)?;
     let now = instant
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| BootstrapError::Clock)?;
     Ok(value.as_nanosecond() <= now.as_nanos() as i128)
 }
-fn registration(
+pub(super) fn registration(
     tx: &Transaction<'_>,
     adapter: &str,
 ) -> Result<AdapterRegistration, BootstrapError> {
@@ -289,7 +289,7 @@ pub(super) fn close_claims(
     Ok(())
 }
 
-fn suppress_revoked(
+pub(super) fn suppress_revoked(
     tx: &Transaction<'_>,
     principal: &str,
     now: &str,

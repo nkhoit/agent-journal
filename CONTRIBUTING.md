@@ -26,8 +26,10 @@ The S5 protocol query codec pins `form_urlencoded` and `percent-encoding` for
 shared client/server escaping and strict UTF-8 query validation. Record UUIDv7
 generation uses the existing injected secure-random source and server clock.
 `make records-test` runs the Unix CLI/API vertical through S4 provisioning.
-`make delivery-test` runs the S7 registration/claim/replacement CLI/API vertical,
-including lost-response and same-attempt expiry checks. Both are part of `make check`.
+`make delivery-test` runs the S7/S8 registration, claim, replacement, custody,
+telemetry, status, and requeue CLI/API verticals, including lost responses,
+service restart, same-attempt expiry, and retryable telemetry recovery.
+Both are part of `make check`.
 
 ## Change expectations
 

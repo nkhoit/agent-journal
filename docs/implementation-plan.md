@@ -291,6 +291,18 @@ fresh enrollment, and membership suppression).
 
 **Goal:** complete and prove the central delivery state machine.
 
+**Implemented:** service transactions, public/protected routes, typed clients,
+and CLI commands. Migration 6 retains exact custody receipts and immutable
+telemetry history. Retryable telemetry can recover to runtime acceptance on the
+same attempt; runtime acceptance, route-unavailable, and terminal failure are
+final except for exact replay. Requeue rejects pending/claimed obligations and
+unreadable recipients, creates a fresh ordinal/ID, and retains every prior
+attempt. Old-attempt telemetry cannot change the new mailbox projection.
+Service tests cover partial/idempotent commits, expiry, credential and generation
+binding, authorization, telemetry transitions/replay, and transaction failpoints.
+HTTP/client tests and `tests/s7_delivery_test.py` exercise the S8 surfaces.
+Local spool durability and runtime injection remain S9–S11, not S8 guarantees.
+
 ### Build
 
 - Implement generation-bound batch/partial custody commit with per-attempt idempotent results.

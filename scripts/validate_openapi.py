@@ -261,10 +261,15 @@ EXPECTED_ADAPTER_CASES = {
     "resolved-route-injection",
     "telemetry-before-custody",
     "telemetry-cross-principal",
+    "retryable-telemetry-recovery",
+    "telemetry-replay-and-terminal-protection",
+    "late-telemetry-after-requeue",
+    "partial-custody-and-expired-replay",
     "duplicate-runtime-send",
     "revocation",
 }
 EXPECTED_ADAPTER_OPERATIONS = {
+    "getRecordDeliveryStatus",
     "registerAdapter",
     "heartbeatAdapter",
     "replaceAdapter",

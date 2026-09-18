@@ -383,6 +383,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AdapterPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /v1/adapters/self/register:
@@ -502,7 +503,14 @@ paths:
     post:
       tags: [delivery]
       operationId: commitHostCustody
-      summary: Confirm durable local host custody for one claimed attempt
+      summary: Confirm durable local host custody for claimed attempts
+      description: >-
+        Commit only after durable local spooling. Each item is checked against
+        the issuing credential, principal, adapter, installation, generation,
+        claim, item, and attempt. Valid entries commit atomically with their
+        receipts while invalid entries return per-item results. Exact receipt
+        replay returns already-committed even after lease expiry, but still
+        requires the original valid credential and current generation.
       security: [{ deliveryAdapter: [] }]
       parameters:
         - $ref: '#/components/parameters/ClaimID'
@@ -534,6 +542,12 @@ paths:
         recipient and the exact (mailbox_item_id, attempt_id) is already
         host-accepted. Runtime telemetry cannot be reported for pending or
         merely claimed attempts; event_id makes accepted events idempotent.
+        Retryable failure may transition to any telemetry state on the same
+        attempt. Runtime acceptance, route-unavailable, and terminal failure
+        are final except for exact event replay. A new event requires a live
+        registration matching the durable custody installation and generation.
+        Exact replay returns the original received_at; conflicting event_id
+        reuse returns 409. Late old-attempt events never change a newer requeue.
       security: [{ deliveryAdapter: [] }]
       parameters:
         - $ref: '#/components/parameters/MailboxItemID'
@@ -606,6 +620,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DeliveryStatusPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/admin/mailboxes/{principal}/status:
@@ -784,6 +799,12 @@ paths:
       tags: [administration]
       operationId: requeueMailboxItem
       summary: Explicitly create a fresh delivery attempt
+      description: >-
+        Atomically retain history, allocate the next ordinal and new attempt ID,
+        set the mailbox pending, and audit the requeue. Reject pending or claimed
+        obligations and recipients that are disabled or cannot currently read
+        the space. Suppressed obligations require restored read access. After
+        response loss inspect status before retrying; requeue is not idempotent.
       security: []
       x-agent-journal-authorization: protected-unix-socket-peer-credentials
       x-agent-journal-public-https: false
@@ -802,6 +823,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RequeueResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1185,8 +1207,8 @@ components:
       required: [mailbox_item_id, attempt_id]
       additionalProperties: false
       properties:
-        mailbox_item_id: { type: string, maxLength: 128 }
-        attempt_id: { type: string, maxLength: 128 }
+        mailbox_item_id: { type: string, minLength: 1, maxLength: 128 }
+        attempt_id: { type: string, minLength: 1, maxLength: 128 }
     CommitResponse:
       type: object
       required: [claim_id, generation, items]

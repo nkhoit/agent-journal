@@ -2,7 +2,10 @@
 
 import json
 import sqlite3
+import subprocess
+import time
 import unittest
+import urllib.error
 
 import s4_bootstrap_test
 
@@ -82,7 +85,98 @@ class DeliveryTest(s4_bootstrap_test.BootstrapTest):
             self.assertEqual(connection.execute("SELECT count(*) FROM delivery_attempts").fetchone()[0], 1)
 
 
+    def test_custody_telemetry_status_and_requeue(self):
+        self.provision()
+        self.ticket("ticket")
+        self.enroll("ticket", "principal", "delivery")
+        self.credential("principal")
+        self.credential("delivery")
+
+        def aj(command, *args, credential="delivery", succeeds=True):
+            result = self.cli("aj", command, "--endpoint", self.endpoint,
+                              "--credential-file", self.directory / credential,
+                              *args, succeeds=succeeds)
+            return json.loads(result.stdout) if succeeds else None
+
+        def payload(name, value):
+            path = self.directory / name
+            path.write_text(json.dumps(value))
+            return path
+
+        record = aj("post", "--space", "space-example", "--idempotency-key", "custody",
+                    "--input", payload("record.json", {
+                        "kind": "note", "content": "custody payload",
+                        "attention": ["principal-example"]}), credential="principal")["record"]
+        claim = aj("mailbox-claim", "--instance", "installation-example",
+                   "--generation", "1", "--limit", "20")
+        item = claim["items"][0]
+        commit = payload("commit.json", {"generation": 1, "items": [{
+            "mailbox_item_id": item["mailbox_item_id"], "attempt_id": item["attempt_id"]}]})
+        received = []
+        endpoint, thread, failures = self.proxy(
+            lambda body: received.append(json.loads(body)), lose_response=True)
+        self.cli("aj", "custody-commit", "--endpoint", endpoint,
+                 "--credential-file", self.directory / "delivery",
+                 "--claim", claim["claim_id"], "--input", commit, succeeds=False)
+        thread.join(timeout=60)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(received[0]["items"][0]["result"], "committed")
+        # Abrupt process death and expired claims cannot erase custody receipts.
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("UPDATE claims SET lease_expires_at='2000-01-01T00:00:00Z'")
+        args = list(self.process.args)
+        args[args.index("--listen") + 1] = self.endpoint.removeprefix("http://")
+        self.process.kill()
+        self.process.wait(timeout=30)
+        self.socket.unlink()
+        self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=self.trace_file)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            self.assertIsNone(self.process.poll())
+            try:
+                if self.request("/health/ready")[0] == 200:
+                    break
+            except urllib.error.URLError:
+                pass
+            time.sleep(0.01)
+        else:
+            self.fail("restarted service did not become ready")
+        replay = aj("custody-commit", "--claim", claim["claim_id"], "--input", commit)
+        self.assertEqual(replay["items"][0]["result"], "already-committed")
+        event = {"event_id": "retry", "attempt_id": item["attempt_id"], "generation": 1,
+                 "occurred_at": "2026-09-18T00:00:00Z",
+                 "state": "adapter-reported-retryable-failure"}
+        retry = payload("retry.json", event)
+        first = aj("delivery-event", "--item", item["mailbox_item_id"], "--input", retry)
+        event.update(event_id="accepted", state="adapter-reported-runtime-accepted")
+        aj("delivery-event", "--item", item["mailbox_item_id"],
+           "--input", payload("accepted.json", event))
+        self.assertEqual(aj("delivery-event", "--item", item["mailbox_item_id"],
+                            "--input", retry), first)
+        status = aj("delivery-status", "--record", record["id"], credential="principal")
+        self.assertEqual(status["items"][0]["state"], "adapter-reported-runtime-accepted")
+        requeued = json.loads(self.admin("mailbox-requeue", item["mailbox_item_id"],
+                                        "explicit operator retry").stdout)
+        self.assertNotEqual(requeued["attempt_id"], item["attempt_id"])
+        self.admin("mailbox-requeue", item["mailbox_item_id"], succeeds=False)
+        self.assertEqual(aj("delivery-event", "--item", item["mailbox_item_id"],
+                            "--input", retry), first)
+        status = aj("delivery-status", "--record", record["id"], credential="principal")
+        self.assertEqual(status["items"][0]["state"], "pending")
+        self.assertEqual(status["items"][0]["attempts"], 2)
+        self.assertEqual(len(json.loads(self.admin("adapters", "1").stdout)["items"]), 1)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM host_custody").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM delivery_events").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM audit_events WHERE event_type='mailbox-requeued'").fetchone()[0], 1)
+        self.admin("adapter-replace", "adapter-example", "1", "replacement")
+
+
 if __name__ == "__main__":
-    suite = unittest.TestSuite([DeliveryTest("test_delivery_cli_replacement_and_lost_claim")])
+    suite = unittest.TestSuite([
+        DeliveryTest("test_delivery_cli_replacement_and_lost_claim"),
+        DeliveryTest("test_custody_telemetry_status_and_requeue"),
+    ])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     raise SystemExit(not result.wasSuccessful())

@@ -1,7 +1,90 @@
 use super::*;
 use journal_protocol::{
-    AdapterHeartbeatRequest, AdapterRegisterRequest, AdapterReplaceRequest, ClaimRequest, PageQuery,
+    AdapterHeartbeatRequest, AdapterRegisterRequest, AdapterReplaceRequest, ClaimRequest,
+    CommitRequest, DeliveryEventRequest, PageQuery, RequeueRequest,
 };
+
+macro_rules! delivery_item_handler {
+    ($name:ident, $input:ty) => {
+        pub(super) async fn $name(
+            State(state): State<ServiceState>,
+            Extension(id): Extension<RequestId>,
+            axum::extract::Path(item): axum::extract::Path<String>,
+            request: Request<Body>,
+        ) -> Response {
+            let Some(token) = bearer(request.headers()) else {
+                return delivery_unauthorized(id);
+            };
+            if let Some(response) = authenticate_delivery(&state, &id, &token).await {
+                return response;
+            }
+            let Ok(input) = strict_request::<$input>(request).await else {
+                return delivery_invalid(id);
+            };
+            bootstrap(
+                state,
+                id,
+                StatusCode::OK,
+                stringify!($name),
+                true,
+                move |s| s.$name(&token, &item, &input),
+            )
+            .await
+        }
+    };
+}
+delivery_item_handler!(commit_custody, CommitRequest);
+delivery_item_handler!(record_delivery_event, DeliveryEventRequest);
+
+pub(super) async fn requeue_mailbox_item(
+    State(state): State<ServiceState>,
+    Extension(id): Extension<RequestId>,
+    axum::extract::Path(item): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = to_bytes(body, usize::MAX).await else {
+        return delivery_invalid(id);
+    };
+    let input = if bytes.is_empty() {
+        RequeueRequest::default()
+    } else {
+        let Ok(input) =
+            strict_request::<RequeueRequest>(Request::from_parts(parts, Body::from(bytes))).await
+        else {
+            return delivery_invalid(id);
+        };
+        input
+    };
+    bootstrap(
+        state,
+        id,
+        StatusCode::OK,
+        "requeue_mailbox_item",
+        true,
+        move |s| s.requeue_mailbox_item(&item, &input),
+    )
+    .await
+}
+
+pub(super) async fn list_adapters(
+    State(state): State<ServiceState>,
+    Extension(id): Extension<RequestId>,
+    request: Request<Body>,
+) -> Response {
+    let Ok(query) = PageQuery::from_query(request.uri().query().unwrap_or("")) else {
+        return delivery_invalid(id);
+    };
+    bootstrap(
+        state,
+        id,
+        StatusCode::OK,
+        "list_adapters",
+        false,
+        move |s| s.list_adapters(&query),
+    )
+    .await
+}
 
 macro_rules! delivery_handler {
     ($name:ident, $input:ty, $method:ident) => {

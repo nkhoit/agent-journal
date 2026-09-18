@@ -395,6 +395,48 @@ def main() -> None:
            SELECT 'unbound-claim',adapter_id,principal_id,instance_id,generation,'active',lease_expires_at,created_at
            FROM adapter_registrations WHERE status='active' LIMIT 1""",
     )
+    events = connection.execute("SELECT * FROM delivery_events ORDER BY event_id").fetchall()
+    connection.executescript((ROOT / "migrations" / "0006_host_custody.sql").read_text())
+    assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (6,)
+    assert connection.execute("SELECT * FROM delivery_events ORDER BY event_id").fetchall() == events
+    assert connection.execute("SELECT count(*) FROM host_custody").fetchone() == (0,)
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.execute("UPDATE adapter_registrations SET lease_expires_at='2026-09-16T19:00:00Z' WHERE adapter_id='adapter-1'")
+    connection.execute(
+        """INSERT INTO credentials(id,principal_id,class,token_hash,adapter_id,created_at,instance_id)
+           VALUES ('custody-credential','p2','delivery-adapter',?,'adapter-1',?,'install-1')""",
+        ("c" * 64, NOW),
+    )
+    connection.execute(
+        """INSERT INTO claims(id,adapter_id,principal_id,instance_id,generation,state,lease_expires_at,created_at,credential_id)
+           VALUES ('custody-claim','adapter-1','p2','install-1',1,'active','2026-09-16T18:01:00Z',?,'custody-credential')""",
+        (NOW,),
+    )
+    connection.execute("UPDATE mailbox_items SET state='claimed' WHERE id='upgrade-item'")
+    connection.execute("UPDATE delivery_attempts SET state='claimed' WHERE attempt_id='initial-upgrade-item'")
+    connection.execute("INSERT INTO claim_items VALUES ('custody-claim','upgrade-item','initial-upgrade-item')")
+    event_sql = """INSERT INTO delivery_events(event_id,mailbox_item_id,attempt_id,adapter_id,instance_id,generation,state,occurred_at,received_at)
+                   VALUES (?,'upgrade-item','initial-upgrade-item','adapter-1','install-1',1,?,?,?)"""
+    expect_integrity(connection, event_sql, ("before-custody", "adapter-reported-runtime-accepted", NOW, NOW))
+    expect_integrity(connection, "INSERT INTO host_custody VALUES ('initial-upgrade-item','upgrade-item','custody-claim',?)",
+                     ("2026-09-16T18:01:00Z",))
+    connection.execute("INSERT INTO host_custody VALUES ('initial-upgrade-item','upgrade-item','custody-claim',?)", (NOW,))
+    connection.execute("UPDATE delivery_attempts SET state='host-accepted' WHERE attempt_id='initial-upgrade-item'")
+    connection.execute("UPDATE mailbox_items SET state='host-accepted' WHERE id='upgrade-item'")
+    connection.execute(event_sql, ("retryable", "adapter-reported-retryable-failure", NOW, NOW))
+    connection.execute(
+        """INSERT INTO delivery_attempts(attempt_id,mailbox_item_id,ordinal,state,created_at,updated_at)
+           VALUES ('requeued-upgrade','upgrade-item',2,'pending',?,?)""", (NOW, NOW))
+    connection.execute("UPDATE mailbox_items SET state='pending' WHERE id='upgrade-item'")
+    connection.execute(event_sql, ("recovered", "adapter-reported-runtime-accepted", NOW, NOW))
+    assert connection.execute("SELECT state FROM mailbox_items WHERE id='upgrade-item'").fetchone() == ("pending",)
+    expect_integrity(connection, event_sql, ("downgrade", "adapter-reported-retryable-failure", NOW, NOW))
+    expect_integrity(connection, "DELETE FROM delivery_events")
+    expect_integrity(connection, "UPDATE delivery_events SET state='route-unavailable'")
+    expect_integrity(connection, "DELETE FROM host_custody")
+    expect_integrity(connection, "UPDATE host_custody SET claim_id='upgrade-claim'")
+    connection.execute("UPDATE adapter_registrations SET generation=generation+1 WHERE adapter_id='adapter-1'")
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     print("migration contract passed")
 
 
