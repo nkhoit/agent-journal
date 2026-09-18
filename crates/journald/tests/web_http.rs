@@ -237,7 +237,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
         )
         .await;
     }
-    for path in ["/v1/spaces", "/v1/admin/principals"] {
+    for path in ["/v1/spaces", "/v1/admin/principals", "/v1/admin/metrics"] {
         get(&router, path, Some(token), StatusCode::NOT_FOUND).await;
     }
     let response = router

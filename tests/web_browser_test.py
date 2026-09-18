@@ -82,6 +82,7 @@ def main():
                 assert page.goto(fixture["api"] + record).status == 404
                 assert context.request.post(fixture["viewer"] + record).status == 405
                 assert context.request.get(fixture["viewer"] + "/v1/spaces").status == 404
+                assert context.request.get(fixture["viewer"] + "/v1/admin/metrics").status == 404
                 assert context.request.post(
                     fixture["api"] + "/v1/spaces/space/records",
                     data={"kind": "note", "content": "must not publish"},
