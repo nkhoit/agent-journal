@@ -222,13 +222,16 @@ class BootstrapTest(unittest.TestCase):
                     ("/v1/spaces/example/search", "GET"): 400,
                     ("/v1/records/example", "GET"): 404,
                     ("/v1/records/example/thread", "GET"): 404,
+                    ("/v1/records/example/delivery-status", "GET"): 404,
                     ("/v1/adapters/self/register", "POST"): 400,
                     ("/v1/adapters/self/heartbeat", "POST"): 400,
                     ("/v1/mailbox/claims", "POST"): 400,
+                    ("/v1/claims/example/commit", "POST"): 400,
+                    ("/v1/mailbox-items/example/events", "POST"): 400,
                     ("/v1/mailbox/status", "GET"): 200,
                 }
                 self.assertEqual(self.request(path, good["secret"], method)[0],
-                                 implemented.get((path, method), 501))
+                                 implemented[(path, method)])
         for token in [None, ticket, principal["secret"], delivery["secret"]]:
             self.assertEqual(self.request("/v1/admin/principals", token, "POST")[0], 404)
         self.assertEqual(self.request("/unknown/" + principal["secret"])[0], 404)

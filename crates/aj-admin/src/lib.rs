@@ -25,6 +25,10 @@ fn execute(
     );
     let a = &args[3..];
     let value = match args[2].as_str() {
+        "mailbox-requeue" if a.len()==1 || a.len()==2 => serde_json::to_value(client.requeue_mailbox_item(
+            &a[0],&RequeueRequest {reason:a.get(1).cloned()}).map_err(|_|"requeue failed or response lost; inspect status before retrying")?),
+        "adapters" if a.len()<=2 => serde_json::to_value(client.list_adapters(
+            &PageQuery {cursor:a.get(1).cloned(),limit:a.first().map(|s|s.parse()).transpose().map_err(|_|"invalid limit")?}).map_err(|_|"adapter listing failed")?),
         "adapter-replace" if a.len() == 3 || a.len() == 4 => serde_json::to_value(client.replace_adapter(
             &a[0], &AdapterReplaceRequest { expected_generation:a[1].parse().map_err(|_|"invalid generation")?,
                 new_instance_id:a[2].clone(), reason:a.get(3).cloned() }).map_err(|_|"adapter replacement failed")?),
@@ -89,7 +93,7 @@ fn execute(
             }).map_err(|_| "enrollment recovery failed; do not reuse the ticket or change installation identity")?;
             return Ok(());
         },
-        _ => return Err("commands: principal-create ID NAME; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; adapter-provision PRINCIPAL ADAPTER; adapter-replace ADAPTER GENERATION NEW_INSTANCE [REASON]; mailbox-status PRINCIPAL; ticket-create PRINCIPAL ADAPTER TTL OUTPUT; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]; enrollment-recover ADAPTER INSTANCE"),
+        _ => return Err("commands: principal-create ID NAME; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; adapter-provision PRINCIPAL ADAPTER; adapter-replace ADAPTER GENERATION NEW_INSTANCE [REASON]; adapters [LIMIT [CURSOR]]; mailbox-status PRINCIPAL; mailbox-requeue ITEM [REASON]; ticket-create PRINCIPAL ADAPTER TTL OUTPUT; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]; enrollment-recover ADAPTER INSTANCE"),
     }.map_err(|_| "cannot encode response")?;
     serde_json::to_writer(&mut *output, &value).map_err(|_| "cannot write response")?;
     writeln!(output).map_err(|_| "cannot write response")

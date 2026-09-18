@@ -11,6 +11,8 @@ use thiserror::Error;
 
 use crate::Clock;
 
+#[path = "custody.rs"]
+mod custody;
 #[path = "delivery.rs"]
 mod delivery;
 #[path = "records.rs"]

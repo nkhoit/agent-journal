@@ -22,12 +22,34 @@ pub fn run_with_output(args: &[String], mut output: impl Write, mut error: impl 
     }
 }
 
+fn read_input(input: &str) -> Result<Vec<u8>, &'static str> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let max = 1_048_576;
+    if input == "-" {
+        std::io::stdin()
+            .take(max)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "cannot read input")?;
+    } else {
+        std::fs::File::open(input)
+            .map_err(|_| "cannot open input")?
+            .take(max)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "cannot read input")?;
+    }
+    if bytes.len() as u64 == max {
+        return Err("input too large");
+    }
+    Ok(bytes)
+}
+
 fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str> {
     use journal_client::journal_protocol::*;
     use std::collections::BTreeMap;
     let Some(command) = args.first().map(String::as_str) else {
         return Err(
-            "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, or mailbox-status",
+            "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
         );
     };
     let allowed: &[&str] = match command {
@@ -35,6 +57,9 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         "adapter-heartbeat" => &["--instance", "--generation"],
         "mailbox-claim" => &["--instance", "--generation", "--limit", "--wait-seconds"],
         "mailbox-status" => &["--cursor", "--limit"],
+        "custody-commit" => &["--claim", "--input"],
+        "delivery-event" => &["--item", "--input"],
+        "delivery-status" => &["--record", "--cursor", "--limit"],
         "me" => &[],
         "spaces" => &["--cursor", "--limit"],
         "post" => &["--space", "--idempotency-key", "--input"],
@@ -62,7 +87,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         ],
         _ => {
             return Err(
-                "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, or mailbox-status",
+                "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
             );
         }
     };
@@ -115,6 +140,15 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     let query = query_string(&query_pairs);
     let token = &credential.secret;
     let result = match command {
+        "custody-commit" => {
+            let input: CommitRequest=decode_json(&read_input(required("--input")?)?).map_err(|_|"invalid commit JSON")?;
+            serde_json::to_value(client.commit_custody(token,required("--claim")?,&input).map_err(|_|"commit failed or response lost; retry the exact claim and attempts")?)
+        },
+        "delivery-event" => {
+            let input: DeliveryEventRequest=decode_json(&read_input(required("--input")?)?).map_err(|_|"invalid event JSON")?;
+            serde_json::to_value(client.record_delivery_event(token,required("--item")?,&input).map_err(|_|"event failed or response lost; retry the exact event")?)
+        },
+        "delivery-status" => serde_json::to_value(client.delivery_status(token,required("--record")?,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"status failed")?),
         "adapter-register" => serde_json::to_value(client.register_adapter(token,&AdapterRegisterRequest { instance_id:required("--instance")?.into() }).map_err(|_|"registration failed")?),
         "adapter-heartbeat" => serde_json::to_value(client.heartbeat_adapter(token,&AdapterHeartbeatRequest { instance_id:required("--instance")?.into(),generation:required("--generation")?.parse().map_err(|_|"invalid generation")? }).map_err(|_|"heartbeat failed")?),
         "mailbox-claim" => serde_json::to_value(client.claim_mailbox(token,&ClaimRequest { instance_id:required("--instance")?.into(),generation:required("--generation")?.parse().map_err(|_|"invalid generation")?,limit:required("--limit")?.parse().map_err(|_|"invalid limit")?,wait_seconds:options.get("--wait-seconds").unwrap_or(&"0").parse().map_err(|_|"invalid wait")? }).map_err(|_|"claim failed or response lost; wait for lease expiry before retrying")?),
@@ -126,13 +160,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         "search" => serde_json::to_value(client.search(token,required("--space")?,&SearchRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
         "list" => serde_json::to_value(client.list(token,required("--space")?,&ListRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
         "post" => {
-            use std::io::Read;
-            let input = required("--input")?;
-            let mut bytes = Vec::new();
-            let max = 1_048_576;
-            if input=="-" { std::io::stdin().take(max).read_to_end(&mut bytes).map_err(|_|"cannot read input")?; }
-            else { std::fs::File::open(input).map_err(|_|"cannot open input")?.take(max).read_to_end(&mut bytes).map_err(|_|"cannot read input")?; }
-            if bytes.len() as u64 == max { return Err("input too large"); }
+            let bytes = read_input(required("--input")?)?;
             let request: AppendRecordRequest = decode_json(&bytes).map_err(|_|"invalid append JSON")?;
             serde_json::to_value(client.append(token,required("--space")?,required("--idempotency-key")?,&request).map_err(|_|"append failed or response lost; retry identical input with the same idempotency key")?)
         },

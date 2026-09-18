@@ -33,6 +33,18 @@ cases:
   - id: telemetry-cross-principal
     operation_ids: [recordDeliveryEvent]
     expectation: reject_adapter_principal_mismatch
+  - id: retryable-telemetry-recovery
+    operation_ids: [recordDeliveryEvent, commitHostCustody]
+    expectation: retryable_failure_then_runtime_acceptance_on_same_custodied_attempt
+  - id: telemetry-replay-and-terminal-protection
+    operation_ids: [recordDeliveryEvent]
+    expectation: exact_replay_preserves_received_at_conflicting_reuse_and_final_state_downgrades_rejected
+  - id: late-telemetry-after-requeue
+    operation_ids: [recordDeliveryEvent, requeueMailboxItem, getRecordDeliveryStatus]
+    expectation: old_attempt_history_retained_without_advancing_new_mailbox_projection
+  - id: partial-custody-and-expired-replay
+    operation_ids: [commitHostCustody]
+    expectation: exact_valid_items_commit_and_receipts_replay_after_expiry
   - id: duplicate-runtime-send
     operation_ids: [claimMailbox, commitHostCustody, recordDeliveryEvent]
     expectation: stable_record_id_and_honest_at_least_once

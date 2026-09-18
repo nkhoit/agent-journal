@@ -95,6 +95,132 @@ fn request(path: &str, token: &str, body: &str) -> Request<Body> {
 const CLAIM: &str = r#"{"instance_id":"installation","generation":1,"limit":20,"wait_seconds":30}"#;
 
 #[tokio::test]
+async fn custody_telemetry_and_status_http_vertical() {
+    let f = Fixture::new();
+    let posted = f
+        .router
+        .clone()
+        .oneshot(request(
+            "/v1/spaces/space/records",
+            &f.client,
+            r#"{"kind":"note","content":"hello","attention":["reader"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(posted.status(), StatusCode::CREATED);
+    let claimed = f
+        .router
+        .clone()
+        .oneshot(request(
+            "/v1/mailbox/claims",
+            &f.delivery,
+            &CLAIM.replace("30", "0"),
+        ))
+        .await
+        .unwrap();
+    let claim: ClaimResponse =
+        decode_json(&to_bytes(claimed.into_body(), 65536).await.unwrap()).unwrap();
+    let item = &claim.items[0];
+    let commit=serde_json::json!({"generation":1,"items":[{"mailbox_item_id":item.mailbox_item_id,"attempt_id":item.attempt_id}]}).to_string();
+    let path = format!("/v1/claims/{}/commit", claim.claim_id);
+    for expected in [
+        CommitItemResult::Committed,
+        CommitItemResult::AlreadyCommitted,
+    ] {
+        let result = f
+            .router
+            .clone()
+            .oneshot(request(&path, &f.delivery, &commit))
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+        let body: CommitResponse =
+            decode_json(&to_bytes(result.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body.items[0].result, expected);
+    }
+    assert_eq!(
+        f.router
+            .clone()
+            .oneshot(request(&path, &f.client, &commit))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let path = format!("/v1/mailbox-items/{}/events", item.mailbox_item_id);
+    let mut event = serde_json::json!({"event_id":"retry","attempt_id":item.attempt_id,"generation":1,
+        "occurred_at":"2026-09-18T00:00:00Z","state":"adapter-reported-retryable-failure"});
+    for (id, state) in [
+        ("retry", "adapter-reported-retryable-failure"),
+        ("accepted", "adapter-reported-runtime-accepted"),
+        ("retry", "adapter-reported-retryable-failure"),
+    ] {
+        event["event_id"] = id.into();
+        event["state"] = state.into();
+        let response = f
+            .router
+            .clone()
+            .oneshot(request(&path, &f.delivery, &event.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    event["occurred_at"] = "invalid".into();
+    assert_eq!(
+        f.router
+            .clone()
+            .oneshot(request(&path, &f.delivery, &event.to_string()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    event["occurred_at"] = "2026-09-18T00:00:00Z".into();
+    event["detail"] = serde_json::json!({"error":"different"});
+    assert_eq!(
+        f.router
+            .clone()
+            .oneshot(request(&path, &f.delivery, &event.to_string()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let status = f
+        .router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/records/{}/delivery-status?limit=1",
+                item.record.id
+            ))
+            .header("authorization", format!("Bearer {}", f.client))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let body: DeliveryStatusPage =
+        decode_json(&to_bytes(status.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(
+        body.items[0].state,
+        domain::DeliveryState::AdapterReportedRuntimeAccepted
+    );
+    let public_admin = f
+        .router
+        .clone()
+        .oneshot(request(
+            &format!("/v1/admin/mailbox-items/{}/requeue", item.mailbox_item_id),
+            &f.delivery,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(public_admin.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn long_poll_releases_worker_and_writer_and_wakes_after_append() {
     let f = Fixture::new();
     let mut poll = tokio::spawn(f.router.clone().oneshot(request(
@@ -233,7 +359,7 @@ async fn delivery_wire_authentication_limits_and_empty_claims() {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::NOT_IMPLEMENTED
+            StatusCode::BAD_REQUEST
         );
     }
     assert_eq!(
@@ -300,10 +426,12 @@ async fn empty_long_poll_times_out_and_rechecks_revocation() {
         CLAIM,
     )));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    f.state.blocking().execute(|db| {
+    let database_path = f.directory.join("journal.db");
+    tokio::task::spawn_blocking(move || {
+        let db = Database::open(database_path)?;
         db.connect()?.execute("UPDATE credentials SET revoked_at='2000-01-01T00:00:00Z' WHERE class='delivery-adapter'",[])?;
-        Ok(())
-    }).await.unwrap();
+        Ok::<_, journal_storage_sqlite::StorageError>(())
+    }).await.unwrap().unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), poll)
             .await

@@ -8,6 +8,16 @@ use std::sync::{
 use std::time::{Duration, SystemTime};
 
 struct FakeClock(AtomicU64);
+struct CounterSecrets(AtomicU64);
+impl journal_service::SecretSource for CounterSecrets {
+    fn fill(&self, bytes: &mut [u8; 32]) -> Result<(), BootstrapError> {
+        let next = self.0.fetch_add(1, Ordering::SeqCst).to_be_bytes();
+        for chunk in bytes.chunks_mut(8) {
+            chunk.copy_from_slice(&next);
+        }
+        Ok(())
+    }
+}
 impl Clock for FakeClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(self.0.load(Ordering::SeqCst))
@@ -33,8 +43,11 @@ impl Fixture {
         ));
         let db = Database::open(&path).unwrap();
         let clock = Arc::new(FakeClock(AtomicU64::new(1_800_000_000)));
-        let service =
-            BootstrapService::with_sources(db.clone(), clock.clone(), Arc::new(OsSecretSource));
+        let service = BootstrapService::with_sources(
+            db.clone(),
+            clock.clone(),
+            Arc::new(CounterSecrets(AtomicU64::new(1))),
+        );
         service
             .create_principal(&PrincipalCreateRequest {
                 id: "reader".into(),
@@ -118,6 +131,713 @@ impl Drop for Fixture {
             let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
         }
     }
+}
+
+fn commit_request(claim: &ClaimResponse) -> CommitRequest {
+    CommitRequest {
+        generation: 1,
+        items: claim
+            .items
+            .iter()
+            .map(|i| CommitItem {
+                mailbox_item_id: i.mailbox_item_id.clone(),
+                attempt_id: i.attempt_id.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn event(item: &ClaimItem, id: &str, state: domain::TelemetryState) -> DeliveryEventRequest {
+    DeliveryEventRequest {
+        event_id: id.into(),
+        attempt_id: item.attempt_id.clone(),
+        generation: 1,
+        occurred_at: "2027-01-15T08:00:00Z".into(),
+        state,
+        detail: Default::default(),
+    }
+}
+
+#[test]
+fn partial_custody_replay_expiry_and_exact_binding() {
+    let f = Fixture::new();
+    f.append("one");
+    f.append("two");
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    let mut input = commit_request(&claim);
+    input.items[1].attempt_id = "wrong".into();
+    let result = f
+        .service
+        .commit_custody(&f.delivery, &claim.claim_id, &input)
+        .unwrap();
+    assert_eq!(result.items[0].result, CommitItemResult::Committed);
+    assert_eq!(result.items[1].result, CommitItemResult::AttemptMismatch);
+    f.clock.0.fetch_add(90, Ordering::SeqCst);
+    let result = f
+        .service
+        .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
+        .unwrap();
+    assert_eq!(result.items[0].result, CommitItemResult::AlreadyCommitted);
+    assert_eq!(result.items[1].result, CommitItemResult::LeaseExpired);
+    let mut stale = commit_request(&claim);
+    stale.generation = 2;
+    assert_eq!(
+        f.service
+            .commit_custody(&f.delivery, &claim.claim_id, &stale)
+            .unwrap()
+            .items[0]
+            .result,
+        CommitItemResult::StaleGeneration
+    );
+    assert_eq!(
+        f.service
+            .commit_custody(&f.delivery, "unknown", &input)
+            .unwrap()
+            .items[0]
+            .result,
+        CommitItemResult::ClaimNotFound
+    );
+    assert!(
+        f.service
+            .commit_custody(&f.client, &claim.claim_id, &input)
+            .is_err()
+    );
+}
+
+#[test]
+fn retryable_success_replay_and_requeue_keep_history_and_fence_old_attempts() {
+    use domain::TelemetryState::*;
+    let f = Fixture::new();
+    f.append("one");
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    let item = &claim.items[0];
+    let retryable = event(item, "retryable", AdapterReportedRetryableFailure);
+    assert!(matches!(
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &retryable),
+        Err(BootstrapError::Conflict)
+    ));
+    f.service
+        .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
+        .unwrap();
+    let first = f
+        .service
+        .record_delivery_event(&f.delivery, &item.mailbox_item_id, &retryable)
+        .unwrap();
+    let accepted = event(item, "accepted", AdapterReportedRuntimeAccepted);
+    f.service
+        .record_delivery_event(&f.delivery, &item.mailbox_item_id, &accepted)
+        .unwrap();
+    assert_eq!(
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &retryable)
+            .unwrap(),
+        first
+    );
+    let mut conflict = retryable.clone();
+    conflict.detail.insert("error".into(), "changed".into());
+    assert!(matches!(
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &conflict),
+        Err(BootstrapError::Conflict)
+    ));
+    assert!(matches!(
+        f.service.record_delivery_event(
+            &f.delivery,
+            &item.mailbox_item_id,
+            &event(item, "downgrade", AdapterReportedTerminalFailure)
+        ),
+        Err(BootstrapError::Conflict)
+    ));
+    let next = f
+        .service
+        .requeue_mailbox_item(&item.mailbox_item_id, &RequeueRequest::default())
+        .unwrap();
+    assert_ne!(next.attempt_id, item.attempt_id);
+    assert_eq!(
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &retryable)
+            .unwrap(),
+        first
+    );
+    let status = f
+        .service
+        .delivery_status(&f.client, &item.record.id, &PageQuery::default())
+        .unwrap();
+    assert_eq!(status.items[0].state, domain::DeliveryState::Pending);
+    assert_eq!(status.items[0].attempts, 2);
+    assert_eq!(
+        status.items[0].last_attempt_id.as_deref(),
+        Some(next.attempt_id.as_str())
+    );
+    let conn = f.db.connect().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM delivery_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    // Historical telemetry must not prevent replacement of the live registration.
+    f.service
+        .replace_adapter(
+            "adapter",
+            &AdapterReplaceRequest {
+                expected_generation: 1,
+                new_instance_id: "replacement".into(),
+                reason: None,
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn requeue_and_custody_failpoints_roll_back() {
+    let f = Fixture::new();
+    f.append("one");
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    let item = &claim.items[0];
+    for boundary in ["custody-recorded", "custody-state"] {
+        assert!(matches!(
+            f.service.clone().with_failpoint(boundary).commit_custody(
+                &f.delivery,
+                &claim.claim_id,
+                &commit_request(&claim)
+            ),
+            Err(BootstrapError::Injected)
+        ));
+        assert_eq!(
+            f.db.connect()
+                .unwrap()
+                .query_row("SELECT count(*) FROM host_custody", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    f.service
+        .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
+        .unwrap();
+    for boundary in ["requeue-ordinal", "requeue-attempt", "requeue-state"] {
+        assert!(matches!(
+            f.service
+                .clone()
+                .with_failpoint(boundary)
+                .requeue_mailbox_item(&item.mailbox_item_id, &RequeueRequest::default()),
+            Err(BootstrapError::Injected)
+        ));
+        assert_eq!(
+            f.db.connect()
+                .unwrap()
+                .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+}
+fn add_identity(f: &Fixture, id: &str) -> EnrollmentExchangeResponse {
+    f.service
+        .create_principal(&PrincipalCreateRequest {
+            id: id.into(),
+            display_name: id.into(),
+        })
+        .unwrap();
+    f.service
+        .set_membership(&MembershipRequest {
+            space_id: "space".into(),
+            principal_id: id.into(),
+            can_read: true,
+            can_append: true,
+            can_admin: false,
+        })
+        .unwrap();
+    f.service
+        .provision_adapter(&AdapterProvisionRequest {
+            principal_id: id.into(),
+            adapter_id: id.into(),
+        })
+        .unwrap();
+    let ticket = f
+        .service
+        .create_ticket(&EnrollmentTicketCreateRequest {
+            principal_id: id.into(),
+            adapter_id: id.into(),
+            ttl_seconds: 900,
+        })
+        .unwrap();
+    f.service
+        .exchange(
+            &ticket.enrollment_ticket.ticket,
+            &EnrollmentExchangeRequest {
+                instance_id: id.into(),
+            },
+        )
+        .unwrap()
+}
+
+#[test]
+fn status_authorization_pagination_and_current_acl_matrix() {
+    let f = Fixture::new();
+    let recipient = add_identity(&f, "recipient");
+    let reader = add_identity(&f, "other-reader");
+    let posted = f
+        .service
+        .append_record(
+            &f.client,
+            "space",
+            "matrix",
+            &RecordInput {
+                kind: "note".into(),
+                content: "status".into(),
+                attention: vec!["reader".into(), "recipient".into()],
+                relations: vec![],
+                run_id: None,
+                routing_key: None,
+            },
+        )
+        .unwrap();
+    let record = &posted.record.id;
+    let page = f
+        .service
+        .delivery_status(&f.client, record, &PageQuery::new(None, Some(1)))
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    let cursor = page.next_cursor.unwrap();
+    let second = f
+        .service
+        .delivery_status(
+            &f.client,
+            record,
+            &PageQuery::new(Some(cursor.clone()), Some(1)),
+        )
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(page.items[0].recipient, second.items[0].recipient);
+    assert!(second.next_cursor.is_none());
+    let own = f
+        .service
+        .delivery_status(
+            &recipient.principal_client_secret.secret,
+            record,
+            &PageQuery::default(),
+        )
+        .unwrap();
+    assert_eq!(own.items.len(), 1);
+    assert_eq!(own.items[0].recipient, "recipient");
+    assert!(
+        f.service
+            .delivery_status(
+                &recipient.principal_client_secret.secret,
+                record,
+                &PageQuery::new(Some(cursor), None)
+            )
+            .is_err()
+    );
+    for token in [&reader.principal_client_secret.secret, &f.client] {
+        assert!(matches!(
+            f.service
+                .delivery_status(token, "absent", &PageQuery::default()),
+            Err(BootstrapError::NotFound)
+        ));
+    }
+    assert!(matches!(
+        f.service.delivery_status(
+            &reader.principal_client_secret.secret,
+            record,
+            &PageQuery::default()
+        ),
+        Err(BootstrapError::NotFound)
+    ));
+    assert!(matches!(
+        f.service
+            .delivery_status(&f.delivery, record, &PageQuery::default()),
+        Err(BootstrapError::Unauthorized)
+    ));
+    for (principal, token) in [
+        ("reader", &f.client),
+        ("recipient", &recipient.principal_client_secret.secret),
+    ] {
+        f.service
+            .set_membership(&MembershipRequest {
+                space_id: "space".into(),
+                principal_id: principal.into(),
+                can_read: false,
+                can_append: false,
+                can_admin: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            f.service
+                .delivery_status(token, record, &PageQuery::default()),
+            Err(BootstrapError::NotFound)
+        ));
+    }
+    let first = f
+        .service
+        .list_adapters(&PageQuery::new(None, Some(1)))
+        .unwrap();
+    assert!(first.next_cursor.is_some());
+    assert!(
+        f.service
+            .list_adapters(&PageQuery::new(first.next_cursor, Some(1)))
+            .unwrap()
+            .items
+            .len()
+            == 1
+    );
+}
+
+#[test]
+fn custody_cross_principal_rotated_credential_and_suppression() {
+    let f = Fixture::new();
+    let other = add_identity(&f, "other");
+    f.append("one");
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    let input = commit_request(&claim);
+    let foreign = f
+        .service
+        .commit_custody(
+            &other.delivery_adapter_secret.secret,
+            &claim.claim_id,
+            &input,
+        )
+        .unwrap();
+    assert_eq!(foreign.items[0].result, CommitItemResult::ClaimNotFound);
+    let event = event(
+        &claim.items[0],
+        "foreign",
+        domain::TelemetryState::RouteUnavailable,
+    );
+    assert!(matches!(
+        f.service.record_delivery_event(
+            &other.delivery_adapter_secret.secret,
+            &claim.items[0].mailbox_item_id,
+            &event
+        ),
+        Err(BootstrapError::NotFound)
+    ));
+    f.service
+        .set_membership(&MembershipRequest {
+            space_id: "space".into(),
+            principal_id: "reader".into(),
+            can_read: false,
+            can_append: false,
+            can_admin: false,
+        })
+        .unwrap();
+    assert_eq!(
+        f.service
+            .commit_custody(&f.delivery, &claim.claim_id, &input)
+            .unwrap()
+            .items[0]
+            .result,
+        CommitItemResult::SuppressedRevoked
+    );
+    assert!(
+        f.service
+            .requeue_mailbox_item(&claim.items[0].mailbox_item_id, &RequeueRequest::default())
+            .is_err()
+    );
+    let credential = f
+        .service
+        .authenticate(&f.delivery, CredentialClass::DeliveryAdapter)
+        .unwrap();
+    let rotated = f
+        .service
+        .rotate(&CredentialRotateRequest {
+            credential_id: credential.credential_id,
+            reason: None,
+        })
+        .unwrap();
+    assert!(
+        f.service
+            .commit_custody(&f.delivery, &claim.claim_id, &input)
+            .is_err()
+    );
+    assert_eq!(
+        f.service
+            .commit_custody(&rotated.replacement_secret.secret, &claim.claim_id, &input)
+            .unwrap()
+            .items[0]
+            .result,
+        CommitItemResult::ClaimNotFound
+    );
+}
+
+#[test]
+fn telemetry_transition_matrix_old_attempt_projection_and_atomic_failure() {
+    use domain::TelemetryState::*;
+    for final_state in [
+        AdapterReportedRuntimeAccepted,
+        RouteUnavailable,
+        AdapterReportedTerminalFailure,
+    ] {
+        let f = Fixture::new();
+        f.append("one");
+        let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+        let item = &claim.items[0];
+        f.service
+            .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
+            .unwrap();
+        let retry = event(item, "retry", AdapterReportedRetryableFailure);
+        assert!(matches!(
+            f.service
+                .clone()
+                .with_failpoint("delivery-event")
+                .record_delivery_event(&f.delivery, &item.mailbox_item_id, &retry),
+            Err(BootstrapError::Injected)
+        ));
+        assert_eq!(
+            f.db.connect()
+                .unwrap()
+                .query_row("SELECT count(*) FROM delivery_events", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &retry)
+            .unwrap();
+        f.service
+            .record_delivery_event(
+                &f.delivery,
+                &item.mailbox_item_id,
+                &event(item, "retry-again", AdapterReportedRetryableFailure),
+            )
+            .unwrap();
+        let next = f
+            .service
+            .requeue_mailbox_item(&item.mailbox_item_id, &RequeueRequest::default())
+            .unwrap();
+        f.service
+            .record_delivery_event(
+                &f.delivery,
+                &item.mailbox_item_id,
+                &event(item, "final", final_state),
+            )
+            .unwrap();
+        for state in [
+            AdapterReportedRuntimeAccepted,
+            AdapterReportedRetryableFailure,
+            RouteUnavailable,
+            AdapterReportedTerminalFailure,
+        ] {
+            assert!(matches!(
+                f.service.record_delivery_event(
+                    &f.delivery,
+                    &item.mailbox_item_id,
+                    &event(item, "invalid", state)
+                ),
+                Err(BootstrapError::Conflict)
+            ));
+        }
+        let status = f
+            .service
+            .delivery_status(&f.client, &item.record.id, &PageQuery::default())
+            .unwrap();
+        assert_eq!(status.items[0].state, domain::DeliveryState::Pending);
+        assert_eq!(
+            status.items[0].last_attempt_id.as_ref(),
+            Some(&next.attempt_id)
+        );
+        assert_eq!(
+            f.service
+                .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
+                .unwrap()
+                .items[0]
+                .result,
+            CommitItemResult::AlreadyCommitted
+        );
+        assert!(matches!(
+            f.service
+                .requeue_mailbox_item(&item.mailbox_item_id, &RequeueRequest::default()),
+            Err(BootstrapError::Conflict)
+        ));
+    }
+}
+#[test]
+fn expired_claim_cannot_borrow_a_later_claims_receipt() {
+    let f = Fixture::new();
+    f.append("one");
+    let first = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    f.clock.0.fetch_add(30, Ordering::SeqCst);
+    let second = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    assert_eq!(first.items, second.items);
+    f.service
+        .commit_custody(&f.delivery, &second.claim_id, &commit_request(&second))
+        .unwrap();
+    assert_eq!(
+        f.service
+            .commit_custody(&f.delivery, &first.claim_id, &commit_request(&first))
+            .unwrap()
+            .items[0]
+            .result,
+        CommitItemResult::LeaseExpired
+    );
+    let item = &second.items[0];
+    let input = event(
+        item,
+        "accepted",
+        domain::TelemetryState::AdapterReportedRuntimeAccepted,
+    );
+    let accepted = f
+        .service
+        .record_delivery_event(&f.delivery, &item.mailbox_item_id, &input)
+        .unwrap();
+    f.clock.0.fetch_add(60, Ordering::SeqCst);
+    assert_eq!(
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &input)
+            .unwrap(),
+        accepted
+    );
+    let mut stale = input.clone();
+    stale.generation = 2;
+    assert!(matches!(
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &stale),
+        Err(BootstrapError::Conflict)
+    ));
+}
+
+#[test]
+fn status_reconciles_expiry_and_author_without_attention_sees_empty_page() {
+    let f = Fixture::new();
+    f.append("one");
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    f.clock.0.fetch_add(30, Ordering::SeqCst);
+    assert_eq!(
+        f.service
+            .delivery_status(&f.client, &claim.items[0].record.id, &PageQuery::default())
+            .unwrap()
+            .items[0]
+            .state,
+        domain::DeliveryState::Pending
+    );
+    let posted = f
+        .service
+        .append_record(
+            &f.client,
+            "space",
+            "no-attention",
+            &RecordInput {
+                kind: "note".into(),
+                content: "no recipients".into(),
+                attention: vec![],
+                relations: vec![],
+                run_id: None,
+                routing_key: None,
+            },
+        )
+        .unwrap();
+    let page = f
+        .service
+        .delivery_status(&f.client, &posted.record.id, &PageQuery::default())
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert!(page.next_cursor.is_none());
+}
+
+#[test]
+fn concurrent_custody_events_and_requeue_are_serialized() {
+    let f = Fixture::new();
+    f.append("one");
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let results = std::thread::scope(|scope| {
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let service = &f.service;
+                let token = &f.delivery;
+                let claim = &claim;
+                scope.spawn(move || {
+                    barrier.wait();
+                    service
+                        .commit_custody(token, &claim.claim_id, &commit_request(claim))
+                        .unwrap()
+                        .items[0]
+                        .result
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(results.contains(&CommitItemResult::Committed));
+    assert!(results.contains(&CommitItemResult::AlreadyCommitted));
+    let item = &claim.items[0];
+    let input = event(
+        item,
+        "race",
+        domain::TelemetryState::AdapterReportedRuntimeAccepted,
+    );
+    let results = std::thread::scope(|scope| {
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let service = &f.service;
+                let token = &f.delivery;
+                let input = &input;
+                scope.spawn(move || {
+                    barrier.wait();
+                    service
+                        .record_delivery_event(token, &item.mailbox_item_id, input)
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results[0], results[1]);
+    let results = std::thread::scope(|scope| {
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let service = &f.service;
+                scope.spawn(move || {
+                    barrier.wait();
+                    service.requeue_mailbox_item(&item.mailbox_item_id, &RequeueRequest::default())
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, Err(BootstrapError::Conflict)))
+            .count(),
+        1
+    );
+    let conn = f.db.connect().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM host_custody", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM delivery_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT max(ordinal) FROM delivery_attempts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
 }
 
 #[test]

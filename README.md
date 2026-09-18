@@ -2,7 +2,7 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: S0–S7 foundations, protected bootstrap, journal queries, and central mailbox claims implemented.**
+> **Status: S0–S8 foundations, protected bootstrap, journal queries, and central delivery state machine implemented.**
 >
 > The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Web UI, durable adapter delivery, and runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
@@ -40,8 +40,8 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
-| Adapter delivery | S7 registration, heartbeat, replacement fencing, bounded claims, expiry, and mailbox status implemented; S8 custody/telemetry/requeue and S9+ spool/runtime delivery remain unresolved |
-| Binaries | `journald`, `aj` journal and mailbox commands, and `aj-admin` bootstrap/replacement/status commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
+| Adapter delivery | Registration, heartbeat, replacement fencing, bounded claims, expiry, exact custody receipts, retryable-to-success telemetry, delivery status, and retained requeue implemented; S9+ spool/runtime delivery remain unresolved |
+| Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, and `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
@@ -73,7 +73,7 @@ api/                         language-neutral OpenAPI and protocol fixtures
 crates/journal-domain/       constants, typed records, states, and validation
 crates/journal-protocol/     typed wire DTOs, strict JSON, canonical append, authenticated cursors
 crates/journal-storage-sqlite/ SQLite connections, migrations, transactions, FTS5, and backup/restore
-crates/journal-service/      bootstrap, authenticated record transactions, and future delivery ports
+crates/journal-service/      bootstrap, authenticated records, and central delivery transactions
 crates/journal-client/       typed bootstrap/journal client, HTTP/Unix transports, private credential files
 crates/journal-adapter-core/ registration, heartbeat, custody, routing, envelope ports
 crates/journal-adapter-spool/ crash-recovery contract and pending store
@@ -122,16 +122,15 @@ mkdir -m 700 service-state
   --listen 127.0.0.1:8080
 ```
 
-Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll, then the [central mailbox protocol](docs/protocol.md#central-mailbox-claims). Public administration paths always return non-leaking JSON `404` responses. Custody, telemetry, requeue, record delivery-status, and admin adapter listing remain explicit `501` routes. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries remain status-2 stubs.
+Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll, then the [central mailbox protocol](docs/protocol.md#central-mailbox-claims) and [custody commands](docs/protocol.md#custody-receipts-and-runtime-results). Public administration paths always return non-leaking JSON `404` responses. Custody, telemetry, requeue, record delivery-status, and protected adapter listing are implemented. Custody commands assert that a caller has already durably spooled the attempt; the CLI does not implement a spool or runtime injection. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries remain status-2 stubs.
 
 ## Implementation sequence
 
-S0 through S7 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, and central claim gates. The remaining sequence is:
+S0 through S8 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, and central delivery gates. The remaining sequence is:
 
-1. Complete custody, telemetry, delivery-status, and requeue operations.
-2. Implement the generic adapter core and durable local spool; prove custody semantics with a fake runtime.
-3. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
-4. Add safe read-only web views and complete operational restore fencing and canary evidence.
+1. Implement the durable local spool and generic adapter orchestration; prove custody semantics with a fake runtime.
+2. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
+3. Add safe read-only web views and complete operational restore fencing and canary evidence.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).
 

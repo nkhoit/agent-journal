@@ -229,8 +229,9 @@ aj-admin --socket "$ADMIN_SOCKET" adapter-replace adapter-example 1 installation
 ```
 
 `mailbox-claim` prints untrusted record data as JSON for inspection; it does not
-provide durable local custody or runtime delivery. S8 commit, telemetry, requeue,
-and record delivery-status remain unimplemented.
+provide durable local custody or runtime delivery. The custody command below is
+an assertion that the caller has already durably spooled the complete attempt,
+not an implementation of that spool.
 
 Migration 5 adds `claims.credential_id` and a binding trigger. Legacy active claims
 are cancelled, with their existing claimed attempts returned to pending. History,
@@ -252,6 +253,70 @@ The append transaction creates the mailbox item and ordinal-1 pending attempt. C
 Host-custody commit is a batch request containing `generation` and `items[]`; adapter and instance identity come from the authenticated claim, not the body. Results are per item and may be `committed`, `already-committed`, or a non-leaking failure. Partial commits are valid and retries use the same claim/attempt IDs.
 
 Telemetry requests include an idempotent `event_id`, attempt ID, generation, adapter `occurred_at`, one of the four adapter telemetry states, and bounded structured detail. The server derives adapter/instance/principal identity from the authenticated registration, requires that principal to equal the mailbox recipient, and accepts telemetry only after the exact attempt has reached `host-accepted`; pending and merely claimed attempts are rejected. It stores its own `received_at`.
+
+### Custody receipts and runtime results
+
+Commit checks the exact issuing credential, principal, adapter, installation,
+generation, claim, item, and attempt. An unknown claim or another credential's
+claim returns `claim-not-found` for each submitted item. A known binding with a
+wrong generation returns `stale-generation`; wrong item/attempt pairs return
+`attempt-mismatch`. New custody requires both claim and registration leases to
+be live and membership still readable. Revoked obligations return
+`suppressed-revoked`; expired or closed uncommitted claims return `lease-expired`.
+The receipt, attempt state, mailbox projection, and closure of a fully committed
+claim are atomic. Mixed batches commit valid entries and return individual
+failures for others. Duplicate entries are safe.
+
+The immutable custody receipt survives telemetry, requeue, and expiry. Repeating
+the exact commit returns `already-committed`, even after either lease expires.
+It still requires an unrevoked issuing credential and the current generation;
+replacement or credential rotation never transfers an old claim's authority.
+
+From `host-accepted`, any of the four telemetry states is allowed. From
+`adapter-reported-retryable-failure`, another retryable failure or any of the
+other three states is allowed on the same attempt. Runtime acceptance,
+`route-unavailable`, and terminal failure are final for that attempt: only exact
+event replay is accepted afterward. A new event requires the current live
+registration and the same installation/generation as its custody receipt.
+Rotated delivery credentials may report telemetry for their unchanged binding.
+An exact replay returns the original `received_at`, even after lease expiry;
+changed item, attempt, binding, state, detail, or `occurred_at` with the same
+`event_id` returns `409`. Every accepted event is retained. Adapter timestamps
+are validated RFC 3339 data, not ordering authority.
+
+Protected requeue accepts a settled obligation, including host custody or a
+suppressed obligation after read membership is restored. It rejects pending or
+claimed items and currently unreadable or disabled recipients. It atomically
+allocates the next ordinal, inserts a fresh pending attempt, updates the mailbox,
+and records an audit event. Requeue is not idempotent: after response loss,
+inspect status before requesting another requeue. History is never deleted.
+Late telemetry on an older custodied attempt may update that attempt's history,
+but cannot change the newer mailbox projection. Exact replay never changes state.
+
+Status is identifier-keyset paginated within the authorized recipient set, with
+cursors bound to the principal and record. Current read membership is checked
+on every page. Author visibility takes precedence when the author is also a
+recipient. Admin adapter listing is separately bounded and identifier-paginated.
+
+```sh
+aj custody-commit --endpoint "$ENDPOINT" --credential-file "$DELIVERY_FILE" --claim "$CLAIM_ID" --input commit.json
+aj delivery-event --endpoint "$ENDPOINT" --credential-file "$DELIVERY_FILE" --item "$ITEM_ID" --input event.json
+aj delivery-status --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" --record "$RECORD_ID" --limit 50
+aj-admin --socket "$ADMIN_SOCKET" mailbox-requeue "$ITEM_ID" "operator retry"
+aj-admin --socket "$ADMIN_SOCKET" adapters 50
+```
+
+Commit and event files contain their OpenAPI request objects; `--input -` reads
+stdin. These commands do not spool data or inject into a runtime.
+
+Migration 6 adds immutable exact custody receipts and retained immutable
+telemetry history. It removes the historical event foreign key to a mutable
+registration generation, so replacement can preserve old events. Its new
+telemetry trigger permits retryable recovery and updates the mailbox only for
+the latest attempt. Existing records, claims, attempts, and events are retained.
+Legacy host-accepted rows without provable receipts require explicit requeue;
+the migration does not invent custody. Older binaries reject schema 6. Rollback
+requires restoring a compatible pre-upgrade backup, never deleting migrations.
 
 The ordinary record delivery-status endpoint returns all recipient-scoped entries to an authorized record author, one own recipient entry to an addressed recipient, and no status to other space readers (a non-leaking `404`). Service administrators use only the protected Unix-socket admin interface; the ordinary endpoint never returns a mixed partial view.
 

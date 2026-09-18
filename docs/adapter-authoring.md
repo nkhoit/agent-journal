@@ -46,7 +46,14 @@ are available through typed `journal-client` methods. A lost claim response is n
 replayed: another claim conflicts until its lease expires. Re-registration with the
 same valid installation credential keeps the generation; replacement requires protected
 administration and fresh enrollment. See the [claim protocol](protocol.md#central-mailbox-claims).
-Host custody and runtime telemetry remain S8, and local durable spooling remains S9.
+S8 custody commits, post-custody telemetry, status, and protected requeue are
+available through typed clients and CLIs. Local durable spooling remains S9.
+Central commit is an assertion of existing local durability, not proof that a
+CLI user has spooled the payload. Retry the exact claim/item/attempt after a lost
+commit response. Retryable runtime failures may later report acceptance on the
+same attempt with a new event ID; accepted, route-unavailable, and terminal
+outcomes are final. Retry a lost event response with its unchanged event ID and
+payload. See [custody receipts and runtime results](protocol.md#custody-receipts-and-runtime-results).
 
 Use a fake runtime before connecting a vendor runtime:
 

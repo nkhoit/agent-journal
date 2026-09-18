@@ -601,81 +601,20 @@ async fn journal_operation(
                     &record,
                     &PageQuery::from_query(&query).map_err(|_| BootstrapError::InvalidJournal)?,
                 )?),
+                "/v1/records/{record_id}/delivery-status" => serde_json::to_value(
+                    s.delivery_status(
+                        &token,
+                        &record,
+                        &PageQuery::from_query(&query)
+                            .map_err(|_| BootstrapError::InvalidJournal)?,
+                    )?,
+                ),
                 _ => return Err(BootstrapError::NotFound),
             };
             value.map_err(|_| BootstrapError::CorruptJournal)
         },
     )
     .await
-}
-
-async fn authenticated_unimplemented(
-    state: ServiceState,
-    request_id: RequestId,
-    headers: axum::http::HeaderMap,
-    class: journal_protocol::CredentialClass,
-) -> Response {
-    let Some(token) = bearer(&headers) else {
-        malformed_bearer(&request_id);
-        return error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "invalid or expired credential",
-            request_id,
-        );
-    };
-    let result = bootstrap(
-        state,
-        request_id.clone(),
-        StatusCode::NO_CONTENT,
-        match class {
-            journal_protocol::CredentialClass::PrincipalClient => "principal_authentication",
-            journal_protocol::CredentialClass::DeliveryAdapter => "delivery_authentication",
-        },
-        false,
-        move |s| s.authenticate(&token, class).map(|_| ()),
-    )
-    .await;
-    if result.status() == StatusCode::NO_CONTENT {
-        admin_unimplemented(Extension(request_id)).await
-    } else {
-        result
-    }
-}
-
-async fn principal_unimplemented(
-    State(state): State<ServiceState>,
-    Extension(id): Extension<RequestId>,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    authenticated_unimplemented(
-        state,
-        id,
-        headers,
-        journal_protocol::CredentialClass::PrincipalClient,
-    )
-    .await
-}
-async fn delivery_unimplemented(
-    State(state): State<ServiceState>,
-    Extension(id): Extension<RequestId>,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    authenticated_unimplemented(
-        state,
-        id,
-        headers,
-        journal_protocol::CredentialClass::DeliveryAdapter,
-    )
-    .await
-}
-async fn admin_unimplemented(Extension(id): Extension<RequestId>) -> Response {
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "not-implemented",
-        "operation is not implemented",
-        id,
-    )
 }
 
 #[derive(Serialize)]
@@ -733,15 +672,15 @@ pub(crate) fn public_router_with_timeout(
         .route("/v1/records/{record_id}/thread", get(journal_operation))
         .route(
             "/v1/records/{record_id}/delivery-status",
-            get(principal_unimplemented),
+            get(journal_operation),
         )
         .route("/v1/adapters/self/register", post(register_adapter))
         .route("/v1/adapters/self/heartbeat", post(heartbeat_adapter))
         .route("/v1/mailbox/claims", post(claim_mailbox))
-        .route("/v1/claims/{claim_id}/commit", post(delivery_unimplemented))
+        .route("/v1/claims/{claim_id}/commit", post(commit_custody))
         .route(
             "/v1/mailbox-items/{item_id}/events",
-            post(delivery_unimplemented),
+            post(record_delivery_event),
         )
         .route("/v1/mailbox/status", get(mailbox_status))
         .fallback(unimplemented_route)
@@ -776,7 +715,7 @@ pub(crate) fn admin_router_with_timeout(
         .route("/v1/admin/memberships", post(set_membership))
         .route(
             "/v1/admin/adapters",
-            post(provision_adapter).get(admin_unimplemented),
+            post(provision_adapter).get(list_adapters),
         )
         .route("/v1/admin/enrollment-tickets", post(create_ticket))
         .route("/v1/admin/credentials/rotate", post(rotate))
@@ -792,7 +731,7 @@ pub(crate) fn admin_router_with_timeout(
         )
         .route(
             "/v1/admin/mailbox-items/{item_id}/requeue",
-            post(admin_unimplemented),
+            post(requeue_mailbox_item),
         )
         .route_layer(middleware::from_fn(require_local_peer))
         .route("/health/live", get(live))

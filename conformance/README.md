@@ -11,3 +11,9 @@ This directory contains public-safe, generic fixtures for black-box clients and 
 The executable S0 contract gate parses the operation and adapter fixtures and verifies OpenAPI operation coverage. S1 additionally compiles the normative wire examples through the typed Rust DTOs, including required-field deletion checks. Neither gate executes client requests or adapter scenarios. Fake-runtime and adapter behavior remain unimplemented for S11. A test may use localhost and generated per-test IDs, but must never commit captured production traces or secrets.
 
 The contract covers 29 paths and 31 operations, including protected credential revocation and enrollment recovery with empty `204` responses. Rotation examples contain a synthetic one-time replacement secret, never a captured credential. Schema validation does not prove S4 atomic revocation, both-lineage recovery, same-installation binding, or secure file persistence; those require the S4 service and CLI acceptance tests.
+
+S8 central custody, telemetry transition/replay, status visibility, and requeue
+behavior are executed by service and HTTP tests, with the real-process CLI
+vertical in `tests/s7_delivery_test.py`. The adapter scenarios include
+retryable-to-success recovery and late telemetry after requeue. Parsing these
+fixtures still does not prove local spooling or runtime injection.

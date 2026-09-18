@@ -43,6 +43,118 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    pub fn commit_custody(
+        &self,
+        token: &str,
+        claim: &str,
+        input: &journal_protocol::CommitRequest,
+    ) -> Result<journal_protocol::CommitResponse, ClientError> {
+        journal_protocol::ClaimPath {
+            claim_id: claim.into(),
+        }
+        .validate()
+        .map_err(|_| ClientError::InvalidRequest)?;
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json(
+            &format!(
+                "/v1/claims/{}/commit",
+                journal_protocol::path_segment(claim)
+            ),
+            input,
+            Some(token),
+        )
+    }
+
+    pub fn record_delivery_event(
+        &self,
+        token: &str,
+        item: &str,
+        input: &journal_protocol::DeliveryEventRequest,
+    ) -> Result<journal_protocol::DeliveryEventResponse, ClientError> {
+        journal_protocol::MailboxItemPath {
+            item_id: item.into(),
+        }
+        .validate()
+        .map_err(|_| ClientError::InvalidRequest)?;
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json(
+            &format!(
+                "/v1/mailbox-items/{}/events",
+                journal_protocol::path_segment(item)
+            ),
+            input,
+            Some(token),
+        )
+    }
+
+    pub fn requeue_mailbox_item(
+        &self,
+        item: &str,
+        input: &journal_protocol::RequeueRequest,
+    ) -> Result<journal_protocol::RequeueResponse, ClientError> {
+        journal_protocol::MailboxItemPath {
+            item_id: item.into(),
+        }
+        .validate()
+        .map_err(|_| ClientError::InvalidRequest)?;
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json(
+            &format!(
+                "/v1/admin/mailbox-items/{}/requeue",
+                journal_protocol::path_segment(item)
+            ),
+            input,
+            None,
+        )
+    }
+
+    pub fn delivery_status(
+        &self,
+        token: &str,
+        record: &str,
+        query: &journal_protocol::PageQuery,
+    ) -> Result<journal_protocol::DeliveryStatusPage, ClientError> {
+        journal_protocol::RecordPath {
+            record_id: record.into(),
+        }
+        .validate()
+        .map_err(|_| ClientError::InvalidRequest)?;
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/records/{}/delivery-status?{}",
+                    journal_protocol::path_segment(record),
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn list_adapters(
+        &self,
+        query: &journal_protocol::PageQuery,
+    ) -> Result<journal_protocol::AdapterPage, ClientError> {
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        let response = self.send(Request::new(
+            "GET",
+            format!(
+                "/v1/admin/adapters?{}",
+                journal_protocol::query_string(&query.pairs())
+            ),
+            vec![],
+        ))?;
+        if response.status != 200 {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
+    }
+
     pub fn register_adapter(
         &self,
         token: &str,

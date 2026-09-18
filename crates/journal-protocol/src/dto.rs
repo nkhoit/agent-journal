@@ -370,6 +370,10 @@ impl CommitRequest {
             }
             .into());
         }
+        for item in &self.items {
+            validate_identifier("mailbox_item_id", &item.mailbox_item_id)?;
+            validate_identifier("attempt_id", &item.attempt_id)?;
+        }
         Ok(())
     }
 }
@@ -434,6 +438,7 @@ impl DeliveryEventRequest {
         validate_identifier("event_id", &self.event_id)?;
         validate_identifier("attempt_id", &self.attempt_id)?;
         domain::validate_generation(self.generation)?;
+        validate_rfc3339("occurred_at", &self.occurred_at)?;
         domain::validate_telemetry_detail(&self.detail)?;
         Ok(())
     }
