@@ -48,6 +48,12 @@ cases:
   - id: duplicate-runtime-send
     operation_ids: [claimMailbox, commitHostCustody, recordDeliveryEvent]
     expectation: stable_record_id_and_honest_at_least_once
+  - id: oversized-runtime-success
+    operation_ids: [claimMailbox, commitHostCustody, recordDeliveryEvent]
+    expectation: oversized_success_is_accepted_without_reinjection
+  - id: ambiguous-runtime-error
+    operation_ids: [claimMailbox, commitHostCustody, recordDeliveryEvent]
+    expectation: ambiguous_runtime_error_is_terminal_without_reinjection
   - id: revocation
     operation_ids: [grantMembership, claimMailbox]
     expectation: suppress_unclaimed_content_without_recall_claim

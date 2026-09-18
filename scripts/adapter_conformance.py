@@ -91,6 +91,14 @@ SCENARIOS = {
         "stable_record_id_and_honest_at_least_once",
         ["claimMailbox", "commitHostCustody", "recordDeliveryEvent"],
         [("spool", SPOOL_CRASH), ("runtime", CRASH)]),
+    "oversized-runtime-success": (
+        "oversized_success_is_accepted_without_reinjection",
+        ["claimMailbox", "commitHostCustody", "recordDeliveryEvent"],
+        [("spool", "oversized_success_does_not_reinject_after_runtime_call")]),
+    "ambiguous-runtime-error": (
+        "ambiguous_runtime_error_is_terminal_without_reinjection",
+        ["claimMailbox", "commitHostCustody", "recordDeliveryEvent"],
+        [("spool", "ambiguous_runtime_error_does_not_reinject_after_runtime_call")]),
     "revocation": (
         "suppress_unclaimed_content_without_recall_claim", ["grantMembership", "claimMailbox"],
         [("central", "revocation_suppresses_without_exposing_content"), ("runtime", HTTP)]),

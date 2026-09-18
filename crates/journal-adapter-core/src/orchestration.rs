@@ -305,7 +305,10 @@ impl<'a, J: Journal, S: AdapterSpool, R: RouteResolver, T: Runtime, C: Clock>
                 self.check_binding(&item, &registration)?;
                 match self.runtime.inject(&route, &item.envelope, &rendered) {
                     Ok(receipt) if receipt.len() <= 4096 => (InjectionState::Accepted, receipt, ""),
-                    Ok(_) => return Err(CoreError::InvalidTelemetry("receipt too large".into())),
+                    // The runtime has returned success, so the side effect is
+                    // accepted even when its receipt violates our boundary.
+                    // Never retain an unbounded or potentially secret receipt.
+                    Ok(_) => (InjectionState::Accepted, String::new(), ""),
                     Err(CoreError::RuntimeUnavailable(_)) => (
                         InjectionState::RetryableFailure,
                         String::new(),
@@ -316,7 +319,14 @@ impl<'a, J: Journal, S: AdapterSpool, R: RouteResolver, T: Runtime, C: Clock>
                         String::new(),
                         "runtime rejected delivery",
                     ),
-                    Err(error) => return Err(error),
+                    // Once injection begins, an unclassified runtime error is
+                    // ambiguous: the runtime may have accepted the side effect.
+                    // Quarantine the attempt rather than risking reinjection.
+                    Err(_) => (
+                        InjectionState::TerminalFailure,
+                        String::new(),
+                        "runtime outcome ambiguous",
+                    ),
                 }
             }
         };

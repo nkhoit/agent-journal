@@ -431,7 +431,7 @@ S11 adds the reusable scenario runner below; vendor integrations remain unresolv
 **Implemented:** `journal-runtime-fake` supplies inspectable resolved routes and
 exact envelopes, availability toggles, stable acceptance receipts, duplicate
 acceptance, and durable acceptance followed by child-process termination.
-`scripts/adapter_conformance.py` executes all 17 cases in
+`scripts/adapter_conformance.py` executes all 19 cases in
 `conformance/adapter/scenarios.yaml`, reusing the service delivery, S10 spool,
 and real HTTP orchestration assertions. Unknown, missing, duplicate, or changed
 scenario contracts, zero matching tests, and missing durable evidence fail closed.

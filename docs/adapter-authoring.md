@@ -132,14 +132,15 @@ or security boundary. See the executable
 [rendered snapshot](../conformance/adapter/orchestrated-envelope.txt).
 
 `RuntimeUnavailable` schedules a retry; `RuntimeRejected` records a final failure.
-A successful runtime return asserts runtime acceptance only. Implementations must
-return a bounded, non-secret acceptance reference, not a raw vendor response.
-It is stored locally and never copied to central telemetry, since references may
-identify private runtime targets. Arbitrary runtime error text is discarded.
-Central detail is empty; the state itself is
-the strongest honest result. Unexpected runtime errors propagate without inventing
-a receipt. Death after runtime acceptance but before result persistence leaves an
-in-flight row that may send again.
+A successful runtime return asserts runtime acceptance, including when its receipt is
+oversized or otherwise unusable; the receipt is discarded rather than retained
+unbounded or copied to telemetry. Implementations must return a bounded, non-secret
+acceptance reference when one is available, not a raw vendor response. Unexpected
+runtime errors after injection begins are ambiguous and must be quarantined as a
+terminal local outcome, with no raw error detail persisted or sent centrally. Central
+detail is empty; the state itself is the strongest honest result. A crash after
+runtime acceptance but before result persistence leaves an in-flight row that may
+send again.
 
 `AdapterSpool::finish` atomically stores the result, retry count/time, and exact
 pending event. A SHA-256 event ID derives from attempt ID and a durable event

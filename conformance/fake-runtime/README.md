@@ -40,7 +40,7 @@ exercise custody, injection-start, result, and telemetry recovery.
 
 ## Evidence and privacy
 
-The output contains `<scenario-id>.json` for all 17 cases and `manifest.json`
+The output contains `<scenario-id>.json` for all 19 cases and `manifest.json`
 only after the whole suite passes. Artifacts declare `schema_version: 2` and
 `redacted: true`. Evidence entries carry `kind`, `state`, `execution`, `fixture`, and
 `assertion`; database entries also identify their checkpoint. Observations come

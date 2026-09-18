@@ -323,6 +323,31 @@ impl Runtime for FakeRuntime<'_> {
         Ok(receipt)
     }
 }
+
+#[derive(Default)]
+struct OversizedSuccessRuntime {
+    calls: Cell<usize>,
+}
+
+impl Runtime for OversizedSuccessRuntime {
+    fn inject(&self, _: &Route, _: &Envelope, _: &str) -> CoreResult<String> {
+        self.calls.set(self.calls.get() + 1);
+        Ok("x".repeat(4097))
+    }
+}
+
+#[derive(Default)]
+struct AmbiguousRuntime {
+    calls: Cell<usize>,
+}
+
+impl Runtime for AmbiguousRuntime {
+    fn inject(&self, _: &Route, _: &Envelope, _: &str) -> CoreResult<String> {
+        self.calls.set(self.calls.get() + 1);
+        Err(CoreError::InvalidResponse)
+    }
+}
+
 fn routes() -> StaticRoutes {
     [(
         "space/default".into(),
@@ -334,6 +359,76 @@ fn routes() -> StaticRoutes {
     )]
     .into_iter()
     .collect()
+}
+
+#[test]
+fn oversized_success_does_not_reinject_after_runtime_call() {
+    let f = Fixture::new();
+    let clock = FakeClock::new();
+    let store = f.open();
+    let journal = FakeJournal::new(&store, vec![claim("a", None)]);
+    let runtime = OversizedSuccessRuntime::default();
+    let routes = routes();
+    let mut adapter = Adapter::new(
+        &journal,
+        &store,
+        &routes,
+        &runtime,
+        &clock,
+        "installation".into(),
+    )
+    .unwrap();
+
+    assert_eq!(adapter.tick(), Ok(Progress::Worked));
+    assert_eq!(adapter.tick(), Ok(Progress::Idle));
+
+    assert_eq!(runtime.calls.get(), 1);
+    let item = store.get("attempt-a").unwrap();
+    assert_eq!(item.injection_state, InjectionState::Accepted);
+    assert!(item.runtime_receipt.is_empty());
+    assert!(item.pending_event.is_none());
+    let events = journal.events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].state,
+        OutcomeState::AdapterReportedRuntimeAccepted
+    );
+    assert!(events[0].detail.is_empty());
+}
+
+#[test]
+fn ambiguous_runtime_error_does_not_reinject_after_runtime_call() {
+    let f = Fixture::new();
+    let clock = FakeClock::new();
+    let store = f.open();
+    let journal = FakeJournal::new(&store, vec![claim("a", None)]);
+    let runtime = AmbiguousRuntime::default();
+    let routes = routes();
+    let mut adapter = Adapter::new(
+        &journal,
+        &store,
+        &routes,
+        &runtime,
+        &clock,
+        "installation".into(),
+    )
+    .unwrap();
+
+    assert_eq!(adapter.tick(), Ok(Progress::Worked));
+    assert_eq!(adapter.tick(), Ok(Progress::Idle));
+
+    assert_eq!(runtime.calls.get(), 1);
+    let item = store.get("attempt-a").unwrap();
+    assert_eq!(item.injection_state, InjectionState::TerminalFailure);
+    assert_eq!(item.failure_detail, "runtime outcome ambiguous");
+    assert!(item.pending_event.is_none());
+    let events = journal.events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].state,
+        OutcomeState::AdapterReportedTerminalFailure
+    );
+    assert!(events[0].detail.is_empty());
 }
 
 #[test]
