@@ -1,5 +1,5 @@
 [package]
-name = "journal-adapter-spool"
+name = "journal-runtime-fake"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,8 @@ repository.workspace = true
 
 [dependencies]
 journal-adapter-core = { path = "../journal-adapter-core" }
-fs2.workspace = true
-rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-
-[dev-dependencies]
-journal-runtime-fake = { path = "../journal-runtime-fake" }
 
 [lints]
 workspace = true

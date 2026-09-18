@@ -7,6 +7,7 @@ members = [
     "crates/journal-client",
     "crates/journal-adapter-core",
     "crates/journal-adapter-spool",
+    "crates/journal-runtime-fake",
     "crates/journal-runtime-hermes",
     "crates/journal-runtime-muse",
     "crates/journald",

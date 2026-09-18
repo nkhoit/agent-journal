@@ -400,7 +400,7 @@ pub struct Envelope {
     pub body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Route {
     pub key: String,
     pub runtime_target: String,

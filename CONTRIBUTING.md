@@ -49,6 +49,14 @@ Run the ordinary parallel gate on Linux. The spool explicitly unlocks its sideca
 after closing SQLite, including when another process inherited the lock descriptor.
 The Unix regression holds that descriptor in a live child during close and reopen.
 
+S11 adds `journal-runtime-fake` using existing pinned dependencies, and
+`make adapter-conformance` executes every adapter scenario with redacted
+persisted-state evidence. The runner also rejects fixture drift and missing
+coverage. Publish only the top-level JSON files in `target/adapter-conformance`,
+never raw `.private-state` fixtures. See the
+[fake-runtime contract](conformance/fake-runtime/README.md) for reuse and crash
+semantics. This gate is included in `make check` and CI.
+
 ## Change expectations
 
 - Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.

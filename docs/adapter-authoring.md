@@ -178,6 +178,14 @@ same attempt with a new event ID; accepted, route-unavailable, and terminal
 outcomes are final. Retry a lost event response with its unchanged event ID and
 payload. See [custody receipts and runtime results](protocol.md#custody-receipts-and-runtime-results).
 
+The reusable `journal-runtime-fake` and
+[`scripts/adapter_conformance.py`](../scripts/adapter_conformance.py) execute the
+scenario manifest with redacted persisted-state evidence. Run
+`make adapter-conformance` before a runtime canary; see the
+[fake-runtime contract](../conformance/fake-runtime/README.md) for compatible
+entrypoints and evidence privacy. The default target tests generic orchestration,
+not the unresolved Hermes or Muse adapters.
+
 Use a fake runtime before connecting a vendor runtime:
 
 - register and heartbeat fence stale installations;
