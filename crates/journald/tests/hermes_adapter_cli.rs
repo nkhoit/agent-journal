@@ -351,7 +351,14 @@ fn cli_once_uses_real_journald_spool_and_hermes_runs_ordering() {
     );
     let delivery_file = fixture.directory.join("delivery.credential");
     let hermes_key_file = fixture.directory.join("hermes.key");
-    write_private(&delivery_file, &fixture.delivery_credential);
+    write_private(
+        &delivery_file,
+        &serde_json::to_string(&wire::OneTimeDeliveryAdapterSecret {
+            credential_id: "delivery-credential".into(),
+            secret: fixture.delivery_credential.clone(),
+        })
+        .expect("delivery credential JSON"),
+    );
     write_private(&hermes_key_file, "hermes-test-key");
     let routes_file = fixture.directory.join("routes.json");
     std::fs::write(

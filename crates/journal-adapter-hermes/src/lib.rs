@@ -170,7 +170,7 @@ impl From<CoreError> for RunError {
 /// Execute the configured adapter. Exit-code translation is kept in `main` so
 /// library tests can exercise the exact same construction and once path.
 pub fn run(config: Config) -> Result<(), RunError> {
-    let delivery_credential = read_secret(&config.delivery_credential_file)?;
+    let delivery_credential = read_delivery_credential(&config.delivery_credential_file)?;
     let hermes_key = read_secret(&config.hermes_key_file)?;
     let routes = read_routes(&config.routes_file)?;
     let transport = HttpTransport::new(&config.central_endpoint)
@@ -228,6 +228,14 @@ where
 fn read_secret(path: &Path) -> Result<String, RunError> {
     ensure_private_parent(path)?;
     private_file::read(path).map_err(|error| RunError::Io(format!("{}: {error}", path.display())))
+}
+
+fn read_delivery_credential(path: &Path) -> Result<String, RunError> {
+    let encoded = read_secret(path)?;
+    let credential: journal_client::journal_protocol::OneTimeDeliveryAdapterSecret =
+        journal_client::journal_protocol::decode_json(encoded.as_bytes())
+            .map_err(|_| RunError::Config("delivery credential file is not valid JSON".into()))?;
+    Ok(credential.secret)
 }
 
 fn read_routes(path: &Path) -> Result<StaticRoutes, RunError> {
