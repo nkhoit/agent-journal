@@ -108,7 +108,14 @@ impl Server {
         }
 
         let database_path = config.database_path.clone();
-        let database = tokio::task::spawn_blocking(move || Database::open(database_path)).await??;
+        let audit_path = config
+            .recovery_audit_path
+            .clone()
+            .unwrap_or_else(|| database_path.with_extension("recovery.db"));
+        let database = tokio::task::spawn_blocking(move || {
+            Database::open_protected(database_path, audit_path)
+        })
+        .await??;
         let state = ServiceState::new(database, config.blocking_limit)
             .map_err(|_| ServerError::InvalidConfig("blocking limit must be positive"))?;
         let web_listener = if let Some(web) = config.web {

@@ -161,6 +161,13 @@ Private credential-file support remains Unix-only.
 
 ### Persisted compatibility
 
+Migration 7 adds a central recovery anchor bound to protected external audit.
+It adds no HTTP operation or credential class. Offline restore revokes restored
+credentials and tickets, advances and revokes registrations, cancels active
+claims, and preserves historical custody and attempt identities. Old-generation
+spool state is not automatically rebound. See [protected recovery](recovery.md).
+Older binaries require a compatible backup; never remove migration history.
+
 Migration 3 adds relation positions and a private cursor-secret table without
 changing existing record, mailbox, or attempt states. Existing relation rows
 retain their previous insertion order as a tie-breaker; new appends store

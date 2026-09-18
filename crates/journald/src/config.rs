@@ -14,6 +14,7 @@ const DEFAULT_PUBLIC_PORT: u16 = 8080;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub database_path: PathBuf,
+    pub recovery_audit_path: Option<PathBuf>,
     pub public_address: SocketAddr,
     pub admin_socket_path: PathBuf,
     pub blocking_limit: usize,
@@ -59,6 +60,7 @@ impl Config {
         S: Into<OsString>,
     {
         let mut database_path = None;
+        let mut recovery_audit_path = None;
         let mut public_address = None;
         let mut admin_socket_path = None;
         let mut blocking_limit = None;
@@ -77,6 +79,9 @@ impl Config {
                 .ok_or_else(|| ConfigError::MissingValue(option.clone()))?;
             match option.as_str() {
                 "--database" => set_once(&mut database_path, PathBuf::from(value), &option)?,
+                "--recovery-audit" => {
+                    set_once(&mut recovery_audit_path, PathBuf::from(value), &option)?
+                }
                 "--listen" => {
                     let text = value.to_string_lossy().into_owned();
                     let parsed = text.parse().map_err(|_| ConfigError::Invalid {
@@ -136,6 +141,7 @@ impl Config {
         };
         Ok(Self {
             database_path: database_path.ok_or(ConfigError::Missing("--database"))?,
+            recovery_audit_path,
             public_address: public_address.unwrap_or_else(|| {
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PUBLIC_PORT)
             }),
@@ -149,7 +155,7 @@ impl Config {
     }
 
     pub const fn usage() -> &'static str {
-        "Usage: journald --database PATH --admin-socket PATH [--listen ADDRESS] \
+        "Usage: journald --database PATH --admin-socket PATH [--recovery-audit PATH] [--listen ADDRESS] \
          [--blocking-limit COUNT] [--max-body-bytes BYTES] \
          [--web-listen LOOPBACK_ADDRESS --web-viewer PRINCIPAL]"
     }
@@ -216,6 +222,8 @@ mod tests {
         let config = Config::parse([
             "--database",
             "journal.db",
+            "--recovery-audit",
+            "audit.db",
             "--admin-socket",
             "admin.sock",
             "--listen",
@@ -228,6 +236,7 @@ mod tests {
         .expect("parse configuration");
 
         assert_eq!(config.database_path, PathBuf::from("journal.db"));
+        assert_eq!(config.recovery_audit_path, Some(PathBuf::from("audit.db")));
         assert_eq!(config.public_address, "127.0.0.1:9000".parse().unwrap());
         assert_eq!(config.admin_socket_path, PathBuf::from("admin.sock"));
         assert_eq!(config.blocking_limit, 4);

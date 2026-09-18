@@ -483,6 +483,16 @@ isolation have Rust HTTP tests and a real Chromium gate (`make browser-security`
 This does not establish operational restore acceptance or vendor-runtime canaries,
 and does not declare S12 complete.
 
+Recovery implementation adds migration 7, a protected external write-ahead
+security audit, fail-closed daemon startup/service reads and transactions, and
+the offline `journal-recover` tool. Probes cover table counts/hashes, ACL state,
+heads, FTS, and mailbox history. Real-file/process-kill tests exercise uncertain
+intents and recovery restart. Reopening requires exact-state approval and
+explicit complete surviving spool/client reconciliation; the tool does not
+automatically repair those independent stores. See [protected recovery](recovery.md).
+Unix daemon/CLI gates and deployment canaries must run on their supported hosts;
+this workstream alone does not complete all S12 acceptance.
+
 ### Build
 
 - Add stable authorized record URLs, timeline, thread, search, and delivery summaries.

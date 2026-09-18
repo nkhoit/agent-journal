@@ -386,6 +386,7 @@ fn config(temporary: &TempDir) -> Config {
     Config {
         web: None,
         database_path: temporary.path("journal.db"),
+        recovery_audit_path: None,
         public_address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
         admin_socket_path: temporary.path("admin.sock"),
         blocking_limit: 2,

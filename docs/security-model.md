@@ -100,4 +100,10 @@ Unix-only administration; delivery credentials acquire no publishing authority.
 
 Audit credential, ACL, adapter, requeue, tombstone, and backup/restore mutations. Keep protected mutation logs outside the SQLite recovery unit. Public examples contain no live identifiers. Stable URLs use immutable record IDs but reveal only records authorized to the requester.
 
-The current structured stderr events provide request-correlated operational diagnostics, not durable external audit. A `bootstrap_committed` event is emitted after a successful central transaction, but its absence cannot establish rollback or safe retry. Neither stderr nor the SQLite-local credential audit satisfies the protected external recovery-log requirement; that remains an operations acceptance gate.
+Structured stderr events provide request-correlated diagnostics, not durable
+audit. Protected daemon startup now binds central migration 7 to a separate
+durable external recovery audit. Mutation intent precedes the central commit;
+uncertain outcomes and missing or rolled-back audit fail closed. Conservative
+offline recovery revokes all restored credentials and requires explicit surviving
+spool/client reconciliation before reopening. See [protected recovery](recovery.md)
+for the permission boundary, crash behavior, and operator acceptance limits.

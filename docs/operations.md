@@ -1,6 +1,13 @@
 # Operations
 
-The repository implements journal, central delivery, and protected Unix administrative handlers, plus durable local spooling and generic adapter orchestration. Health success proves process and SQLite schema availability only; it is not a production acceptance claim. Vendor runtime integration, protected external recovery audit, and service-level restore fencing remain unresolved; see the status table in [README.md](../README.md).
+For central backup, restore fencing, external security audit, uncertain-intent
+recovery, and approval-gated reopening, use the [protected recovery runbook](recovery.md).
+
+The repository implements journal, central delivery, protected Unix administrative
+handlers, durable local spooling, generic adapter orchestration, and protected
+offline recovery. Health success is not a production acceptance claim. Vendor
+runtime integration and deployment recovery canaries remain separate acceptance
+work; see the status table in [README.md](../README.md).
 
 ## Deployment shape
 
@@ -61,7 +68,12 @@ Every request has a server-generated `request_id`, returned as `X-Request-ID`. `
 
 Search by request ID and operation first; inspect the associated failure category, SQLite code, and request duration before retrying. Enrollment and rotation are not replayable. The CLIs report `credential_write_failed`, `server_outcome=committed`, a validated response request ID when available, and `recovery=enrollment-recover` if local publication fails. A missing response instead reports `server_outcome=unknown`; an unavailable request ID is expected when the response is lost. Use the protected recovery procedure below rather than inferring success from HTTP completion alone.
 
-Logs exclude headers, bearer values, tickets, digests, request/response bodies, local credential paths, installation IDs, and runtime route targets. They are operational diagnostics, not recovery-grade external audit: stderr is not fsynced, ordered atomically with SQLite, or guaranteed to survive process/host failure. Missing events prove nothing. The database credential audit also shares SQLite's recovery unit. Protected durable external audit and restore reconciliation remain later operations work.
+Logs exclude headers, bearer values, tickets, digests, request/response bodies,
+local credential paths, installation IDs, and runtime route targets. They are
+operational diagnostics, not recovery-grade external audit: stderr is not fsynced
+or ordered atomically with SQLite. Missing diagnostic events prove nothing.
+The protected external audit described in the recovery runbook is a separate
+durable recovery unit; the database credential audit alone is not.
 
 Expose live and ready checks separately. Monitor process health, append/query latency, database and WAL size, pending mailboxes and oldest item age, outstanding/expired claims, adapter heartbeat age, local spool item/byte usage, free-disk reserve, paused claiming, runtime failure counts, backup age, and last verified restore date.
 
@@ -161,7 +173,11 @@ aj enroll --endpoint "$JOURNAL_URL" --ticket-file secrets/ticket \
 
 Ticket and credential output files must not already exist. Publication is no-clobber and durable: write and sync a private staging file, link it into place, remove staging, and sync the containing directory. Credential files contain the non-secret credential identifier and its secret; ticket files contain only the ticket. Neither command prints secrets. A failure may leave a private output file, but never makes a committed transaction replayable. Delete unusable outputs only after revocation/recovery, and use fresh output paths when reenrolling.
 
-Migration 0002 adds durable installation ownership, enrollment lineage, replacement links, ticket invalidation, and credential audit rows. Existing registration bindings and their credentials are included in recovery scope. It is a forward-only schema upgrade; older daemons reject the newer schema. Restore a verified pre-upgrade backup rather than removing columns or migration markers. Protected audit export and central restore fencing remain later operations work.
+Migration 0002 adds durable installation ownership, enrollment lineage,
+replacement links, ticket invalidation, and credential audit rows. Migration 0007
+binds central state to the protected external recovery audit. These upgrades are
+forward-only; older daemons reject the newer schema. Restore a verified compatible
+backup through the recovery runbook rather than removing migration markers.
 
 For privileged Linux acceptance, build the binaries, then run `python3 tests/s4_foreign_uid_test.py` as root in an isolated test checkout (`AJ_BIN_DIR` can select the built binaries). This dedicated harness fails rather than skips without privilege. It starts a test daemon with a mode-`0700` directory and mode-`0600` socket, drops only a child process to numeric UID/GID 65534 with no supplementary groups, and requires an actual `EACCES` from connecting to the socket. It checks that same-owner administration still works. No host accounts or global permissions are changed. This is separate from the ordinary unprivileged `make check` gate.
 

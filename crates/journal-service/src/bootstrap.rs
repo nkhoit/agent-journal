@@ -246,10 +246,27 @@ impl BootstrapService {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, BootstrapError>,
     ) -> Result<T, BootstrapError> {
+        let audit = self.database.recovery_audit();
+        let _audit_guard = audit.map(|audit| audit.lock()).transpose()?;
+        if let Some(audit) = audit {
+            audit.ensure_open(&self.database)?;
+        }
         let mut connection = self.database.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = transaction.total_changes();
         let result = operation(&transaction)?;
+        let revision = if transaction.total_changes() != before {
+            audit
+                .map(|audit| audit.prepare(&transaction))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         transaction.commit()?;
+        if let Some(audit) = audit {
+            audit.committed(revision)?;
+        }
         Ok(result)
     }
 

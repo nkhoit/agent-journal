@@ -11,7 +11,12 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior};
 use thiserror::Error;
 
-pub const MIGRATION_VERSION: i64 = 6;
+mod recovery;
+pub use recovery::{RecoveryVerification, TableVerification};
+mod recovery_audit;
+pub use recovery_audit::{RecoveryApproval, RecoveryAudit, RecoveryStatus};
+
+pub const MIGRATION_VERSION: i64 = 7;
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BACKUP_PAGES_PER_STEP: i32 = 128;
@@ -48,6 +53,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         sql: include_str!("../../../migrations/0006_host_custody.sql"),
+    },
+    Migration {
+        version: 7,
+        sql: include_str!("../../../migrations/0007_recovery_anchor.sql"),
     },
 ];
 
@@ -86,6 +95,10 @@ pub enum StorageError {
     BackupDestinationIsSource,
     #[error("backup integrity check failed: {0}")]
     BackupIntegrity(String),
+    #[error("recovery is closed: {0}")]
+    RecoveryClosed(&'static str),
+    #[error("invalid recovery evidence: {0}")]
+    RecoveryEvidence(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +143,7 @@ impl ConnectionFactory {
 #[derive(Debug, Clone)]
 pub struct Database {
     factory: ConnectionFactory,
+    audit: Option<std::sync::Arc<RecoveryAudit>>,
 }
 
 impl Database {
@@ -138,7 +152,10 @@ impl Database {
         let mut connection = factory.connect()?;
         apply_migrations(&mut connection)?;
         verify_schema(&connection)?;
-        Ok(Self { factory })
+        Ok(Self {
+            factory,
+            audit: None,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -154,9 +171,47 @@ impl Database {
     }
 
     pub fn connect_read_only(&self) -> Result<Connection, StorageError> {
+        if let Some(audit) = &self.audit {
+            audit.ensure_open(self)?;
+        }
         let connection = self.factory.connect_read_only()?;
         verify_schema(&connection)?;
         Ok(connection)
+    }
+
+    pub fn recovery_audit(&self) -> Option<&RecoveryAudit> {
+        self.audit.as_deref()
+    }
+
+    pub fn recovery_status(&self) -> Result<RecoveryStatus, StorageError> {
+        match &self.audit {
+            Some(audit) => {
+                audit.ensure_open(self)?;
+                audit.status()
+            }
+            None => Ok(RecoveryStatus::default()),
+        }
+    }
+
+    pub fn open_protected(
+        path: impl AsRef<Path>,
+        audit_path: impl AsRef<Path>,
+    ) -> Result<Self, StorageError> {
+        let lock = RecoveryAudit::acquire_lock(audit_path.as_ref())?;
+        let mut database = Self::open(path)?;
+        let audit = RecoveryAudit::open_with_lock(&database, audit_path.as_ref(), lock)?;
+        audit.ensure_open(&database)?;
+        database.audit = Some(std::sync::Arc::new(audit));
+        Ok(database)
+    }
+
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let factory = ConnectionFactory::new(path);
+        verify_schema(&factory.connect_read_only()?)?;
+        Ok(Self {
+            factory,
+            audit: None,
+        })
     }
 
     pub fn schema_version(&self) -> Result<i64, StorageError> {
