@@ -2,9 +2,9 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: S0–S11 foundations, protected bootstrap, journal queries, central delivery, durable spool, generic adapter orchestration, and executable fake-runtime conformance implemented.**
+> **Status: S0–S11 foundations plus the Hermes Runs API adapter are executable and tested.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. An opt-in shared read-only web viewer has HTTP and Chromium security tests; operational S12 acceptance and vendor runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. The Hermes adapter uses the authenticated, durable Hermes Runs API and has focused HTTP tests plus a real-`journald`/real-spool integration test. The adapter proves runtime acceptance only; it does not claim model observation, understanding, or task completion. An opt-in shared read-only web viewer has HTTP and Chromium security tests; Muse and operational deployment canaries remain unresolved.
 
 ## Product model
 
@@ -41,9 +41,9 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
 | Read-only web | Separate opt-in loopback listener for one shared viewer principal behind protected Tailscale ingress; safe Markdown, timeline, stable record links, thread, search, and scoped delivery summaries; HTTP and real Chromium negative tests |
-| Adapter delivery | Generic synchronous orchestration composes the typed delivery client and SQLite spool; durable custody, fenced local routing, bounded retries, atomic result/telemetry outbox, and fake-runtime crash recovery are implemented. The S11 runner executes all 19 adapter scenarios with redacted persisted-state evidence; vendor injection remains unresolved |
-| Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, and `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
-| Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
+| Adapter delivery | Generic synchronous orchestration composes the typed delivery client and SQLite spool; durable custody, fenced local routing, bounded retries, atomic result/telemetry outbox, and fake-runtime crash recovery are implemented. The S11 runner executes all 19 adapter scenarios with redacted persisted-state evidence. Hermes Runs API acceptance is implemented and covered by focused HTTP and real-`journald` integration tests |
+| Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands, and the executable Hermes adapter; protected administration and credential files require Unix; Muse remains an explicit status-2 stub |
+| Hermes injection | **Implemented:** authenticated Runs API preflight, explicit local session creation, durable idempotent run submission, bounded receipts, retry/rejection classification, and custody-before-injection integration coverage |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Recovery, crash, security, and live canaries | Protected external audit, offline restore fencing, exact-state reopen approval, and storage process-kill tests are implemented. Linux CI exercises combined protected web/startup and metrics recovery tests; live deployment acceptance remains unverified |
 | Operational observability | Protected aggregate `aj-admin metrics` includes durable external backup/verified-reopen timestamps; local spool pressure snapshots and deterministic SQLite-full/WAL/free-reserve tests are implemented. Deployment capacity measurements and physical-volume exhaustion acceptance remain unresolved |
@@ -80,12 +80,12 @@ crates/journal-client/       typed bootstrap/journal client, HTTP/Unix transport
 crates/journal-adapter-core/ orchestration, typed delivery bridge, routing, envelope ports
 crates/journal-adapter-spool/ durable SQLite spool, pressure gate, and process lock
 crates/journal-runtime-fake/ reusable acceptance capture and crash-injection runtime
-crates/journal-runtime-hermes/ unresolved Hermes runtime boundary
+crates/journal-runtime-hermes/ Hermes Runs API runtime client
 crates/journal-runtime-muse/ unresolved Muse runtime boundary
 crates/journald/             runnable shell, protected bootstrap handlers, authentication boundaries
 crates/aj/                   enrollment and principal journal CLI
 crates/aj-admin/             protected local provisioning, rotation, revocation, and recovery CLI
-crates/journal-adapter-hermes/ not-implemented Hermes adapter binary
+crates/journal-adapter-hermes/ Hermes durable-spool adapter binary
 crates/journal-adapter-muse/ not-implemented Muse adapter binary
 migrations/                  numbered SQLite migrations
 conformance/                 adapter, client, and fake-runtime fixtures
@@ -131,13 +131,31 @@ mkdir -m 700 service-state
   --listen 127.0.0.1:8080
 ```
 
-Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll, then the [central mailbox protocol](docs/protocol.md#central-mailbox-claims) and [custody commands](docs/protocol.md#custody-receipts-and-runtime-results). Public administration paths always return non-leaking JSON `404` responses. Custody, telemetry, requeue, record delivery-status, and protected adapter listing are implemented. Custody commands assert that a caller has already durably spooled the attempt; the CLI does not implement a spool or runtime injection. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Runtime-specific adapter binaries remain status-2 stubs.
+Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provision and enroll, then the [central mailbox protocol](docs/protocol.md#central-mailbox-claims) and [custody commands](docs/protocol.md#custody-receipts-and-runtime-results). Public administration paths always return non-leaking JSON `404` responses. Custody, telemetry, requeue, record delivery-status, and protected adapter listing are implemented. Custody commands assert that a caller has already durably spooled the attempt; the Hermes adapter composes the typed delivery client, local SQLite spool, and Hermes Runs API runtime. `journald` handles `SIGINT`/`SIGTERM` with graceful listener shutdown and removes only the Unix socket it created. Muse remains a status-2 stub.
+
+## Hermes adapter
+
+`journal-adapter-hermes` is a synchronous delivery worker with a bounded `--once` mode for canaries and a signal-aware loop for supervision. It accepts only file paths for credentials; secret values are never command-line arguments. The delivery credential and Hermes API key must be private regular files in private directories. `runtime_target` in the local routes JSON is the Hermes `session_id` and is never sent to the central journal.
+
+```bash
+journal-adapter-hermes \
+  --central-endpoint https://journal.example.invalid \
+  --delivery-credential-file /protected/agent-journal/delivery.credential \
+  --spool-db /var/lib/agent-journal/spool.sqlite3 \
+  --instance-id INSTALLATION_ID \
+  --routes-file /protected/agent-journal/routes.json \
+  --hermes-base-url http://127.0.0.1:8765 \
+  --hermes-key-file /protected/agent-journal/hermes.key \
+  --poll-seconds 1
+```
+
+The runtime preflights `/health` and authenticated `/v1/capabilities`, creates the explicit local session, and submits `POST /v1/runs` with `Authorization: Bearer`, `Idempotency-Key: agent-journal:<attempt_id>`, and `{input,session_id}`. Only HTTP `202` with a bounded visible-ASCII `run_id` is accepted. `429`, `5xx`, connection failures, and timeouts are unavailable and safely retryable; authentication, validation, not-found, and idempotency conflicts are rejected. A receipt records runtime admission, not model observation or task completion.
 
 ## Implementation sequence
 
-S0 through S11 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, central delivery, durable spool, orchestration, and fake-runtime conformance gates. The remaining sequence is:
+S0 through S11 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, central delivery, durable spool, orchestration, and fake-runtime conformance gates. Hermes Runs API integration is now executable and tested. The remaining sequence is:
 
-1. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
+1. Revalidate the Muse runtime injection surface on a supported release before implementing that adapter.
 2. Collect deployment capacity and canary evidence beyond the Linux recovery and shared-viewer CI gates.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).

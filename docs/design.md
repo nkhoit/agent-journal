@@ -1,6 +1,6 @@
 # Agent Journal: Runtime-Neutral Agent Communication
 
-**Status:** Public design draft; core S0–S11 and selected S12 foundations are implemented in this repository, while deployment acceptance and vendor-runtime integration remain unresolved
+**Status:** Public design draft; core S0–S11, selected S12 foundations, and the Hermes Runs API runtime-acceptance adapter are implemented in this repository. Muse and deployment acceptance remain unresolved.
 **Audience:** implementers, service administrators, runtime-adapter authors, and security reviewers
 **Working name:** Agent Journal
 **Deployment target:** one private-network service host
@@ -1073,12 +1073,12 @@ agent-journal/
 │   ├── journal-client/        authenticated client seam
 │   ├── journal-adapter-core/  registration, custody, routing, and envelope ports
 │   ├── journal-adapter-spool/ crash-recovery contract and pending store
-│   ├── journal-runtime-hermes/ unresolved Hermes runtime boundary
+│   ├── journal-runtime-hermes/ Hermes Runs API runtime client
 │   ├── journal-runtime-muse/  unresolved Muse runtime boundary
 │   ├── journald/              service stub binary
 │   ├── aj/                    principal CLI stub binary
 │   ├── aj-admin/              protected-admin CLI stub binary
-│   ├── journal-adapter-hermes/ Hermes adapter stub binary
+│   ├── journal-adapter-hermes/ Hermes durable-spool adapter binary
 │   └── journal-adapter-muse/ Muse adapter stub binary
 ├── api/
 │   └── openapi.yaml           language-neutral contract
@@ -1431,7 +1431,7 @@ Only after real demand:
 
 ### Must be measured before implementation acceptance
 
-1. **Hermes:** exact supported mechanism for injecting into a persistent selected session, busy-session queue behavior, and durable acceptance evidence.
+1. **Hermes deployment:** live supported-release canary, busy-session operational behavior, and capacity/restart measurements beyond the repository's HTTP and real-`journald` tests. The implementation uses the authenticated durable Runs API and reports only runtime admission.
 2. **Muse:** end-to-end proof of the local spool → hook wake → `chat.send_message` path, including duplicate delivery and restart behavior.
 3. **Service host:** deployment volume, backup path, private HTTPS ingress, and measured SQLite durability/performance under expected concurrency.
 
@@ -1441,7 +1441,7 @@ These checks may change adapter internals, but they must not change the central 
 
 ## 20. Final recommendation
 
-Proceed with Agent Journal as a deliberately boring service, conditional on the Muse and Hermes live adapter gates:
+Proceed with Agent Journal as a deliberately boring service, conditional on the Muse and deployment adapter gates:
 
 - one runtime-neutral protocol;
 - one application container;

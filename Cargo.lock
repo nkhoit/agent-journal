@@ -654,7 +654,12 @@ dependencies = [
 name = "journal-adapter-hermes"
 version = "0.1.0"
 dependencies = [
+ "journal-adapter-core",
+ "journal-adapter-spool",
+ "journal-client",
  "journal-runtime-hermes",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -726,6 +731,8 @@ name = "journal-runtime-hermes"
 version = "0.1.0"
 dependencies = [
  "journal-adapter-core",
+ "reqwest",
+ "serde_json",
 ]
 
 [[package]]
@@ -769,6 +776,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "journal-adapter-core",
+ "journal-adapter-hermes",
  "journal-adapter-spool",
  "journal-client",
  "journal-protocol",

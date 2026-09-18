@@ -185,7 +185,8 @@ scenario manifest with redacted persisted-state evidence. Run
 `make adapter-conformance` before a runtime canary; see the
 [fake-runtime contract](../conformance/fake-runtime/README.md) for compatible
 entrypoints and evidence privacy. The default target tests generic orchestration,
-not the unresolved Hermes or Muse adapters.
+not the Muse adapter. Hermes additionally has focused Runs API HTTP tests and a
+real-`journald`/spool integration test.
 
 Use a fake runtime before connecting a vendor runtime:
 
@@ -207,6 +208,6 @@ Use a fake runtime before connecting a vendor runtime:
 
 ## Runtime-specific integration
 
-Do not infer an injection surface from a vendor name or old local installation. Hermes and Muse are deliberately unresolved in this scaffold. Record the supported version, exact API/CLI/hook behavior, concurrency semantics, receipt strength, restart behavior, and canary evidence in deployment-local evidence before implementing the corresponding adapter.
+Do not infer an injection surface from a vendor name or old local installation. The Hermes adapter uses the authenticated durable Runs API: preflight capabilities, create the explicit local session, and submit an idempotent run with a bounded `run_id` receipt. Its repository tests prove runtime admission and custody ordering, not model completion or a production canary. Muse remains unresolved; record its supported version, exact API/CLI/hook behavior, concurrency semantics, receipt strength, restart behavior, and canary evidence in deployment-local evidence before implementing it.
 
 Never use terminal keystrokes, direct edits to a runtime's internal database, shell interpolation of record content, or a fresh unrelated session per delivery as a substitute for a supported integration.

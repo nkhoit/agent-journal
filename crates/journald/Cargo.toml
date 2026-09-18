@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 journal-adapter-core = { path = "../journal-adapter-core" }
+journal-adapter-hermes = { path = "../journal-adapter-hermes" }
 journal-adapter-spool = { path = "../journal-adapter-spool" }
 journal-client = { path = "../journal-client" }
 journal-runtime-fake = { path = "../journal-runtime-fake" }

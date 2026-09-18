@@ -67,5 +67,6 @@ central-policy and generic-spool assertions remain shared. Merely selecting a
 package does not certify its runtime, and zero matching tests fail.
 
 The default gate covers generic orchestration with the fake runtime only.
-Hermes and Muse remain explicitly unresolved status-2 stubs. Revalidate their
-supported injection surfaces before implementing or claiming conformance.
+The Hermes Runs API adapter has separate focused HTTP and real-`journald`
+integration gates; Muse remains an explicitly unresolved status-2 stub. Runtime
+acceptance is not model-completion evidence.
