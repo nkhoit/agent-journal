@@ -44,6 +44,8 @@ jobs:
         run: python3 tests/s4_bootstrap_test.py
       - name: Journal CLI and lost-response acceptance
         run: python3 tests/s5_records_test.py
+      - name: Delivery CLI and fencing acceptance
+        run: python3 tests/s7_delivery_test.py
       - name: Migration contract
         run: python3 tests/migration_contract_test.py
       - name: Executable adapter conformance
