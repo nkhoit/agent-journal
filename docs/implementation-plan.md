@@ -11,7 +11,7 @@ This plan turns the reviewed Rust scaffold into a working Agent Journal through 
 - Derive principal, adapter, and installation authority from authenticated server context. Never accept those identities from ordinary JSON bodies.
 - Use deterministic failpoints and fake clocks. Do not make tests depend on long sleeps or timing luck.
 - Land the typed client method and CLI command with the endpoint family it consumes; do not defer all client work to the end.
-- Keep runtime-specific adapters unresolved until the durable spool and fake-runtime conformance suite pass.
+- Keep runtime-specific adapters unresolved until the durable spool and fake-runtime conformance suite pass; after that, only claim a vendor adapter with focused protocol and integration evidence.
 - Preserve the current non-goals: no MCP, broker, PostgreSQL, federation, task engine, artifact store, or exactly-once runtime claim in v1.
 
 ## Dependency graph
@@ -31,7 +31,8 @@ S0 contract gate
                              │       └─ S11 fake-runtime conformance
                              └─ S12 operations + read-only web
 
-Hermes and Muse are separate conditional canaries after S11.
+Hermes has a separate Runs API implementation gate after S11; Muse remains a
+conditional canary workstream.
 ```
 
 Every slice should be one reviewable PR unless its acceptance gate cannot be demonstrated without two tightly coupled changes.
@@ -58,7 +59,8 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 - CI reports the expected 30 paths and 32 operations plus fixture coverage.
 - Failure mutations fail deterministically.
-- All binaries remain honest not-implemented stubs.
+- Early slices may keep binaries as honest stubs; later slices replace them only
+  when their executable acceptance gates pass.
 
 ## S1 — Domain, wire, canonicalization, and cursors
 
@@ -400,7 +402,9 @@ The local spool additionally kills before and after atomic result/outbox and
 acknowledgement commits. Acceptance-before-persistence visibly duplicates a send.
 Unix subprocess acceptance requires a filesystem that preserves private directory
 permissions; a Windows-mounted WSL checkout without those permissions fails closed.
-S11 adds the reusable scenario runner below; vendor integrations remain unresolved.
+S11 adds the reusable scenario runner below; the Hermes Runs API adapter is
+covered by a separate focused HTTP gate and a real-`journald` integration gate.
+Muse remains unresolved.
 
 ### Build
 
@@ -443,7 +447,8 @@ persistence, followed by a restart that visibly accepts the same attempt twice.
 Identity relationships are anonymized within each execution; raw fixture databases
 are not publishable evidence. The runner and its regression tests are part of
 `make check` and CI. See the [runtime contract](../conformance/fake-runtime/README.md)
-for compatible future runtime entrypoints. Hermes and Muse remain status-2 stubs.
+for compatible future runtime entrypoints. Hermes now has a supported Runs API
+adapter; Muse remains a status-2 stub.
 No public API, central or spool migration, or credential-class change is introduced.
 
 ### Build
@@ -463,7 +468,8 @@ No public API, central or spool migration, or credential-class change is introdu
 
 - Every scenario ID passes with durable-state evidence.
 - The suite demonstrates at-least-once behavior and visible duplicate risk rather than hiding it.
-- Hermes and Muse still identify as unresolved.
+- Muse still identifies as unresolved; Hermes identifies as an executable
+  runtime-acceptance adapter without claiming model completion.
 
 ## S12 — Operations, recovery, and safe read-only web
 
@@ -521,7 +527,9 @@ serialized mutation overhead remain unmeasured deployment acceptance items.
 
 ## Conditional runtime adapters
 
-Hermes and Muse are separate, non-blocking workstreams after S11. Each adapter gets its own PR and release gate:
+Muse remains a separate, non-blocking workstream after S11. The Hermes adapter
+has passed its implementation gate, while production canary evidence remains a
+deployment release gate. Runtime adapter release gates are:
 
 1. record the supported runtime version;
 2. identify a supported injection surface;
@@ -531,7 +539,9 @@ Hermes and Muse are separate, non-blocking workstreams after S11. Each adapter g
 6. pass all S11 fake-runtime scenarios;
 7. pass a private Alpha → Journal → Beta → correlated-reply canary.
 
-If a surface cannot be revalidated, that adapter stays an explicit status-2 stub. One runtime's evidence never substitutes for the other's.
+If a surface cannot be revalidated, that adapter stays an explicit status-2 stub.
+Hermes implementation evidence does not substitute for Muse evidence, and the
+Hermes receipt still means runtime admission rather than model completion.
 
 ## Test architecture
 

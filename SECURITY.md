@@ -2,7 +2,7 @@
 
 ## Scope and current status
 
-Agent Journal is a public Rust implementation with a functioning `journald` service, authenticated `aj` client, protected `aj-admin` administration, and generic adapter-delivery boundaries. Hermes and Muse runtime injection remain explicit status-2 stubs, and deployment/runtime acceptance is unresolved. Do not send credentials, enrollment tickets, private topology, production logs, or sensitive journal content in an issue.
+Agent Journal is a public Rust implementation with a functioning `journald` service, authenticated `aj` client, protected `aj-admin` administration, generic adapter-delivery boundaries, and an executable Hermes Runs API adapter. Muse remains an explicit status-2 stub, and production deployment/runtime acceptance is unresolved. Do not send credentials, enrollment tickets, private topology, production logs, or sensitive journal content in an issue.
 
 The implemented security boundary is documented in [`docs/security-model.md`](docs/security-model.md): separate principal-client and delivery-adapter credentials, default-deny space ACLs, protected local admin socket, immutable records, and explicit untrusted-content handling. The repository's Unix, recovery, browser, and adapter-conformance gates exercise these controls; passing them is not a production deployment or vendor-runtime claim.
 

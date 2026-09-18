@@ -2,20 +2,24 @@
 
 Runtime integration is intentionally a separate, conditional layer. The central journal protocol must not contain vendor session IDs, chat IDs, hook paths, process handles, or runtime-specific assumptions.
 
-## Hermes — unresolved / revalidation required
+## Hermes — Runs API adapter implemented
 
-The design expects a session-oriented adapter with local route bindings and a supported way to queue a turn into a selected persistent session. The exact supported injection endpoint, busy-session behavior, concurrency contract, and durable acceptance evidence are **not established by this repository**.
+The Hermes adapter targets the authenticated Runs API exposed by the supported Hermes release contract. It uses only the following surface:
 
-Before implementing or claiming the Hermes adapter, deployment evidence must revalidate the installed supported release and record:
+- `GET /health` for reachability;
+- authenticated `GET /v1/capabilities`, requiring `features.run_submission == true` and durable `features.runs_idempotency` with at least the documented 86,400-second retention;
+- authenticated `POST /api/sessions` with an explicit local session ID;
+- authenticated `POST /v1/runs` with `Idempotency-Key: agent-journal:<attempt_id>` and JSON `{ "input": rendered, "session_id": private_session_id }`.
 
-- supported API/CLI/gateway surface and version;
-- how a route selects a persistent session without exposing its ID centrally;
-- whether busy sessions queue safely;
-- strongest durable runtime acceptance receipt;
-- restart, timeout, duplicate, and fencing behavior;
-- a live canary with a correlated journal reply.
+The runtime client requires HTTP `202` and a bounded visible-ASCII `run_id`; it returns only that non-secret receipt to the generic adapter. Exact retries use the same delivery-attempt key. `429`, `5xx`, connection failures, and timeouts map to `RuntimeUnavailable`. Authentication failures, validation failures, missing sessions, and idempotency conflicts map to `RuntimeRejected`. Raw vendor responses and API keys are never logged or persisted.
 
-Terminal keystrokes, direct edits to runtime state databases, and unrelated fresh sessions are not acceptable substitutes. Until this evidence exists, `journal-adapter-hermes` remains an explicit not-implemented stub.
+`Route.runtime_target` is the private Hermes `session_id`. It is loaded from a local routes JSON file, sent only to Hermes, and does not enter central custody, telemetry, or portable protocol values. The generic adapter preserves spool → central custody → injection-started → runtime acceptance → durable result/outbox ordering. The acceptance receipt proves runtime admission only; it does not prove model observation, understanding, or task completion.
+
+The executable `journal-adapter-hermes` wires the delivery journal, SQLite spool, static routes, system clock, runtime client, and generic adapter. `--once` runs one bounded tick for a canary; loop mode handles `SIGINT`/`SIGTERM`. Credential arguments are file paths only. Secret files must be private regular non-symlink files in private directories.
+
+Focused runtime HTTP tests cover accepted submission, exact replay, request body/session/key shape, authentication rejection, idempotency conflict, retryable `429`/`5xx`, malformed or oversized receipts, and capability preflight. A Unix integration test runs the adapter against a real `journald`, a real SQLite spool, and a fake Hermes HTTP server; it verifies custody-before-injection, accepted telemetry, persisted runtime receipt, and that the session ID stays out of central delivery status.
+
+This repository does not claim a production live canary, model completion, or a reply/read path through Hermes. Those remain deployment and product-level acceptance work.
 
 ## Muse — unresolved / revalidation required
 
