@@ -122,21 +122,36 @@ impl ConnectionFactory {
     }
 
     pub fn connect(&self) -> Result<Connection, StorageError> {
-        let path = absolute_path(&self.path)?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let connection = Connection::open_with_flags(path, flags)?;
+        let connection = self.open_read_write()?;
+        reject_protected_writer(&connection)?;
         configure_connection(&connection, false)?;
         Ok(connection)
     }
 
-    pub fn connect_read_only(&self) -> Result<Connection, StorageError> {
+    pub(crate) fn connect_unchecked(&self) -> Result<Connection, StorageError> {
+        let connection = self.open_read_write()?;
+        configure_connection(&connection, false)?;
+        Ok(connection)
+    }
+
+    fn open_read_write(&self) -> Result<Connection, StorageError> {
         let path = absolute_path(&self.path)?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let connection = Connection::open_with_flags(path, flags)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        Ok(Connection::open_with_flags(path, flags)?)
+    }
+
+    pub fn connect_read_only(&self) -> Result<Connection, StorageError> {
+        let connection = self.open_read_only_unconfigured()?;
         configure_connection(&connection, true)?;
         Ok(connection)
+    }
+
+    fn open_read_only_unconfigured(&self) -> Result<Connection, StorageError> {
+        let path = absolute_path(&self.path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        Ok(Connection::open_with_flags(path, flags)?)
     }
 }
 
@@ -149,7 +164,18 @@ pub struct Database {
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let factory = ConnectionFactory::new(path);
-        let mut connection = factory.connect()?;
+        if factory.path().exists() {
+            let connection = factory.open_read_only_unconfigured()?;
+            if recovery_protection_enabled(&connection)? {
+                configure_connection(&connection, true)?;
+                verify_schema(&connection)?;
+                return Ok(Self {
+                    factory,
+                    audit: None,
+                });
+            }
+        }
+        let mut connection = factory.connect_unchecked()?;
         apply_migrations(&mut connection)?;
         verify_schema(&connection)?;
         Ok(Self {
@@ -168,6 +194,10 @@ impl Database {
 
     pub fn connect(&self) -> Result<Connection, StorageError> {
         self.factory.connect()
+    }
+
+    pub(crate) fn connect_unchecked(&self) -> Result<Connection, StorageError> {
+        self.factory.connect_unchecked()
     }
 
     pub fn connect_read_only(&self) -> Result<Connection, StorageError> {
@@ -225,15 +255,56 @@ impl Database {
     where
         F: FnOnce(&Transaction<'_>) -> Result<T, StorageError>,
     {
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.with_transaction_for(operation)
+    }
+
+    pub fn with_transaction_for<T, E, F>(&self, operation: F) -> Result<T, E>
+    where
+        E: From<StorageError>,
+        F: FnOnce(&Transaction<'_>) -> Result<T, E>,
+    {
+        let audit = self.audit.as_deref();
+        let _guard = audit
+            .map(|audit| audit.lock())
+            .transpose()
+            .map_err(E::from)?;
+        if let Some(audit) = audit {
+            audit.ensure_open(self).map_err(E::from)?;
+        }
+        let mut connection = match audit {
+            Some(_) => self.factory.connect_unchecked().map_err(E::from)?,
+            None => self.factory.connect().map_err(E::from)?,
+        };
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+        let before = transaction.total_changes();
         match operation(&transaction) {
             Ok(value) => {
-                transaction.commit()?;
+                let revision = if transaction.total_changes() != before {
+                    audit
+                        .map(|audit| audit.prepare(&transaction))
+                        .transpose()
+                        .map_err(E::from)?
+                        .flatten()
+                } else {
+                    None
+                };
+                transaction
+                    .commit()
+                    .map_err(StorageError::from)
+                    .map_err(E::from)?;
+                if let Some(audit) = audit {
+                    audit.committed(revision).map_err(E::from)?;
+                }
                 Ok(value)
             }
             Err(operation_error) => {
-                transaction.rollback()?;
+                transaction
+                    .rollback()
+                    .map_err(StorageError::from)
+                    .map_err(E::from)?;
                 Err(operation_error)
             }
         }
@@ -388,6 +459,32 @@ fn configure_connection(connection: &Connection, read_only: bool) -> Result<(), 
         connection.pragma_update(None, "synchronous", "FULL")?;
     }
     verify_connection_policy(connection, read_only)
+}
+
+fn recovery_protection_enabled(connection: &Connection) -> Result<bool, StorageError> {
+    let anchor_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='recovery_anchor')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !anchor_exists {
+        return Ok(false);
+    }
+    Ok(connection.query_row(
+        "SELECT audit_required FROM recovery_anchor WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn reject_protected_writer(connection: &Connection) -> Result<(), StorageError> {
+    if recovery_protection_enabled(connection)? {
+        Err(StorageError::RecoveryClosed(
+            "protected writes require the audited transaction wrapper",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn set_wal_mode(connection: &Connection) -> Result<(), StorageError> {

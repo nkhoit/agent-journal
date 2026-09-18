@@ -102,7 +102,7 @@ impl RecoveryAudit {
                 "audit and central database must differ",
             ));
         }
-        let mut central_connection = database.connect()?;
+        let mut central_connection = database.connect_unchecked()?;
         let central = central_connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (journal_id, revision, required): (String, i64, bool) = central.query_row(
@@ -220,7 +220,7 @@ impl RecoveryAudit {
                 row.get(0)
             })?;
         let (revision, _, outcome) = head(&audit)?;
-        let anchor: i64 = database.connect()?.query_row(
+        let anchor: i64 = database.connect_unchecked()?.query_row(
             "SELECT revision FROM recovery_anchor WHERE singleton=1",
             [],
             |row| row.get(0),
@@ -363,7 +363,7 @@ impl RecoveryAudit {
         let audit = self.connection()?;
         let (revision, serialized, outcome) = head(&audit)?;
         let latest: Snapshot = serde_json::from_str(&serialized)?;
-        let mut connection = database.connect()?;
+        let mut connection = database.connect_unchecked()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let expected_id: String =
@@ -448,7 +448,7 @@ impl RecoveryAudit {
         let _guard = self.lock()?;
         let mut audit = self.connection()?;
         let (revision, _, _) = head(&audit)?;
-        let connection = database.connect()?;
+        let connection = database.connect_unchecked()?;
         let adapters = installation_inventory(&audit)?;
         let clients = identifiers(&connection, "SELECT id FROM principals ORDER BY id")?;
         let anchor: i64 =
@@ -811,7 +811,7 @@ mod tests {
     }
 
     fn seed(database: &Database) {
-        database.connect().unwrap().execute_batch(
+        database.connect_unchecked().unwrap().execute_batch(
                 "INSERT INTO principals VALUES('p','Principal','2026-01-01T00:00:00Z',NULL);
                  INSERT INTO spaces VALUES('s','Space','2026-01-01T00:00:00Z',NULL);
                  INSERT INTO memberships VALUES('s','p',1,1,0,'2026-01-01T00:00:00Z');
@@ -845,7 +845,7 @@ mod tests {
     fn mutate(database: &Database, audit: &RecoveryAudit, sql: &str) {
         let _guard = audit.lock().unwrap();
         audit.ensure_open(database).unwrap();
-        let mut connection = database.connect().unwrap();
+        let mut connection = database.connect_unchecked().unwrap();
         let transaction = connection.transaction().unwrap();
         transaction.execute_batch(sql).unwrap();
         let revision = audit.prepare(&transaction).unwrap();
@@ -911,7 +911,7 @@ mod tests {
             let published =
                 (stage == "published").then(|| std::fs::read(fixture.0.join("audit.db")).unwrap());
             let anchor: (i64, bool) = database
-                .connect()
+                .connect_unchecked()
                 .unwrap()
                 .query_row(
                     "SELECT revision,audit_required FROM recovery_anchor",
@@ -934,7 +934,7 @@ mod tests {
             assert_eq!(outcome, "committed");
             assert_eq!(
                 serde_json::from_str::<Snapshot>(&baseline).unwrap(),
-                snapshot(&database.connect().unwrap()).unwrap(),
+                snapshot(&database.connect_unchecked().unwrap()).unwrap(),
                 "{stage}"
             );
             assert!(!fixture.0.join("audit.db.initializing").exists());
@@ -959,7 +959,7 @@ mod tests {
             let fixture = Fixture::new();
             let database = fixture.database();
             database
-                .connect()
+                .connect_unchecked()
                 .unwrap()
                 .execute(
                     "UPDATE recovery_anchor SET revision=?,audit_required=?",
@@ -990,7 +990,9 @@ mod tests {
         seed(&database);
         assert!(RecoveryAudit::open(&database, &fixture.0.join("audit.db")).is_err());
         assert_eq!(
-            snapshot(&database.connect().unwrap()).unwrap().space_heads,
+            snapshot(&database.connect_unchecked().unwrap())
+                .unwrap()
+                .space_heads,
             vec![("s".to_owned(), 2)]
         );
         assert!(!fixture.0.join("audit.db").exists());
@@ -1041,7 +1043,7 @@ mod tests {
         let restored = Database::open(fixture.0.join("restored.db")).unwrap();
         assert!(audit.ensure_open(&restored).is_err());
         assert!(audit.reopen(&restored, &approval).is_err());
-        let connection = restored.connect().unwrap();
+        let connection = restored.connect_unchecked().unwrap();
         let state: (i64, i64, String, bool) = connection
             .query_row(
                 "SELECT m.can_read,r.generation,r.status,c.revoked_at IS NOT NULL
@@ -1143,7 +1145,7 @@ mod tests {
                 audit.reopen(&database, &approval).unwrap();
             }
         } else {
-            let mut connection = database.connect().unwrap();
+            let mut connection = database.connect_unchecked().unwrap();
             let transaction = connection.transaction().unwrap();
             transaction
                 .execute("UPDATE memberships SET can_read=0", [])
@@ -1207,7 +1209,7 @@ mod tests {
             let mut approval = audit.reconcile(&database, true).unwrap();
             if stage == "prepared" || stage == "committed" {
                 let can_read: bool = database
-                    .connect()
+                    .connect_unchecked()
                     .unwrap()
                     .query_row(
                         "SELECT can_read FROM memberships WHERE space_id='s' AND principal_id='p'",
