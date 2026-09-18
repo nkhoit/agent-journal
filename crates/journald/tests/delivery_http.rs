@@ -426,10 +426,12 @@ async fn empty_long_poll_times_out_and_rechecks_revocation() {
         CLAIM,
     )));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    f.state.blocking().execute(|db| {
+    let database_path = f.directory.join("journal.db");
+    tokio::task::spawn_blocking(move || {
+        let db = Database::open(database_path)?;
         db.connect()?.execute("UPDATE credentials SET revoked_at='2000-01-01T00:00:00Z' WHERE class='delivery-adapter'",[])?;
-        Ok(())
-    }).await.unwrap();
+        Ok::<_, journal_storage_sqlite::StorageError>(())
+    }).await.unwrap().unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), poll)
             .await
