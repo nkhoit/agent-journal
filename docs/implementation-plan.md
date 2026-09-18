@@ -56,7 +56,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ### Accept when
 
-- CI reports the expected 29 paths and 31 operations plus fixture coverage.
+- CI reports the expected 30 paths and 32 operations plus fixture coverage.
 - Failure mutations fail deterministically.
 - All binaries remain honest not-implemented stubs.
 
@@ -469,6 +469,36 @@ No public API, central or spool migration, or credential-class change is introdu
 
 **Goal:** make the runtime-neutral core operable and inspectable.
 
+Implemented operational subset: protected aggregate metrics and local spool
+pressure snapshots, with deterministic SQLite-full rollback, pinned-reader WAL
+growth, and exact free-reserve boundary tests. Backup/verified-restore timestamps
+use durable protected external recovery events. Real-volume exhaustion and
+deployment load/capacity measurements remain unresolved. This is not S12 acceptance.
+
+The web slice provides a separate opt-in loopback HTML listener with a configured
+shared viewer principal behind protected Tailscale ingress. Timeline, stable
+record URLs, reply relations/thread pages, search, and scoped delivery summaries
+reuse central authorization and bounded pagination. Safe rendering and listener
+isolation have Rust HTTP tests and a real Chromium gate (`make browser-security`).
+This does not establish operational restore acceptance or vendor-runtime canaries,
+and does not declare S12 complete.
+
+Recovery implementation adds migration 7, a protected external write-ahead
+security audit, fail-closed daemon startup/service reads and transactions, and
+the offline `journal-recover` tool. Probes cover table counts/hashes, ACL state,
+heads, FTS, and mailbox history. Real-file/process-kill tests exercise uncertain
+intents and recovery restart. Reopening requires exact-state approval and
+explicit complete surviving spool/client reconciliation; the tool does not
+automatically repair those independent stores. See [protected recovery](recovery.md).
+Unix daemon/CLI gates and deployment canaries must run on their supported hosts;
+this workstream alone does not complete all S12 acceptance.
+
+Combined recovery tests in `journald/tests/web_http.rs` and `service_shell.rs`
+check durable metrics timestamps across backup/restore, closed-gate web reads,
+and rejection of shared-viewer startup before listeners bind. They run in the
+Linux CI workspace test gate, not on Windows. Security snapshot growth and
+serialized mutation overhead remain unmeasured deployment acceptance items.
+
 ### Build
 
 - Add stable authorized record URLs, timeline, thread, search, and delivery summaries.
@@ -562,7 +592,7 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 - Add no production dependencies.
 - Preserve status-2 stubs.
 
-**Exit:** explicit coverage of all 29 paths/31 operations; every mutation fails for the intended reason.
+**Exit:** explicit coverage of all 30 paths/32 operations; every mutation fails for the intended reason.
 
 ### PR 2 — Domain/protocol kernel
 

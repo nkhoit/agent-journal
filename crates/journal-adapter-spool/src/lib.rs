@@ -45,6 +45,51 @@ impl Default for Limits {
     }
 }
 
+/// Local operational facts for a proposed claim batch, not a capacity reservation.
+#[derive(Debug, Clone, Copy)]
+pub struct PressureSnapshot {
+    pub retained_items: u64,
+    pub retained_bytes: u64,
+    pub available_bytes: u64,
+    pub required_free_bytes: u64,
+    pub claiming_paused: bool,
+}
+
+impl PressureSnapshot {
+    fn new(
+        limits: Limits,
+        retained_items: u64,
+        retained_bytes: u64,
+        available_bytes: u64,
+        items: u64,
+        bytes: u64,
+    ) -> CoreResult<Self> {
+        // Allow for page/index growth and rollback journal copies, not just JSON.
+        let required_free_bytes = bytes
+            .checked_mul(4)
+            .and_then(|n| {
+                items
+                    .checked_mul(16384)
+                    .and_then(|overhead| n.checked_add(overhead))
+            })
+            .and_then(|n| n.checked_add(limits.min_free_bytes))
+            .ok_or_else(|| unavailable("spool capacity overflow"))?;
+        Ok(Self {
+            retained_items,
+            retained_bytes,
+            available_bytes,
+            required_free_bytes,
+            claiming_paused: retained_items
+                .checked_add(items)
+                .is_none_or(|n| n > limits.max_items)
+                || retained_bytes
+                    .checked_add(bytes)
+                    .is_none_or(|n| n > limits.max_bytes)
+                || available_bytes < required_free_bytes,
+        })
+    }
+}
+
 struct Inner {
     connection: Connection,
     // Keep the lock until after the database connection has closed.
@@ -246,6 +291,31 @@ impl SqliteStore {
     }
 
     fn capacity(&self, connection: &Connection, items: u64, bytes: u64) -> CoreResult<()> {
+        if self
+            .read_pressure(connection, items, bytes)?
+            .claiming_paused
+        {
+            return Err(unavailable("spool pressure: admission stopped"));
+        }
+        Ok(())
+    }
+
+    pub fn pressure_snapshot(
+        &self,
+        additional_items: u64,
+        additional_bytes: u64,
+    ) -> CoreResult<PressureSnapshot> {
+        self.with_connection(|connection| {
+            self.read_pressure(connection, additional_items, additional_bytes)
+        })
+    }
+
+    fn read_pressure(
+        &self,
+        connection: &Connection,
+        items: u64,
+        bytes: u64,
+    ) -> CoreResult<PressureSnapshot> {
         let (used_items, used_bytes): (i64, i64) = connection
             .query_row(
                 "SELECT count(*), coalesce(sum(bytes),0) FROM attempts",
@@ -255,27 +325,14 @@ impl SqliteStore {
             .map_err(unavailable)?;
         let used_items = u64::try_from(used_items).map_err(unavailable)?;
         let used_bytes = u64::try_from(used_bytes).map_err(unavailable)?;
-        // Allow for page/index growth and rollback journal copies, not just JSON.
-        let disk_budget = bytes
-            .checked_mul(4)
-            .and_then(|n| {
-                items
-                    .checked_mul(16384)
-                    .and_then(|overhead| n.checked_add(overhead))
-            })
-            .and_then(|n| n.checked_add(self.limits.min_free_bytes))
-            .ok_or_else(|| unavailable("spool capacity overflow"))?;
-        if used_items
-            .checked_add(items)
-            .is_none_or(|n| n > self.limits.max_items)
-            || used_bytes
-                .checked_add(bytes)
-                .is_none_or(|n| n > self.limits.max_bytes)
-            || fs2::available_space(&self.directory).map_err(unavailable)? < disk_budget
-        {
-            return Err(unavailable("spool pressure: admission stopped"));
-        }
-        Ok(())
+        PressureSnapshot::new(
+            self.limits,
+            used_items,
+            used_bytes,
+            fs2::available_space(&self.directory).map_err(unavailable)?,
+            items,
+            bytes,
+        )
     }
 
     fn load(connection: &Connection, attempt_id: &str) -> CoreResult<SpoolItem> {

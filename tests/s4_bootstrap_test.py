@@ -234,6 +234,13 @@ class BootstrapTest(unittest.TestCase):
                                  implemented[(path, method)])
         for token in [None, ticket, principal["secret"], delivery["secret"]]:
             self.assertEqual(self.request("/v1/admin/principals", token, "POST")[0], 404)
+            self.assertEqual(self.request("/v1/admin/metrics", token)[0], 404)
+        metrics = json.loads(self.admin("metrics").stdout)
+        self.assertGreater(metrics["database_bytes"], 0)
+        self.assertEqual(metrics["pending_mailbox_count"], 0)
+        self.assertIsNone(metrics["oldest_pending_at"])
+        self.assertIsNone(metrics["last_backup_at"])
+        self.assertIsNone(metrics["last_verified_restore_at"])
         self.assertEqual(self.request("/unknown/" + principal["secret"])[0], 404)
         self.enroll("ticket", "replay-principal", "replay-delivery", succeeds=False)
         result = self.admin("credential-rotate", principal["credential_id"],

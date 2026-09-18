@@ -4,7 +4,7 @@ Agent Journal is a runtime-neutral, permissioned append-only journal with reliab
 
 > **Status: S0–S11 foundations, protected bootstrap, journal queries, central delivery, durable spool, generic adapter orchestration, and executable fake-runtime conformance implemented.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. Web UI and vendor runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. An opt-in shared read-only web viewer has HTTP and Chromium security tests; operational S12 acceptance and vendor runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
 ## Product model
 
@@ -34,17 +34,19 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Area | Status |
 | --- | --- |
 | Product design and v1 decisions | Documented in `docs/design.md` |
-| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 29-path/31-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
+| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 30-path/32-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
 | Rust domain and protocol wire kernel | Executable: complete S1 DTOs, duplicate-key rejection, canonical append bytes, authenticated bounded cursors, and normative wire examples |
 | SQLite kernel | Executable: pinned bundled SQLite/FTS5 driver, numbered migrations, verified connection policy, explicit transactions, read-only connections, concurrent access, and isolated backup/restore verification |
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
+| Read-only web | Separate opt-in loopback listener for one shared viewer principal behind protected Tailscale ingress; safe Markdown, timeline, stable record links, thread, search, and scoped delivery summaries; HTTP and real Chromium negative tests |
 | Adapter delivery | Generic synchronous orchestration composes the typed delivery client and SQLite spool; durable custody, fenced local routing, bounded retries, atomic result/telemetry outbox, and fake-runtime crash recovery are implemented. The S11 runner executes all 17 adapter scenarios with redacted persisted-state evidence; vendor injection remains unresolved |
 | Binaries | `journald`, `aj` journal/mailbox/custody/telemetry/status commands, and `aj-admin` bootstrap/replacement/requeue/status/adapter-list commands; protected administration and credential files require Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
-| Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
+| Recovery, crash, security, and live canaries | Protected external audit, offline restore fencing, exact-state reopen approval, and storage process-kill tests are implemented. Linux CI exercises combined protected web/startup and metrics recovery tests; live deployment acceptance remains unverified |
+| Operational observability | Protected aggregate `aj-admin metrics` includes durable external backup/verified-reopen timestamps; local spool pressure snapshots and deterministic SQLite-full/WAL/free-reserve tests are implemented. Deployment capacity measurements and physical-volume exhaustion acceptance remain unresolved |
 
 ## Quick architecture
 
@@ -111,7 +113,7 @@ python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 29-path/31-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 30-path/32-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
 
 `make adapter-conformance` writes redacted per-scenario JSON and a completion
 manifest under `target/adapter-conformance`. CI retains only those JSON artifacts.
@@ -136,7 +138,7 @@ Follow the [bootstrap commands](docs/operations.md#bootstrap-commands) to provis
 S0 through S11 provide executable contract, wire, SQLite, bootstrap, journal, search, thread, central delivery, durable spool, orchestration, and fake-runtime conformance gates. The remaining sequence is:
 
 1. Revalidate Muse and Hermes runtime injection surfaces on supported releases before implementing either adapter.
-2. Add safe read-only web views and complete operational restore fencing and canary evidence.
+2. Collect deployment capacity and canary evidence beyond the Linux recovery and shared-viewer CI gates.
 
 Acceptance gates and dependency ordering are explicit in [`docs/implementation-plan.md`](docs/implementation-plan.md). Runtime-specific assumptions are not accepted as protocol facts; see [`docs/runtime-integrations.md`](docs/runtime-integrations.md).
 

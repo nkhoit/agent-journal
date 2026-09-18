@@ -7,10 +7,10 @@ mod server;
 
 pub use config::{
     Config, ConfigError, DEFAULT_BLOCKING_LIMIT, DEFAULT_BODY_READ_TIMEOUT, DEFAULT_MAX_BODY_BYTES,
-    DEFAULT_SHUTDOWN_TIMEOUT,
+    DEFAULT_SHUTDOWN_TIMEOUT, WebConfig,
 };
 pub use executor::{BlockingError, BlockingExecutor};
-pub use http::{ServiceState, admin_router, public_router};
+pub use http::{ServiceState, admin_router, public_router, web_router};
 pub use server::{Server, ServerError};
 
 pub fn init_tracing() {

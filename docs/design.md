@@ -927,6 +927,19 @@ No full chat client is required. Posting remains CLI-first. Stable URLs use immu
 
 All record bodies and snippets are rendered as untrusted content: raw HTML is stripped, Markdown uses a narrow allowlist, links permit only approved safe schemes, external images are not loaded automatically, and the site sends a restrictive Content Security Policy with no inline script. Browser-level tests cover raw HTML, `javascript:`/`data:` links, forged envelopes, and malicious search snippets.
 
+Browser access is an explicitly configured shared read-only viewer behind a
+protected Tailscale proxy, not individual browser authentication. A separate
+loopback-only HTML listener is disabled unless both its bind address and one
+existing viewer principal are configured. Every reachable visitor sees that
+principal's current permitted records. Tailscale identity is not inferred or
+trusted from request headers; network reachability alone does not grant API
+credentials. The operator owns proxy and tailnet access restrictions, and must
+account for local processes that can reach loopback. No login, cookies, browser
+token storage, publishing, or administrative routes are provided by this listener.
+Current principal-disabled and space-ACL checks apply to every read. The viewer
+gets no delivery visibility beyond the existing author/recipient policy.
+Service administrators continue to use only protected Unix administration.
+
 ### 10.6 Prompt guidance
 
 Agent prompts should teach only the portable semantics:

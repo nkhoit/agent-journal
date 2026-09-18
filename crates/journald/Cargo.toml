@@ -18,6 +18,7 @@ axum.workspace = true
 journal-protocol = { path = "../journal-protocol" }
 journal-service = { path = "../journal-service" }
 journal-storage-sqlite = { path = "../journal-storage-sqlite" }
+pulldown-cmark = { version = "=0.13.0", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

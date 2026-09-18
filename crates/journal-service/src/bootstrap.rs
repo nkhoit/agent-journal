@@ -86,6 +86,62 @@ pub struct AuthenticatedCredential {
 
 pub type CredentialRotation = CredentialRotationResponse;
 
+#[derive(Clone, Copy)]
+enum ReadIdentity<'a> {
+    Bearer(&'a str),
+    ConfiguredViewer(&'a str),
+}
+
+/// Host-configured read-only authority. Never construct from request data.
+pub struct SharedViewer<'a> {
+    service: &'a BootstrapService,
+    principal: &'a str,
+}
+
+impl SharedViewer<'_> {
+    pub fn record(&self, id: &str) -> Result<journal_domain::Record, BootstrapError> {
+        self.service
+            .get_record_as(ReadIdentity::ConfiguredViewer(self.principal), id)
+    }
+
+    pub fn spaces(&self, query: &PageQuery) -> Result<SpacePage, BootstrapError> {
+        self.service
+            .list_spaces_as(ReadIdentity::ConfiguredViewer(self.principal), query)
+    }
+
+    pub fn records(
+        &self,
+        space: &str,
+        query: &ListRecordsQuery,
+    ) -> Result<RecordPage, BootstrapError> {
+        self.service
+            .list_records_as(ReadIdentity::ConfiguredViewer(self.principal), space, query)
+    }
+
+    pub fn search(
+        &self,
+        space: &str,
+        query: &SearchRecordsQuery,
+    ) -> Result<SearchPage, BootstrapError> {
+        self.service
+            .search_records_as(ReadIdentity::ConfiguredViewer(self.principal), space, query)
+    }
+
+    pub fn thread(&self, id: &str, query: &PageQuery) -> Result<RecordPage, BootstrapError> {
+        self.service
+            .get_thread_as(ReadIdentity::ConfiguredViewer(self.principal), id, query)
+    }
+
+    pub fn delivery(
+        &self,
+        id: &str,
+        query: &PageQuery,
+    ) -> Result<DeliveryStatusPage, BootstrapError> {
+        self.service
+            .delivery_status_as(ReadIdentity::ConfiguredViewer(self.principal), id, query)
+    }
+}
+
 #[derive(Clone)]
 pub struct BootstrapService {
     database: Database,
@@ -95,6 +151,57 @@ pub struct BootstrapService {
 }
 
 impl BootstrapService {
+    pub fn operational_metrics(
+        &self,
+    ) -> Result<journal_protocol::OperationalMetrics, BootstrapError> {
+        let sampled_at = self.now()?;
+        let snapshot = self.database.operational_snapshot(&sampled_at)?;
+        let recovery = self.database.recovery_status()?;
+        Ok(journal_protocol::OperationalMetrics {
+            sampled_at,
+            database_bytes: snapshot.database_bytes,
+            wal_bytes: snapshot.wal_bytes,
+            pending_mailbox_count: snapshot.pending_mailbox_count,
+            oldest_pending_at: snapshot.oldest_pending_at,
+            outstanding_claims: snapshot.outstanding_claims,
+            expired_active_claims: snapshot.expired_active_claims,
+            expired_claims: snapshot.expired_claims,
+            oldest_active_heartbeat_at: snapshot.oldest_active_heartbeat_at,
+            stale_registrations_with_pending: snapshot.stale_registrations_with_pending,
+            runtime_failure_events: snapshot.runtime_failure_events,
+            last_backup_at: recovery.last_backup_at,
+            last_verified_restore_at: recovery.last_verified_restore_at,
+        })
+    }
+
+    pub fn shared_viewer<'a>(&'a self, principal: &'a str) -> SharedViewer<'a> {
+        SharedViewer {
+            service: self,
+            principal,
+        }
+    }
+
+    fn read_actor(
+        &self,
+        tx: &Transaction<'_>,
+        identity: ReadIdentity<'_>,
+    ) -> Result<String, BootstrapError> {
+        match identity {
+            ReadIdentity::Bearer(token) => self.journal_actor(tx, token),
+            ReadIdentity::ConfiguredViewer(principal) => {
+                journal_domain::validate_identifier("viewer", principal)
+                    .map_err(|_| BootstrapError::InvalidJournal)?;
+                tx.query_row(
+                    "SELECT id FROM principals WHERE id=? AND disabled_at IS NULL",
+                    [principal],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(BootstrapError::NotFound)
+            }
+        }
+    }
+
     pub fn new(database: Database) -> Self {
         Self::with_sources(database, Arc::new(SystemClock), Arc::new(OsSecretSource))
     }
@@ -140,10 +247,27 @@ impl BootstrapService {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, BootstrapError>,
     ) -> Result<T, BootstrapError> {
+        let audit = self.database.recovery_audit();
+        let _audit_guard = audit.map(|audit| audit.lock()).transpose()?;
+        if let Some(audit) = audit {
+            audit.ensure_open(&self.database)?;
+        }
         let mut connection = self.database.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = transaction.total_changes();
         let result = operation(&transaction)?;
+        let revision = if transaction.total_changes() != before {
+            audit
+                .map(|audit| audit.prepare(&transaction))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         transaction.commit()?;
+        if let Some(audit) = audit {
+            audit.committed(revision)?;
+        }
         Ok(result)
     }
 

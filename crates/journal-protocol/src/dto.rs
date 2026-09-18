@@ -12,6 +12,27 @@ pub type PrincipalPage = Page<domain::Principal>;
 pub type SpacePage = Page<domain::Space>;
 pub type RecordPage = Page<domain::Record>;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationalMetrics {
+    pub sampled_at: String,
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub pending_mailbox_count: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub oldest_pending_at: Option<String>,
+    pub outstanding_claims: u64,
+    pub expired_active_claims: u64,
+    pub expired_claims: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub oldest_active_heartbeat_at: Option<String>,
+    pub stale_registrations_with_pending: u64,
+    pub runtime_failure_events: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub last_backup_at: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub last_verified_restore_at: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum WireValidationError {
     #[error(transparent)]

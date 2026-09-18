@@ -4,7 +4,15 @@ This document is the implementation-facing summary of the v1 HTTP/JSON protocol.
 
 ## Wire rules
 
-- All application endpoints use `/v1` and JSON. Health endpoints are `/health/live` and `/health/ready`.
+Protected host-local `GET /v1/admin/metrics` returns the fixed-shape
+`OperationalMetrics` snapshot, also available through `aj-admin metrics`.
+It has no public HTTPS route or bearer authorization. Pending and heartbeat
+ages derive from server sample and persisted timestamps; backup/restore
+timestamps come from durable protected external recovery evidence and remain
+null only when unknown or storage is unprotected. See
+[operations](operations.md#protected-operational-snapshots) for metric semantics.
+
+- All protocol API endpoints use `/v1` and JSON. Health endpoints are `/health/live` and `/health/ready`. Optional HTML views use a separate listener and `/web` namespace, not the normative JSON API.
 - Successful responses include a request identifier either in the `X-Request-ID` header and, for errors, in the error body.
 - Collection responses have `items` and nullable opaque `next_cursor`.
 - `limit` is bounded. Clients must follow `next_cursor` and must not manufacture cursors.
@@ -78,6 +86,20 @@ and requested anchor record, and ACLs are rechecked on every page.
 
 ## Credential classes
 
+The opt-in shared HTML viewer is not a credential class. Its host-configured
+principal selects read-only authority on a separate loopback listener. It never
+changes bearer authentication for `/v1`. See [browser access](security-model.md#shared-read-only-browser-access).
+HTML routes are `GET /web`, `GET /web/spaces/{space}`,
+`GET /web/spaces/{space}/search`, `GET /web/records/{record_id}`,
+`GET /web/records/{record_id}/thread`, and
+`GET /web/records/{record_id}/delivery-status`. GET routes also support HEAD;
+other methods are refused. Public API and admin paths are absent from the HTML
+router. Record URLs use immutable IDs. Timeline, search, thread, and delivery
+pagination reuse the strict bounded API query codecs, opaque cursors, and ACL
+policies. Record pages reject query parameters. Search snippets remain plain
+untrusted text. The JSON OpenAPI path/operation surface and persisted schema are
+unchanged; HTML is documented here rather than added to the JSON contract.
+
 | Class | Transport | Scope |
 | --- | --- | --- |
 | Principal client | private HTTPS bearer | Authenticated principal's permitted space reads/appends and own status |
@@ -139,6 +161,13 @@ Private credential-file support remains Unix-only.
 `--cursor`, and `--limit`; `thread` accepts `--cursor` and `--limit`.
 
 ### Persisted compatibility
+
+Migration 7 adds a central recovery anchor bound to protected external audit.
+It adds no HTTP operation or credential class. Offline restore revokes restored
+credentials and tickets, advances and revokes registrations, cancels active
+claims, and preserves historical custody and attempt identities. Old-generation
+spool state is not automatically rebound. See [protected recovery](recovery.md).
+Older binaries require a compatible backup; never remove migration history.
 
 Migration 3 adds relation positions and a private cursor-secret table without
 changing existing record, mailbox, or attempt states. Existing relation rows

@@ -384,7 +384,9 @@ async fn begin_incomplete_json_body(address: SocketAddr) -> TcpStream {
 
 fn config(temporary: &TempDir) -> Config {
     Config {
+        web: None,
         database_path: temporary.path("journal.db"),
+        recovery_audit_path: None,
         public_address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
         admin_socket_path: temporary.path("admin.sock"),
         blocking_limit: 2,
@@ -392,6 +394,89 @@ fn config(temporary: &TempDir) -> Config {
         body_read_timeout: Duration::from_millis(200),
         shutdown_timeout: Duration::from_millis(500),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
+    let temporary = TempDir::new("web-server");
+    let mut configuration = config(&temporary);
+    let disabled = Server::bind(configuration.clone()).await.unwrap();
+    assert!(disabled.web_address().unwrap().is_none());
+    drop(disabled);
+    configuration.web = Some(journald::WebConfig {
+        address: "127.0.0.1:0".parse().unwrap(),
+        viewer: "viewer".into(),
+    });
+    assert!(Server::bind(configuration.clone()).await.is_err());
+    let db = Database::open_protected(
+        temporary.path("journal.db"),
+        temporary.path("journal.recovery.db"),
+    )
+    .unwrap();
+    journal_service::BootstrapService::new(db.clone())
+        .create_principal(&journal_protocol::PrincipalCreateRequest {
+            id: "viewer".into(),
+            display_name: "Viewer".into(),
+        })
+        .unwrap();
+    drop(db);
+    let server = Server::bind(configuration).await.unwrap();
+    let public_address = server.public_address();
+    let web_address = server.web_address().unwrap().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(async move {
+        let _ = shutdown_rx.await;
+    }));
+    for (address, path, status) in [
+        (web_address, "/web", "200"),
+        (public_address, "/web", "404"),
+        (web_address, "/v1/spaces", "404"),
+        (web_address, "/v1/admin/principals", "404"),
+        (web_address, "/v1/admin/metrics", "404"),
+    ] {
+        let response = tcp_request(
+            address,
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await;
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {status}")),
+            "{response}"
+        );
+    }
+
+    shutdown_tx.send(()).unwrap();
+    serving.await.unwrap().unwrap();
+    assert!(TcpStream::connect(web_address).await.is_err());
+}
+
+#[tokio::test]
+async fn closed_recovery_prevents_shared_viewer_startup() {
+    let temporary = TempDir::new("web-recovery-startup");
+    let mut configuration = config(&temporary);
+    configuration.web = Some(journald::WebConfig {
+        address: "127.0.0.1:0".parse().unwrap(),
+        viewer: "viewer".into(),
+    });
+    let db = Database::open_protected(
+        &configuration.database_path,
+        configuration.database_path.with_extension("recovery.db"),
+    )
+    .unwrap();
+    journal_service::BootstrapService::new(db.clone())
+        .create_principal(&journal_protocol::PrincipalCreateRequest {
+            id: "viewer".into(),
+            display_name: "Viewer".into(),
+        })
+        .unwrap();
+    db.recovery_audit().unwrap().close().unwrap();
+    drop(db);
+    assert!(matches!(
+        Server::bind(configuration).await,
+        Err(ServerError::Database(StorageError::RecoveryClosed(_)))
+    ));
+    assert!(!temporary.path("admin.sock").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

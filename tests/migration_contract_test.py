@@ -437,6 +437,13 @@ def main() -> None:
     expect_integrity(connection, "UPDATE host_custody SET claim_id='upgrade-claim'")
     connection.execute("UPDATE adapter_registrations SET generation=generation+1 WHERE adapter_id='adapter-1'")
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.executescript((ROOT / "migrations" / "0007_recovery_anchor.sql").read_text())
+    assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (7,)
+    anchor = connection.execute("SELECT singleton,length(journal_id),revision,audit_required FROM recovery_anchor").fetchone()
+    assert anchor == (1, 64, 0, 0)
+    expect_integrity(connection, "UPDATE recovery_anchor SET revision=-1")
+    expect_integrity(connection, "UPDATE recovery_anchor SET audit_required=2")
+    expect_integrity(connection, "UPDATE recovery_anchor SET singleton=2")
     print("migration contract passed")
 
 

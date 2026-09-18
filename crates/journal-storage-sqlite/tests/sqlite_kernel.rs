@@ -88,6 +88,70 @@ fn schema_object_names(connection: &Connection, object_type: &str) -> Vec<String
 }
 
 #[test]
+fn operational_snapshot_tracks_pending_rows_and_wal_without_checkpointing() {
+    let temporary = TempDir::new("metrics");
+    let database = Database::open(temporary.database("journal.db")).unwrap();
+    let writer = database.connect().unwrap();
+    writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    seed_space(&writer);
+    let reader = database.connect_read_only().unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM records;")
+        .unwrap();
+    let before = database.operational_snapshot(NOW).unwrap();
+    assert_eq!(before.pending_mailbox_count, 0);
+    assert_eq!(before.oldest_pending_at, None);
+    for sequence in 1..=20 {
+        insert_record(
+            &writer,
+            &format!("r{sequence}"),
+            sequence,
+            &"x".repeat(4096),
+        );
+    }
+    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at) VALUES ('m1','r1','p1','pending',?1,?1)", [NOW]).unwrap();
+    let after = database.operational_snapshot(NOW).unwrap();
+    assert_eq!(after.pending_mailbox_count, 1);
+    assert_eq!(after.oldest_pending_at.as_deref(), Some(NOW));
+    assert!(after.database_bytes > 0);
+    assert!(after.wal_bytes > before.wal_bytes);
+    assert_eq!(after.runtime_failure_events, 0);
+    assert_eq!(after.oldest_active_heartbeat_at, None);
+    reader.execute_batch("ROLLBACK").unwrap();
+    writer
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    assert_eq!(database.operational_snapshot(NOW).unwrap().wal_bytes, 0);
+}
+
+#[test]
+fn page_capacity_exhaustion_rolls_back_without_losing_committed_records() {
+    let temporary = TempDir::new("capacity");
+    let database = Database::open(temporary.database("journal.db")).unwrap();
+    let connection = database.connect().unwrap();
+    seed_space(&connection);
+    insert_record(&connection, "retained", 1, "retained");
+    let pages = pragma_i64(&connection, "page_count");
+    connection
+        .execute_batch(&format!("PRAGMA max_page_count={pages}; BEGIN IMMEDIATE;"))
+        .unwrap();
+    let result = connection.execute("INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES ('full','s1',2,'p1','message',?1,?2)", params!["x".repeat(65536), NOW]);
+    assert!(
+        matches!(result, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::DiskFull)
+    );
+    if !connection.is_autocommit() {
+        connection.execute_batch("ROLLBACK").unwrap();
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM records", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(pragma_string(&connection, "integrity_check"), "ok");
+}
+
+#[test]
 fn open_applies_migrations_and_connection_policy() {
     let temporary = TempDir::new("open");
     let database = Database::open(temporary.database("journal.db")).expect("open database");

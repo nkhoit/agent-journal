@@ -1,6 +1,21 @@
 {
   "fixture_version": 1,
   "schemas": {
+    "OperationalMetrics": {
+      "sampled_at": "2026-01-01T00:00:00Z",
+      "database_bytes": 4096,
+      "wal_bytes": 0,
+      "pending_mailbox_count": 0,
+      "oldest_pending_at": null,
+      "outstanding_claims": 0,
+      "expired_active_claims": 0,
+      "expired_claims": 0,
+      "oldest_active_heartbeat_at": null,
+      "stale_registrations_with_pending": 0,
+      "runtime_failure_events": 0,
+      "last_backup_at": null,
+      "last_verified_restore_at": null
+    },
     "AppendRecordRequest": {
       "kind": "message",
       "content": "hello",

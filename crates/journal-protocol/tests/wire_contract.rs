@@ -60,6 +60,7 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(ErrorResponse, "ErrorResponse");
     example!(PageInfo, "PageInfo");
     example!(Health, "Health");
+    example!(OperationalMetrics, "OperationalMetrics");
     example!(domain::Principal, "Principal");
     example!(domain::Relation, "Relation");
     example!(Membership, "Membership");
@@ -380,6 +381,24 @@ fn response_dtos_require_every_normative_field() {
         &["error"],
     );
     assert_required_fields::<PageInfo>(json!({"next_cursor":null}), &["next_cursor"]);
+    assert_required_fields::<OperationalMetrics>(
+        wire_example("OperationalMetrics").clone(),
+        &[
+            "sampled_at",
+            "database_bytes",
+            "wal_bytes",
+            "pending_mailbox_count",
+            "oldest_pending_at",
+            "outstanding_claims",
+            "expired_active_claims",
+            "expired_claims",
+            "oldest_active_heartbeat_at",
+            "stale_registrations_with_pending",
+            "runtime_failure_events",
+            "last_backup_at",
+            "last_verified_restore_at",
+        ],
+    );
     assert_required_fields::<Health>(
         json!({"status":"ok","version":"0.1.0","checks":{}}),
         &["status", "version"],

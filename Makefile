@@ -4,7 +4,7 @@ PYTHON ?= python3
 OPENAPI_FILE := api/openapi.yaml
 OPENAPI_STANDARDS_LINT ?= 0
 
-.PHONY: all build fmt fmt-check test migration-test contract-test bootstrap-test records-test delivery-test adapter-conformance foreign-uid-test clippy openapi-check redocly-check markdown-check hygiene-check check
+.PHONY: all build fmt fmt-check test migration-test contract-test bootstrap-test records-test delivery-test adapter-conformance browser-security foreign-uid-test clippy openapi-check redocly-check markdown-check hygiene-check check
 
 all: check
 
@@ -38,6 +38,10 @@ delivery-test: build
 adapter-conformance:
 	$(PYTHON) scripts/test_adapter_conformance.py
 	$(PYTHON) scripts/adapter_conformance.py
+
+browser-security:
+	$(CARGO) build --locked -p journald --example web_fixture
+	$(PYTHON) tests/web_browser_test.py
 
 # Explicit privileged harness; never count an unprivileged skip as evidence.
 foreign-uid-test:
