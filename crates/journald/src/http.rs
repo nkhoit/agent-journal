@@ -440,7 +440,7 @@ async fn journal_operation(
     Extension(request_id): Extension<RequestId>,
     request: Request<Body>,
 ) -> Response {
-    use journal_protocol::{ListPrincipalsQuery, ListRecordsQuery, PageQuery};
+    use journal_protocol::{ListPrincipalsQuery, ListRecordsQuery, PageQuery, SearchRecordsQuery};
     let Some(token) = bearer(request.headers()) else {
         return error_response(
             StatusCode::UNAUTHORIZED,
@@ -560,6 +560,19 @@ async fn journal_operation(
                     )?,
                 ),
                 "/v1/records/{record_id}" => serde_json::to_value(s.get_record(&token, &record)?),
+                "/v1/spaces/{space}/search" => serde_json::to_value(
+                    s.search_records(
+                        &token,
+                        &space,
+                        &SearchRecordsQuery::from_query(&query)
+                            .map_err(|_| BootstrapError::InvalidJournal)?,
+                    )?,
+                ),
+                "/v1/records/{record_id}/thread" => serde_json::to_value(s.get_thread(
+                    &token,
+                    &record,
+                    &PageQuery::from_query(&query).map_err(|_| BootstrapError::InvalidJournal)?,
+                )?),
                 _ => return Err(BootstrapError::NotFound),
             };
             value.map_err(|_| BootstrapError::CorruptJournal)
@@ -687,12 +700,9 @@ pub(crate) fn public_router_with_timeout(
             "/v1/spaces/{space}/records",
             get(journal_operation).post(journal_operation),
         )
-        .route("/v1/spaces/{space}/search", get(principal_unimplemented))
+        .route("/v1/spaces/{space}/search", get(journal_operation))
         .route("/v1/records/{record_id}", get(journal_operation))
-        .route(
-            "/v1/records/{record_id}/thread",
-            get(principal_unimplemented),
-        )
+        .route("/v1/records/{record_id}/thread", get(journal_operation))
         .route(
             "/v1/records/{record_id}/delivery-status",
             get(principal_unimplemented),

@@ -104,6 +104,439 @@ impl Drop for Fixture {
     }
 }
 
+fn search_query(q: &str) -> SearchRecordsQuery {
+    SearchRecordsQuery {
+        q: q.into(),
+        page: PageQuery {
+            limit: Some(1),
+            cursor: None,
+        },
+        author: None,
+        attention: None,
+        since: None,
+        order: SearchOrder::Rank,
+    }
+}
+
+#[test]
+fn search_reads_do_not_acquire_the_writer_lock() {
+    let f = Fixture::new();
+    f.service
+        .append_record(&f.token, "space", "search-lock", &f.input())
+        .unwrap();
+    // Initialize the persisted cursor key before holding the competing writer.
+    f.service
+        .search_records(&f.token, "space", &search_query("hello"))
+        .unwrap();
+    let mut connection = f.db.connect().unwrap();
+    let writer = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO spaces(id,name,created_at) VALUES ('uncommitted','Uncommitted','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    for order in [SearchOrder::Seq, SearchOrder::Rank] {
+        let mut query = search_query("hello");
+        query.order = order;
+        assert_eq!(
+            f.service
+                .search_records(&f.token, "space", &query)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+    writer.commit().unwrap();
+}
+
+#[test]
+fn sequence_search_only_renders_the_selected_page() {
+    let f = Fixture::new();
+    let connection = f.db.connect().unwrap();
+    connection.execute(
+        "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000)
+         INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
+         SELECT printf('record-%05d',n),'space',n,'writer','note',?1,'2026-01-01T00:00:00Z' FROM seq",
+        ["hello world ".repeat(1000)],
+    ).unwrap();
+    let mut query = search_query("hello");
+    query.order = SearchOrder::Seq;
+    query.page.limit = Some(2);
+    let started = std::time::Instant::now();
+    let first = f.service.search_records(&f.token, "space", &query).unwrap();
+    assert_eq!(first.items[0].record.seq, 1);
+    let secret: Vec<u8> = connection
+        .query_row(
+            "SELECT secret FROM journal_secrets WHERE name='cursor'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let filters = serde_json::to_vec(&(
+        "writer",
+        "space",
+        &query.q,
+        &query.author,
+        &query.attention,
+        &query.since,
+    ))
+    .unwrap();
+    let scope = CursorScope::new(CursorRoute::Search, &filters, CursorOrder::Sequence);
+    query.page.cursor = Some(
+        CursorCodec::new(&secret)
+            .unwrap()
+            .encode(
+                &scope,
+                &CursorPosition::Sequence {
+                    sequence: 990,
+                    id: "record-00990".into(),
+                },
+            )
+            .unwrap(),
+    );
+    let second = f.service.search_records(&f.token, "space", &query).unwrap();
+    assert_eq!(second.items[0].record.seq, 991);
+    assert_eq!(second.items[0].score, 1000.0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "two small pages rendered the full matching corpus: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn search_is_authorized_before_scoring_and_cursors_are_scoped() {
+    let f = Fixture::new();
+    let mut input = f.input();
+    input.content = "hello hello hello".into();
+    let first = f
+        .service
+        .append_record(&f.token, "space", "first", &input)
+        .unwrap()
+        .record;
+    input.content = "hello world".into();
+    f.service
+        .append_record(&f.token, "space", "second", &input)
+        .unwrap();
+    let mut query = search_query("hello");
+    let before = f.service.search_records(&f.token, "space", &query).unwrap();
+    assert_eq!(before.items[0].record.id, first.id);
+    assert_eq!(before.consistency, Some(SearchConsistency::BestEffort));
+    f.db.connect().unwrap().execute_batch(
+        "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
+         VALUES ('hidden','other',1,'outsider','note','secretword hello hello hello hello','2026-01-01T00:00:00Z');"
+    ).unwrap();
+    assert_eq!(
+        before,
+        f.service.search_records(&f.token, "space", &query).unwrap()
+    );
+    assert!(
+        f.service
+            .search_records(&f.token, "space", &search_query("secretword"))
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(matches!(
+        f.service.search_records(&f.token, "other", &query),
+        Err(BootstrapError::NotFound)
+    ));
+    assert!(matches!(
+        f.service.search_records(&f.delivery, "space", &query),
+        Err(BootstrapError::Unauthorized)
+    ));
+    query.page.cursor = before.next_cursor;
+    assert_eq!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    query.order = SearchOrder::Seq;
+    assert!(matches!(
+        f.service.search_records(&f.token, "space", &query),
+        Err(BootstrapError::InvalidJournal)
+    ));
+    query.page.cursor = None;
+    let page = f.service.search_records(&f.token, "space", &query).unwrap();
+    assert_eq!(page.consistency, Some(SearchConsistency::Deterministic));
+    input.content = "hello new".into();
+    f.service
+        .append_record(&f.token, "space", "third", &input)
+        .unwrap();
+    query.page.cursor = page.next_cursor;
+    assert_eq!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items[0]
+            .record
+            .seq,
+        2
+    );
+    query.author = Some("reader".into());
+    assert!(matches!(
+        f.service.search_records(&f.token, "space", &query),
+        Err(BootstrapError::InvalidJournal)
+    ));
+    for q in ["\"", "hello OR", "", &"a".repeat(513)] {
+        assert!(
+            matches!(
+                f.service
+                    .search_records(&f.token, "space", &search_query(q)),
+                Err(BootstrapError::InvalidJournal) | Err(BootstrapError::Invalid(_))
+            ),
+            "{q}"
+        );
+    }
+}
+
+#[test]
+fn thread_projects_only_replies_and_binds_cursor_to_anchor() {
+    let f = Fixture::new();
+    let mut input = f.input();
+    let root = f
+        .service
+        .append_record(&f.token, "space", "root", &input)
+        .unwrap()
+        .record;
+    input.relations = vec![Relation {
+        relation_type: RelationType::ReplyTo,
+        record_id: root.id.clone(),
+    }];
+    let child = f
+        .service
+        .append_record(&f.token, "space", "child", &input)
+        .unwrap()
+        .record;
+    input.relations[0].relation_type = RelationType::RefersTo;
+    f.service
+        .append_record(&f.token, "space", "reference", &input)
+        .unwrap();
+    let mut query = PageQuery {
+        limit: Some(1),
+        cursor: None,
+    };
+    let page = f.service.get_thread(&f.token, &child.id, &query).unwrap();
+    assert_eq!(page.items, vec![root.clone()]);
+    query.cursor = page.next_cursor;
+    assert_eq!(
+        f.service
+            .get_thread(&f.token, &child.id, &query)
+            .unwrap()
+            .items,
+        vec![child.clone()]
+    );
+    assert!(matches!(
+        f.service.get_thread(&f.token, &root.id, &query),
+        Err(BootstrapError::InvalidJournal)
+    ));
+    assert!(matches!(
+        f.service
+            .get_thread(&f.delivery, &root.id, &PageQuery::default()),
+        Err(BootstrapError::Unauthorized)
+    ));
+    assert!(matches!(
+        f.service
+            .get_thread(&f.token, "missing", &PageQuery::default()),
+        Err(BootstrapError::NotFound)
+    ));
+    f.service
+        .set_membership(&MembershipRequest {
+            space_id: "space".into(),
+            principal_id: "writer".into(),
+            can_read: false,
+            can_append: false,
+            can_admin: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        f.service.get_thread(&f.token, &child.id, &query),
+        Err(BootstrapError::NotFound)
+    ));
+}
+
+#[test]
+fn search_filters_fts_syntax_and_unicode_bounds() {
+    let f = Fixture::new();
+    assert!(matches!(
+        f.service
+            .search_records(&f.token, "space", &search_query("\"")),
+        Err(BootstrapError::InvalidJournal)
+    ));
+    let mut input = f.input();
+    input.content = "Hello 界 hello world\0 hello".into();
+    let record = f
+        .service
+        .append_record(&f.token, "space", "one", &input)
+        .unwrap()
+        .record;
+    let mut query = search_query("\"hello world\" OR 界");
+    query.author = Some("writer".into());
+    query.attention = Some("reader".into());
+    query.since = Some(record.created_at.clone());
+    assert_eq!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items[0]
+            .record,
+        record
+    );
+    let instant: jiff::Timestamp = record.created_at.parse().unwrap();
+    query.since = Some(
+        jiff::Timestamp::from_nanosecond(instant.as_nanosecond() + 1)
+            .unwrap()
+            .to_string(),
+    );
+    assert!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    query.since = Some(record.created_at.replace('Z', "+00:00"));
+    assert_eq!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    query.author = Some("reader".into());
+    assert!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    query.author = None;
+    query.attention = Some("writer".into());
+    assert!(
+        f.service
+            .search_records(&f.token, "space", &query)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    input.content = format!("hello {}", "界".repeat(2000));
+    f.service
+        .append_record(&f.token, "space", "long", &input)
+        .unwrap();
+    let mut query = search_query("hel*");
+    query.page.limit = Some(100);
+    let page = f.service.search_records(&f.token, "space", &query).unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert!(
+        page.items
+            .iter()
+            .all(|r| r.snippet.as_ref().unwrap().chars().count() <= 1024)
+    );
+    assert_eq!(
+        page.items
+            .iter()
+            .find(|r| r.record.id == record.id)
+            .unwrap()
+            .score,
+        3.0
+    );
+}
+
+#[test]
+fn thread_depth_limit_is_not_response_limit() {
+    let f = Fixture::new();
+    let mut input = f.input();
+    let root = f
+        .service
+        .append_record(&f.token, "space", "root", &input)
+        .unwrap()
+        .record;
+    let mut parent = root.id.clone();
+    for depth in 1..=64 {
+        input.relations = vec![Relation {
+            relation_type: RelationType::ReplyTo,
+            record_id: parent,
+        }];
+        parent = f
+            .service
+            .append_record(&f.token, "space", &format!("depth-{depth}"), &input)
+            .unwrap()
+            .record
+            .id;
+    }
+    let query = PageQuery {
+        limit: Some(1),
+        cursor: None,
+    };
+    assert_eq!(
+        f.service
+            .get_thread(&f.token, &parent, &query)
+            .unwrap()
+            .items[0]
+            .id,
+        root.id
+    );
+    input.relations[0].record_id = parent;
+    let leaf = f
+        .service
+        .append_record(&f.token, "space", "too-deep", &input)
+        .unwrap()
+        .record
+        .id;
+    for anchor in [root.id, leaf] {
+        assert!(matches!(
+            f.service.get_thread(&f.token, &anchor, &query),
+            Err(BootstrapError::InvalidJournal)
+        ));
+    }
+}
+
+#[test]
+fn thread_node_budget_accepts_exact_limit_and_rejects_one_over() {
+    let f = Fixture::new();
+    let connection = f.db.connect().unwrap();
+    connection.execute_batch(
+        "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<4096)
+         INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
+         SELECT printf('record-%05d',n),'space',n,'writer','note','hello','2026-01-01T00:00:00Z' FROM seq;
+         INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at)
+         SELECT id,'reply-to','record-00001',created_at FROM records WHERE space_seq>1;"
+    ).unwrap();
+    let query = PageQuery {
+        limit: Some(1),
+        cursor: None,
+    };
+    assert_eq!(
+        f.service
+            .get_thread(&f.token, "record-00001", &query)
+            .unwrap()
+            .items[0]
+            .seq,
+        1
+    );
+    connection
+        .execute_batch(
+            "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
+         VALUES ('extra','space',4097,'writer','note','hello','2026-01-01T00:00:00Z');
+         INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at)
+         VALUES ('extra','reply-to','record-00001','2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service.get_thread(&f.token, "record-00001", &query),
+        Err(BootstrapError::InvalidJournal)
+    ));
+}
+
 #[test]
 fn append_replay_read_and_mailbox_are_durable() {
     let f = Fixture::new();

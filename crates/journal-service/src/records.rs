@@ -1,6 +1,41 @@
 use super::*;
 use journal_domain::{AppendResult, Record, RecordInput, Relation};
 use serde::Serialize;
+use std::collections::HashSet;
+
+const THREAD_MAX_DEPTH: usize = 64;
+const THREAD_MAX_NODES: usize = 4096;
+const THREAD_MAX_EDGES: usize = 8192;
+
+// Counting highlighted spans is document-local: unlike global BM25, inaccessible
+// documents cannot change a visible document's score. Compare two renderings
+// because FTS highlighting can omit embedded NUL bytes from the source.
+const SEARCH_SCORE: &str = "CAST(length(CAST(highlight(records_fts,2,'x','') AS BLOB))
+           -length(CAST(highlight(records_fts,2,'','') AS BLOB)) AS REAL)";
+// CROSS JOIN keeps MATCH first so invalid syntax is rejected even in an empty
+// space; authorization and the sequence cursor precede rendering.
+const SEARCH_FROM: &str = "FROM records_fts CROSS JOIN records r ON r.id=records_fts.record_id
+    CROSS JOIN memberships m ON m.space_id=r.space_id AND m.principal_id=?1 AND m.can_read=1
+    WHERE records_fts MATCH ?2 AND r.space_id=?3
+      AND (?4 IS NULL OR r.author_principal_id=?4)
+      AND (?5 IS NULL OR EXISTS(SELECT 1 FROM attention a WHERE a.record_id=r.id AND a.recipient_principal_id=?5))
+      AND (?6 IS NULL OR unixepoch(r.created_at)>=?6)";
+
+fn search_page_sql(order: SearchOrder) -> String {
+    match order {
+        SearchOrder::Seq => format!(
+            "SELECT records_fts.rowid,r.id,NULL {SEARCH_FROM}
+             AND r.space_seq>?7 ORDER BY r.space_seq,r.id LIMIT ?9"
+        ),
+        SearchOrder::Rank => format!(
+            "WITH matches AS MATERIALIZED (
+                SELECT records_fts.rowid AS fts_id,r.id,{SEARCH_SCORE} AS score {SEARCH_FROM}
+             )
+             SELECT fts_id,id,score FROM matches
+             WHERE score<?7 OR (score=?7 AND id>?8) ORDER BY score DESC,id LIMIT ?9"
+        ),
+    }
+}
 
 const LIST_RECORD_IDS: &str = "SELECT r.id FROM records r WHERE r.space_id=? AND r.space_seq>?
     AND (r.space_seq,r.id)>(?,?)
@@ -17,6 +52,221 @@ fn record_sequence_lower_bound(after_seq: Option<u64>, sequence: i64) -> i64 {
 }
 
 impl BootstrapService {
+    pub fn search_records(
+        &self,
+        token: &str,
+        space: &str,
+        query: &SearchRecordsQuery,
+    ) -> Result<SearchPage, BootstrapError> {
+        query.validate()?;
+        let mut connection = self.database.connect_read_only()?;
+        // Existing databases initialize this key lazily. Only that one-time
+        // initialization needs a short writer transaction, never the FTS query.
+        let secret: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT secret FROM journal_secrets WHERE name='cursor'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let codec = match secret {
+            Some(secret) => {
+                CursorCodec::new(&secret).map_err(|_| BootstrapError::CorruptJournal)?
+            }
+            None => self.transaction(|tx| {
+                let actor = self.journal_actor(tx, token)?;
+                permitted(tx, &actor, space, false)?;
+                self.cursor_codec(tx)
+            })?,
+        };
+        let transaction = connection.transaction()?;
+        let tx = &transaction;
+        {
+            let actor = self.journal_actor(tx, token)?;
+            permitted(tx, &actor, space, false)?;
+            // Server timestamps have whole-second precision. Round the lower
+            // bound upward without SQLite's millisecond date rounding.
+            let since = query
+                .since
+                .as_ref()
+                .map(|value| {
+                    let instant: jiff::Timestamp =
+                        value.parse().map_err(|_| BootstrapError::InvalidJournal)?;
+                    let nanos = instant.as_nanosecond();
+                    i64::try_from(
+                        nanos.div_euclid(1_000_000_000)
+                            + i128::from(nanos.rem_euclid(1_000_000_000) != 0),
+                    )
+                    .map_err(|_| BootstrapError::InvalidJournal)
+                })
+                .transpose()?;
+            let order = match query.order {
+                SearchOrder::Rank => CursorOrder::Rank,
+                SearchOrder::Seq => CursorOrder::Sequence,
+            };
+            let filters = serde_json::to_vec(&(
+                &actor,
+                space,
+                &query.q,
+                &query.author,
+                &query.attention,
+                &query.since,
+            ))
+            .map_err(|_| BootstrapError::InvalidJournal)?;
+            let scope = CursorScope::new(CursorRoute::Search, &filters, order);
+            let position = query
+                .page
+                .cursor
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|c| {
+                    codec
+                        .decode(&scope, c)
+                        .map_err(|_| BootstrapError::InvalidJournal)
+                })
+                .transpose()?;
+            let (sequence, score, id) = match position {
+                None => (0, f64::MAX, String::new()),
+                Some(CursorPosition::Sequence { sequence, id }) => (
+                    i64::try_from(sequence).map_err(|_| BootstrapError::InvalidJournal)?,
+                    0.0,
+                    id,
+                ),
+                Some(CursorPosition::Rank { score_bits, id })
+                    if f64::from_bits(score_bits).is_finite() =>
+                {
+                    (0, f64::from_bits(score_bits), id)
+                }
+                _ => return Err(BootstrapError::InvalidJournal),
+            };
+            let key = match query.order {
+                SearchOrder::Rank => rusqlite::types::Value::Real(score),
+                SearchOrder::Seq => rusqlite::types::Value::Integer(sequence),
+            };
+            let mut stmt = tx.prepare(&search_page_sql(query.order))?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        actor,
+                        query.q,
+                        space,
+                        query.author,
+                        query.attention,
+                        since,
+                        key,
+                        id,
+                        (query.page.effective_limit() + 1) as i64
+                    ],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<f64>>(2)?,
+                        ))
+                    },
+                )
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+                .map_err(search_error)?;
+            let mut render = tx.prepare(&format!(
+                "SELECT COALESCE(?3,{SEARCH_SCORE}),snippet(records_fts,2,'','','…',24)
+                 FROM records_fts WHERE rowid=?1 AND records_fts MATCH ?2"
+            ))?;
+            let items = rows
+                .into_iter()
+                .map(|(fts_id, id, score)| {
+                    let (score, snippet): (f64, String) = render
+                        .query_row(params![fts_id, query.q, score], |r| {
+                            Ok((r.get(0)?, r.get(1)?))
+                        })?;
+                    Ok(SearchResult {
+                        record: record(tx, &id)?,
+                        score,
+                        snippet: Some(snippet.chars().take(1024).collect()),
+                    })
+                })
+                .collect::<Result<Vec<_>, BootstrapError>>()?;
+            let page = finish_page(items, &query.page, &codec, &scope, |r| match query.order {
+                SearchOrder::Rank => CursorPosition::Rank {
+                    score_bits: r.score.to_bits(),
+                    id: r.record.id.clone(),
+                },
+                SearchOrder::Seq => CursorPosition::Sequence {
+                    sequence: r.record.seq as u64,
+                    id: r.record.id.clone(),
+                },
+            })?;
+            Ok(SearchPage {
+                items: page.items,
+                next_cursor: page.next_cursor,
+                order: query.order,
+                consistency: Some(match query.order {
+                    SearchOrder::Rank => SearchConsistency::BestEffort,
+                    SearchOrder::Seq => SearchConsistency::Deterministic,
+                }),
+            })
+        }
+    }
+
+    pub fn get_thread(
+        &self,
+        token: &str,
+        id: &str,
+        query: &PageQuery,
+    ) -> Result<RecordPage, BootstrapError> {
+        query.validate()?;
+        self.transaction(|tx| {
+            let actor = self.journal_actor(tx, token)?;
+            let space: String = tx
+                .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .ok_or(BootstrapError::NotFound)?;
+            permitted(tx, &actor, &space, false)?;
+            let codec = self.cursor_codec(tx)?;
+            let scope = CursorScope::new(
+                CursorRoute::RecordThread,
+                &serde_json::to_vec(&(&actor, id)).map_err(|_| BootstrapError::InvalidJournal)?,
+                CursorOrder::Sequence,
+            );
+            let after = match query.cursor.as_deref().filter(|s| !s.is_empty()) {
+                None => (0, String::new()),
+                Some(c) => match codec
+                    .decode(&scope, c)
+                    .map_err(|_| BootstrapError::InvalidJournal)?
+                {
+                    CursorPosition::Sequence { sequence, id } => (
+                        i64::try_from(sequence).map_err(|_| BootstrapError::InvalidJournal)?,
+                        id,
+                    ),
+                    _ => return Err(BootstrapError::InvalidJournal),
+                },
+            };
+            let ids = thread_ids(
+                tx,
+                id,
+                &space,
+                THREAD_MAX_DEPTH,
+                THREAD_MAX_NODES,
+                THREAD_MAX_EDGES,
+            )?;
+            let mut items = ids
+                .into_iter()
+                .filter(|(seq, id)| (*seq, id.as_str()) > (after.0, after.1.as_str()))
+                .collect::<Vec<_>>();
+            items.sort();
+            items.truncate(query.effective_limit() + 1);
+            let items = items
+                .iter()
+                .map(|(_, id)| record(tx, id))
+                .collect::<Result<Vec<_>, _>>()?;
+            finish_page(items, query, &codec, &scope, |r| CursorPosition::Sequence {
+                sequence: r.seq as u64,
+                id: r.id.clone(),
+            })
+        })
+    }
+
     fn journal_actor(&self, tx: &Transaction<'_>, token: &str) -> Result<String, BootstrapError> {
         if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(BootstrapError::Unauthorized);
@@ -269,6 +519,86 @@ impl BootstrapService {
     }
 }
 
+fn search_error(error: rusqlite::Error) -> BootstrapError {
+    match &error {
+        rusqlite::Error::SqliteFailure(code, Some(message))
+            if code.extended_code == 1
+                && (message.starts_with("fts5:")
+                    || message.starts_with("unterminated string")
+                    || message.starts_with("no such column:")) =>
+        {
+            BootstrapError::InvalidJournal
+        }
+        _ => error.into(),
+    }
+}
+
+fn thread_ids(
+    tx: &Transaction<'_>,
+    anchor: &str,
+    space: &str,
+    max_depth: usize,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<Vec<(i64, String)>, BootstrapError> {
+    let mut root = anchor.to_owned();
+    let mut ancestors = HashSet::new();
+    let mut edges = 0;
+    loop {
+        if !ancestors.insert(root.clone()) {
+            return Err(BootstrapError::CorruptJournal);
+        }
+        if ancestors.len() > max_nodes {
+            return Err(BootstrapError::InvalidJournal);
+        }
+        let parent: Option<String> = tx.query_row(
+            "SELECT rel.target_record_id FROM record_relations rel JOIN records r ON r.id=rel.target_record_id
+             WHERE rel.source_record_id=? AND rel.relation_type='reply-to' AND r.space_id=?",
+            params![root,space], |r|r.get(0)).optional()?;
+        let Some(parent) = parent else {
+            break;
+        };
+        edges += 1;
+        if ancestors.len() > max_depth || edges > max_edges {
+            return Err(BootstrapError::InvalidJournal);
+        }
+        root = parent;
+    }
+    let mut pending = vec![(root, 0)];
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    while let Some((id, depth)) = pending.pop() {
+        if !seen.insert(id.clone()) {
+            return Err(BootstrapError::CorruptJournal);
+        }
+        if seen.len() > max_nodes || depth > max_depth {
+            return Err(BootstrapError::InvalidJournal);
+        }
+        let seq = tx.query_row(
+            "SELECT space_seq FROM records WHERE id=? AND space_id=?",
+            params![id, space],
+            |r| r.get(0),
+        )?;
+        result.push((seq, id.clone()));
+        let remaining = (max_nodes - seen.len() - pending.len()).min(max_edges - edges);
+        let mut stmt = tx.prepare(
+            "SELECT rel.source_record_id FROM record_relations rel JOIN records r ON r.id=rel.source_record_id
+             WHERE rel.target_record_id=? AND rel.relation_type='reply-to' AND r.space_id=?
+             ORDER BY rel.source_record_id LIMIT ?")?;
+        let children = stmt
+            .query_map(params![id, space, (remaining + 1) as i64], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        edges += children.len();
+        if children.len() > remaining || (depth == max_depth && !children.is_empty()) {
+            return Err(BootstrapError::InvalidJournal);
+        }
+        pending.extend(children.into_iter().map(|id| (id, depth + 1)));
+    }
+    Ok(result)
+}
+
 fn permitted(
     tx: &Transaction<'_>,
     principal: &str,
@@ -373,6 +703,83 @@ fn finish_page<T>(
 mod tests {
     use super::*;
     use rusqlite::{Connection, StatementStatus};
+
+    #[test]
+    fn search_selection_never_renders_snippets_or_sequence_scores() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
+            .unwrap();
+        for order in [SearchOrder::Seq, SearchOrder::Rank] {
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN {}", search_page_sql(order)))
+                .unwrap();
+            let functions = statement
+                .query_map(
+                    params![
+                        "writer",
+                        "hello",
+                        "space",
+                        None::<String>,
+                        None::<String>,
+                        None::<i64>,
+                        990,
+                        "",
+                        3,
+                    ],
+                    |row| row.get::<_, Option<String>>(5),
+                )
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let functions: Vec<_> = functions.into_iter().flatten().collect();
+            assert!(!functions.iter().any(|f| f.starts_with("snippet(")));
+            assert_eq!(
+                functions
+                    .iter()
+                    .filter(|f| f.starts_with("highlight("))
+                    .count(),
+                if order == SearchOrder::Rank { 2 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn thread_budgets_are_independent_and_cycles_fail_closed() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../../../migrations/0004_thread_index.sql"))
+            .unwrap();
+        connection.execute_batch(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('writer','Writer','2026-01-01T00:00:00Z');
+             INSERT INTO spaces(id,name,created_at) VALUES ('space','Space','2026-01-01T00:00:00Z');
+             INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES
+             ('root','space',1,'writer','note','hello','2026-01-01T00:00:00Z'),
+             ('child','space',2,'writer','note','hello','2026-01-01T00:00:00Z'),
+             ('leaf','space',3,'writer','note','hello','2026-01-01T00:00:00Z');
+             INSERT INTO record_relations VALUES ('child','reply-to','root','2026-01-01T00:00:00Z'),('leaf','reply-to','child','2026-01-01T00:00:00Z');"
+        ).unwrap();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(thread_ids(&tx, "leaf", "space", 2, 3, 4).unwrap().len(), 3);
+        for (depth, nodes, edges) in [(1, 3, 4), (2, 2, 4), (2, 3, 3)] {
+            assert!(matches!(
+                thread_ids(&tx, "leaf", "space", depth, nodes, edges),
+                Err(BootstrapError::InvalidJournal)
+            ));
+        }
+        tx.execute_batch(
+            "DROP TRIGGER relation_target_must_be_older_same_space;
+            INSERT INTO record_relations VALUES ('root','reply-to','leaf','2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        assert!(matches!(
+            thread_ids(&tx, "leaf", "space", 64, 4096, 8192),
+            Err(BootstrapError::CorruptJournal)
+        ));
+    }
 
     #[test]
     fn late_record_page_seeks_past_cursor() {

@@ -40,6 +40,42 @@ the first page. Pages are keyset traversals, not multi-request snapshots.
 Because sequences are unique within a space, record-list index seeks start
 strictly after the greater of `after_seq` and the validated cursor sequence.
 
+### Search and threads
+
+Search accepts FTS5 `MATCH` syntax over record content, including phrases,
+prefixes, and boolean expressions. Invalid expressions return
+`400 invalid-request`. SQL applies the current space membership and optional author,
+attention, and inclusive `since` filters before producing scores and snippets.
+`since` compares RFC 3339 instants, including offsets and fractional seconds.
+`after_seq` belongs to record lists, not the search endpoint.
+
+Rank uses the number of highlighted matching spans in each document, descending,
+then record ID ascending. Overlapping FTS matches form one highlighted span.
+This deliberately avoids global BM25 statistics: inaccessible records cannot
+change visible scores, snippets, order, or cursors. Snippets are plain untrusted
+text, at most 24 FTS tokens and 1024 Unicode scalar values, not sanitized HTML.
+Ranked pages declare `consistency: best-effort`; sequence pages declare
+`consistency: deterministic` and order by `(space_seq, id)`. Neither is a snapshot.
+Search cursors bind principal, space, query, all filters, and order.
+
+Each search runs in a read-only SQLite snapshot without reserving the writer.
+Only first-time cursor-key initialization uses a separate short write transaction.
+Sequence search selects at most the page limit plus one matching IDs after the
+cursor before computing scores or snippets. Ranked search scores authorized
+matches to select the page, then renders snippets only for that bounded selection.
+Matching and ranked scoring can still scan the matching corpus; there is no
+per-search execution deadline. The bounded blocking executor limits concurrent
+work, not individual query duration.
+
+The thread endpoint follows `reply-to` parents to the root, then projects the
+entire tree including siblings. Other relation types do not join threads.
+Each request traverses before pagination, with independent limits of 64 edges
+of root-to-node depth, 4096 visited nodes, and 8192 edge traversals (including
+the initial parent walk). Budget exhaustion returns `400 invalid-request`,
+not a misleading partial tree; persisted cycles fail closed with `503`.
+Results use `(space_seq, id)` order. Cursors bind the authenticated principal
+and requested anchor record, and ACLs are rechecked on every page.
+
 ## Credential classes
 
 | Class | Transport | Scope |
@@ -86,6 +122,10 @@ aj post --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
 aj get --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" --record "$RECORD_ID"
 aj list --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
   --space space-example --after-seq 0 --limit 50
+aj search --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
+  --space space-example --q 'journal AND history' --order seq --limit 50
+aj thread --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
+  --record "$RECORD_ID" --limit 50
 ```
 
 `post --input -` reads a strict append JSON object from stdin. The object contains
@@ -95,6 +135,8 @@ retry both unchanged after response loss. `list` also accepts `--cursor`,
 `--author`, `--attention`, `--kind`, and `--relation`; `spaces` accepts
 `--cursor`. Commands return one bounded page and never silently fetch every page.
 Private credential-file support remains Unix-only.
+`search` accepts `--author`, `--attention`, `--since`, `--order rank|seq`,
+`--cursor`, and `--limit`; `thread` accepts `--cursor` and `--limit`.
 
 ### Persisted compatibility
 
@@ -104,6 +146,10 @@ retain their previous insertion order as a tie-breaker; new appends store
 explicit positions. Database backups include the cursor secret and must remain
 protected. Older binaries reject the newer schema; rollback requires restoring
 a compatible pre-upgrade backup, not deleting migration history.
+
+Migration 4 adds only the partial reverse `reply-to` index used by bounded
+thread traversal. No record, credential, mailbox, or cursor state is rewritten.
+Older binaries reject schema 4; rollback requires a compatible backup.
 
 The server applies these initial hard limits:
 

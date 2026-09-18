@@ -218,6 +218,14 @@ paths:
       tags: [records]
       operationId: searchRecords
       summary: Search authorized records using SQLite FTS5
+      description: >-
+        q uses FTS5 MATCH syntax over content; malformed expressions return 400.
+        Authorization and filters apply inside SQL before scores or snippets are
+        produced. Rank is the document-local count of highlighted matching spans,
+        descending, with record ID ascending as tie-breaker; no global corpus
+        statistics are used. Sequence order is ascending (space_seq, id).
+        Snippets are plain untrusted text capped at 1024 Unicode scalar values.
+        Cursors bind principal, space, query, filters, and order.
       security: [{ principalClient: [] }]
       parameters:
         - $ref: '#/components/parameters/SpacePath'
@@ -231,7 +239,7 @@ paths:
         - $ref: '#/components/parameters/Attention'
         - name: since
           in: query
-          description: RFC 3339 lower time bound.
+          description: Inclusive RFC 3339 lower time bound, compared as an instant.
           schema: { type: string, format: date-time }
         - name: order
           in: query
@@ -253,6 +261,16 @@ paths:
       tags: [records]
       operationId: getThread
       summary: Get the authorized relation thread projection
+      description: >-
+        Projects the entire reply-to tree containing the requested record,
+        including its root and siblings, ordered by (space_seq, id).
+        Other relation types are excluded. Every request rechecks space access
+        and traverses the tree independently of page size. Maximum root-to-node
+        depth is 64 edges, maximum visited nodes is 4096, and maximum edge
+        traversals is 8192 including the initial walk to the root.
+        Budget exhaustion returns 400 invalid-request, never a partial tree.
+        Cyclic persisted relations fail closed with 503.
+        Cursors bind principal and the requested record ID.
       security: [{ principalClient: [] }]
       parameters:
         - $ref: '#/components/parameters/RecordID'
@@ -266,6 +284,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RecordPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/admin/enrollment-tickets:

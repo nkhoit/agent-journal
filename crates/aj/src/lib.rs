@@ -26,13 +26,24 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     use journal_client::journal_protocol::*;
     use std::collections::BTreeMap;
     let Some(command) = args.first().map(String::as_str) else {
-        return Err("expected me, spaces, post, get, list, or enroll");
+        return Err("expected me, spaces, post, get, list, search, thread, or enroll");
     };
     let allowed: &[&str] = match command {
         "me" => &[],
         "spaces" => &["--cursor", "--limit"],
         "post" => &["--space", "--idempotency-key", "--input"],
         "get" => &["--record"],
+        "thread" => &["--record", "--cursor", "--limit"],
+        "search" => &[
+            "--space",
+            "--q",
+            "--cursor",
+            "--limit",
+            "--author",
+            "--attention",
+            "--since",
+            "--order",
+        ],
         "list" => &[
             "--space",
             "--cursor",
@@ -43,7 +54,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
             "--kind",
             "--relation",
         ],
-        _ => return Err("expected me, spaces, post, get, list, or enroll"),
+        _ => return Err("expected me, spaces, post, get, list, search, thread, or enroll"),
     };
     let mut options = BTreeMap::new();
     for pair in args[1..].chunks(2) {
@@ -78,6 +89,9 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
                 "--attention",
                 "--kind",
                 "--relation",
+                "--q",
+                "--since",
+                "--order",
             ]
             .contains(key)
         })
@@ -94,6 +108,8 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         "me" => serde_json::to_value(client.me(token).map_err(|_|"request failed")?),
         "spaces" => serde_json::to_value(client.spaces(token,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"request failed")?),
         "get" => serde_json::to_value(client.get(token,required("--record")?).map_err(|_|"request failed")?),
+        "thread" => serde_json::to_value(client.thread(token,required("--record")?,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"request failed")?),
+        "search" => serde_json::to_value(client.search(token,required("--space")?,&SearchRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
         "list" => serde_json::to_value(client.list(token,required("--space")?,&ListRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
         "post" => {
             use std::io::Read;

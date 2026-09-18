@@ -153,6 +153,52 @@ async fn record_routes_enforce_wire_contract() {
             StatusCode::BAD_REQUEST,
         ),
         (format!("/v1/records/{id}"), StatusCode::OK),
+        (format!("/v1/records/{id}/thread"), StatusCode::OK),
+        (
+            format!("/v1/records/{id}/thread?limit=101"),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("/v1/records/{id}/thread?cursor=forged"),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/records/absent/thread".to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        ("/v1/spaces/space/search?q=hello".to_owned(), StatusCode::OK),
+        (
+            "/v1/spaces/space/search?q=hello&order=seq".to_owned(),
+            StatusCode::OK,
+        ),
+        (
+            "/v1/spaces/other/search?q=hello".to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/v1/spaces/space/search?q=%22".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/spaces/space/search".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/spaces/space/search?q=a&q=b".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/spaces/space/search?q=a&cursor=forged".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/spaces/space/search?q=a&order=wrong".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/v1/spaces/space/search?q=a&limit=101".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
         ("/v1/records/absent".to_owned(), StatusCode::NOT_FOUND),
     ] {
         let response = router
@@ -166,6 +212,34 @@ async fn record_routes_enforce_wire_contract() {
             .await
             .unwrap();
         assert_eq!(response.status(), status, "{path}");
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+        if status == StatusCode::OK && path.contains("/search") {
+            let page: SearchPage = decode_json(&body).unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].record.id, id);
+            assert_eq!(page.items[0].snippet.as_deref(), Some("hello"));
+        } else if status == StatusCode::OK && path.ends_with("/thread") {
+            let page: RecordPage = decode_json(&body).unwrap();
+            assert_eq!(page.items[0].id, id);
+        }
+    }
+    for path in [
+        format!("/v1/records/{id}/thread"),
+        "/v1/spaces/space/search?q=hello".into(),
+    ] {
+        for credential in [None, Some(enrolled.delivery_adapter_secret.secret.as_str())] {
+            let mut request = Request::get(&path);
+            if let Some(token) = credential {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
     }
     drop(router);
     drop(service);
