@@ -64,6 +64,53 @@ fn item() -> SpoolItem {
     }
 }
 
+#[test]
+fn pressure_snapshot_matches_exact_admission_boundaries() {
+    let limits = Limits {
+        max_items: 2,
+        max_bytes: 100,
+        min_free_bytes: 50,
+    };
+    let required = 50 + 4 * 40 + 16384;
+    let snapshot = PressureSnapshot::new(limits, 1, 60, required, 1, 40).unwrap();
+    assert!(!snapshot.claiming_paused);
+    assert!(
+        PressureSnapshot::new(limits, 1, 60, required - 1, 1, 40)
+            .unwrap()
+            .claiming_paused
+    );
+    assert!(
+        PressureSnapshot::new(limits, 2, 60, required, 1, 40)
+            .unwrap()
+            .claiming_paused
+    );
+    assert!(
+        PressureSnapshot::new(limits, 1, 61, required, 1, 40)
+            .unwrap()
+            .claiming_paused
+    );
+    assert!(PressureSnapshot::new(limits, 0, 0, u64::MAX, 1, u64::MAX).is_err());
+}
+
+#[test]
+fn pressure_snapshot_reports_persisted_rows_and_real_free_space() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let value = item();
+    store.put(&value).unwrap();
+    let snapshot = store.pressure_snapshot(0, 0).unwrap();
+    assert_eq!(snapshot.retained_items, 1);
+    assert_eq!(
+        snapshot.retained_bytes,
+        serde_json::to_vec(&value).unwrap().len() as u64
+    );
+    assert!(snapshot.available_bytes > 0);
+    assert!(!snapshot.claiming_paused);
+    store.close().unwrap();
+    assert!(store.pressure_snapshot(0, 0).is_err());
+    let store = fixture.open();
+    assert_eq!(store.pressure_snapshot(0, 0).unwrap().retained_items, 1);
+}
 fn confirm(store: &SqliteStore) {
     store
         .confirm_custody("attempt-1", "claim-1", "instance-1", 1)

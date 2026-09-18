@@ -1,5 +1,8 @@
 //! Synchronous SQLite connection, migration, transaction, and backup primitives.
 
+mod metrics;
+pub use metrics::OperationalSnapshot;
+
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

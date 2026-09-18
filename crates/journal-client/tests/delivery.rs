@@ -37,6 +37,10 @@ fn delivery_methods_validate_and_preserve_separate_authority() {
     };
     let token = "a".repeat(64);
     assert!(matches!(
+        client("/v1/admin/metrics", false).metrics(),
+        Err(ClientError::Http { status: 409 })
+    ));
+    assert!(matches!(
         client("/v1/claims/claim%2Fone/commit", true).commit_custody(
             &token,
             "claim/one",

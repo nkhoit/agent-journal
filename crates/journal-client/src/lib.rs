@@ -43,6 +43,16 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    pub fn metrics(&self) -> Result<journal_protocol::OperationalMetrics, ClientError> {
+        let response = self.send(Request::new("GET", "/v1/admin/metrics", vec![]))?;
+        if response.status != 200 {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
+    }
+
     pub fn commit_custody(
         &self,
         token: &str,

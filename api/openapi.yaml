@@ -335,6 +335,30 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /v1/admin/metrics:
+    get:
+      tags: [administration]
+      operationId: getOperationalMetrics
+      summary: Read aggregate operational facts
+      description: >-
+        Protected host-local snapshot with no identity labels or content.
+        SQL facts share one read transaction; physical file sizes are adjacent
+        observations without checkpointing. Null backup and restore timestamps
+        mean durable evidence is unavailable, not that a backup is recent.
+      security: []
+      x-agent-journal-authorization: protected-unix-socket-peer-credentials
+      x-agent-journal-public-https: false
+      responses:
+        '200':
+          description: Aggregate transport and capacity facts; never model-read receipts.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationalMetrics' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
   /v1/admin/adapters:
     post:
       tags: [administration]
@@ -1112,6 +1136,52 @@ components:
         principal: { $ref: '#/components/schemas/Principal' }
         memberships: { type: array, items: { $ref: '#/components/schemas/Membership' } }
         limits: { $ref: '#/components/schemas/Limits' }
+    OperationalMetrics:
+      type: object
+      additionalProperties: false
+      required: [sampled_at, database_bytes, wal_bytes, pending_mailbox_count, oldest_pending_at, outstanding_claims, expired_active_claims, expired_claims, oldest_active_heartbeat_at, stale_registrations_with_pending, runtime_failure_events, last_backup_at, last_verified_restore_at]
+      properties:
+        sampled_at: { type: string, format: date-time }
+        database_bytes: { type: integer, minimum: 0 }
+        wal_bytes: { type: integer, minimum: 0 }
+        pending_mailbox_count: { type: integer, minimum: 0 }
+        oldest_pending_at:
+          type: [string, 'null']
+          format: date-time
+          description: Null when no mailbox item is currently persisted as pending.
+        outstanding_claims:
+          type: integer
+          minimum: 0
+          description: Active claims whose lease is strictly later than sampled_at.
+        expired_active_claims:
+          type: integer
+          minimum: 0
+          description: Active claims with elapsed leases, awaiting normal expiry processing.
+        expired_claims:
+          type: integer
+          minimum: 0
+          description: Retained claims explicitly transitioned to expired.
+        oldest_active_heartbeat_at:
+          type: [string, 'null']
+          format: date-time
+          description: Oldest persisted heartbeat of active registrations, including elapsed leases; null if none.
+        stale_registrations_with_pending:
+          type: integer
+          minimum: 0
+          description: Active registrations with elapsed leases and a persisted pending mailbox item.
+        runtime_failure_events:
+          type: integer
+          minimum: 0
+          description: Retained retryable-failure, terminal-failure, and route-unavailable telemetry events; replay does not increment.
+        last_backup_at:
+          type: [string, 'null']
+          format: date-time
+          description: Null until durable successful-backup evidence is available; never inferred from file mtime.
+        last_verified_restore_at:
+          type: [string, 'null']
+          format: date-time
+          description: Null until durable verified-restore evidence is available.
+
     AdapterProvisionRequest:
       type: object
       required: [principal_id, adapter_id]

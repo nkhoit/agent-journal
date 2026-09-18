@@ -212,6 +212,62 @@ fn partial_custody_replay_expiry_and_exact_binding() {
 }
 
 #[test]
+fn operational_metrics_follow_claim_expiry_and_persisted_failure_history() {
+    let f = Fixture::new();
+    f.append("one");
+    let before = f.service.operational_metrics().unwrap();
+    assert_eq!(before.pending_mailbox_count, 1);
+    assert!(before.oldest_pending_at.is_some());
+    assert!(before.last_backup_at.is_none());
+    assert!(before.last_verified_restore_at.is_none());
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    let claimed = f.service.operational_metrics().unwrap();
+    assert_eq!(claimed.outstanding_claims, 1);
+    assert_eq!(claimed.pending_mailbox_count, 0);
+    assert_eq!(claimed.expired_active_claims, 0);
+    f.service
+        .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
+        .unwrap();
+    let item = &claim.items[0];
+    let failure = event(
+        item,
+        "failure",
+        domain::TelemetryState::AdapterReportedRetryableFailure,
+    );
+    for _ in 0..2 {
+        f.service
+            .record_delivery_event(&f.delivery, &item.mailbox_item_id, &failure)
+            .unwrap();
+    }
+    let persisted =
+        BootstrapService::with_sources(f.db.clone(), f.clock.clone(), Arc::new(OsSecretSource));
+    assert_eq!(
+        persisted
+            .operational_metrics()
+            .unwrap()
+            .runtime_failure_events,
+        1
+    );
+    f.append("two");
+    f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    f.append("three");
+    f.clock.0.fetch_add(90, Ordering::SeqCst);
+    let expired = f.service.operational_metrics().unwrap();
+    assert_eq!(expired.outstanding_claims, 0);
+    assert_eq!(expired.expired_active_claims, 1);
+    assert_eq!(expired.expired_claims, 0);
+    assert_eq!(expired.stale_registrations_with_pending, 1);
+    assert_eq!(
+        expired.oldest_active_heartbeat_at,
+        claimed.oldest_active_heartbeat_at
+    );
+    let encoded = serde_json::to_string(&expired).unwrap();
+    for private in ["private content", "installation", "reader", "adapter"] {
+        assert!(!encoded.contains(private));
+    }
+}
+
+#[test]
 fn retryable_success_replay_and_requeue_keep_history_and_fence_old_attempts() {
     use domain::TelemetryState::*;
     let f = Fixture::new();

@@ -56,7 +56,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ### Accept when
 
-- CI reports the expected 29 paths and 31 operations plus fixture coverage.
+- CI reports the expected 30 paths and 32 operations plus fixture coverage.
 - Failure mutations fail deterministically.
 - All binaries remain honest not-implemented stubs.
 
@@ -469,6 +469,12 @@ No public API, central or spool migration, or credential-class change is introdu
 
 **Goal:** make the runtime-neutral core operable and inspectable.
 
+Implemented operational subset: protected aggregate metrics and local spool
+pressure snapshots, with deterministic SQLite-full rollback, pinned-reader WAL
+growth, and exact free-reserve boundary tests. Backup/verified-restore timestamp
+evidence, real-volume exhaustion, deployment load/capacity measurements, and
+the separate recovery/web gates remain unresolved. This is not S12 acceptance.
+
 ### Build
 
 - Add stable authorized record URLs, timeline, thread, search, and delivery summaries.
@@ -562,7 +568,7 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 - Add no production dependencies.
 - Preserve status-2 stubs.
 
-**Exit:** explicit coverage of all 29 paths/31 operations; every mutation fails for the intended reason.
+**Exit:** explicit coverage of all 30 paths/32 operations; every mutation fails for the intended reason.
 
 ### PR 2 — Domain/protocol kernel
 

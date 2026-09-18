@@ -4,6 +4,13 @@ This document is the implementation-facing summary of the v1 HTTP/JSON protocol.
 
 ## Wire rules
 
+Protected host-local `GET /v1/admin/metrics` returns the fixed-shape
+`OperationalMetrics` snapshot, also available through `aj-admin metrics`.
+It has no public HTTPS route or bearer authorization. Pending and heartbeat
+ages derive from server sample and persisted timestamps; backup/restore
+timestamps remain null when durable evidence is unavailable. See
+[operations](operations.md#protected-operational-snapshots) for metric semantics.
+
 - All application endpoints use `/v1` and JSON. Health endpoints are `/health/live` and `/health/ready`.
 - Successful responses include a request identifier either in the `X-Request-ID` header and, for errors, in the error body.
 - Collection responses have `items` and nullable opaque `next_cursor`.

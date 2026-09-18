@@ -95,6 +95,28 @@ pub struct BootstrapService {
 }
 
 impl BootstrapService {
+    pub fn operational_metrics(
+        &self,
+    ) -> Result<journal_protocol::OperationalMetrics, BootstrapError> {
+        let sampled_at = self.now()?;
+        let snapshot = self.database.operational_snapshot(&sampled_at)?;
+        Ok(journal_protocol::OperationalMetrics {
+            sampled_at,
+            database_bytes: snapshot.database_bytes,
+            wal_bytes: snapshot.wal_bytes,
+            pending_mailbox_count: snapshot.pending_mailbox_count,
+            oldest_pending_at: snapshot.oldest_pending_at,
+            outstanding_claims: snapshot.outstanding_claims,
+            expired_active_claims: snapshot.expired_active_claims,
+            expired_claims: snapshot.expired_claims,
+            oldest_active_heartbeat_at: snapshot.oldest_active_heartbeat_at,
+            stale_registrations_with_pending: snapshot.stale_registrations_with_pending,
+            runtime_failure_events: snapshot.runtime_failure_events,
+            last_backup_at: None,
+            last_verified_restore_at: None,
+        })
+    }
+
     pub fn new(database: Database) -> Self {
         Self::with_sources(database, Arc::new(SystemClock), Arc::new(OsSecretSource))
     }

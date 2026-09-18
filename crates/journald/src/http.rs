@@ -710,6 +710,7 @@ pub(crate) fn admin_router_with_timeout(
     shutdown: watch::Receiver<bool>,
 ) -> Router {
     Router::new()
+        .route("/v1/admin/metrics", get(operational_metrics))
         .route("/v1/admin/principals", post(create_principal))
         .route("/v1/admin/spaces", post(create_space))
         .route("/v1/admin/memberships", post(set_membership))
@@ -748,6 +749,21 @@ pub(crate) fn admin_router_with_timeout(
         ))
         .layer(middleware::from_fn(assign_request_id))
         .with_state(state)
+}
+
+async fn operational_metrics(
+    State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    bootstrap(
+        state,
+        request_id,
+        StatusCode::OK,
+        "operational_metrics",
+        false,
+        |service| service.operational_metrics(),
+    )
+    .await
 }
 
 async fn live() -> Json<HealthResponse> {
@@ -949,6 +965,65 @@ fn new_request_id() -> String {
 mod peer_tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn operational_metrics_are_local_only_and_fail_explicitly() {
+        let directory =
+            std::path::Path::new("target").join(format!("metrics-admin-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::open(directory.join("journal.db")).unwrap();
+        let state = ServiceState::new(database, 2).unwrap();
+        for (router, expected) in [
+            (public_router(state.clone(), 65536), StatusCode::NOT_FOUND),
+            (admin_router(state.clone(), 65536), StatusCode::FORBIDDEN),
+            (
+                admin_router(state.clone(), 65536)
+                    .layer(Extension(AdminOwner(1000)))
+                    .layer(Extension(axum::extract::ConnectInfo(AdminPeer(Some(1001))))),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                admin_router(state.clone(), 65536)
+                    .layer(Extension(AdminOwner(1000)))
+                    .layer(Extension(axum::extract::ConnectInfo(AdminPeer(Some(1000))))),
+                StatusCode::OK,
+            ),
+        ] {
+            let response = router
+                .oneshot(
+                    Request::get("/v1/admin/metrics")
+                        .header("authorization", "Bearer not-admin")
+                        .header("x-peer-uid", "1000")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::OK {
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                let metrics: journal_protocol::OperationalMetrics =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                        .unwrap();
+                assert_eq!(metrics.pending_mailbox_count, 0);
+                assert!(metrics.last_backup_at.is_none());
+            }
+        }
+        std::fs::remove_file(directory.join("journal.db")).unwrap();
+        let router = admin_router(state, 65536)
+            .layer(Extension(AdminOwner(1000)))
+            .layer(Extension(axum::extract::ConnectInfo(AdminPeer(Some(1000)))));
+        let response = router
+            .oneshot(
+                Request::get("/v1/admin/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn admin_requests_reject_positional_arrays_without_mutations() {

@@ -16,6 +16,7 @@ from public_hygiene import PATTERNS
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
 EXPECTED_OPERATIONS = {
+    "getOperationalMetrics": ("GET", "/v1/admin/metrics"),
     "healthLive": ("GET", "/health/live"),
     "healthReady": ("GET", "/health/ready"),
     "getMe": ("GET", "/v1/me"),
@@ -72,6 +73,12 @@ EXPECTED_LIMITS = {
     "telemetry_detail_serialized_utf8_bytes": 4096,
 }
 REQUIRED_RESPONSE_FIELDS = {
+    "OperationalMetrics": {
+        "sampled_at", "database_bytes", "wal_bytes", "pending_mailbox_count",
+        "oldest_pending_at", "outstanding_claims", "expired_active_claims",
+        "expired_claims", "oldest_active_heartbeat_at", "stale_registrations_with_pending",
+        "runtime_failure_events", "last_backup_at", "last_verified_restore_at",
+    },
     "Error": {"code", "message", "request_id"},
     "ErrorResponse": {"error"},
     "Health": {"status", "version"},
@@ -181,6 +188,7 @@ EXPECTED_REQUESTS = {
     "requeueMailboxItem": ("RequeueRequest", False),
 }
 EXPECTED_SUCCESS_RESPONSES = {
+    "getOperationalMetrics": ("200", "OperationalMetrics"),
     "healthLive": ("200", "Health"),
     "healthReady": ("200", "Health"),
     "getMe": ("200", "Me"),
@@ -230,6 +238,7 @@ DELIVERY_STATUS_VISIBILITY = {
     "other_reader": "not-found",
 }
 EXPECTED_ADMIN_PARAMETER_REFS = {
+    "getOperationalMetrics": (),
     "createEnrollmentTicket": (),
     "provisionAdapter": (),
     "listAdapters": (

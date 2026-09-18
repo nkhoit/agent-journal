@@ -34,7 +34,7 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Area | Status |
 | --- | --- |
 | Product design and v1 decisions | Documented in `docs/design.md` |
-| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 29-path/31-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
+| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 30-path/32-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
 | Rust domain and protocol wire kernel | Executable: complete S1 DTOs, duplicate-key rejection, canonical append bytes, authenticated bounded cursors, and normative wire examples |
 | SQLite kernel | Executable: pinned bundled SQLite/FTS5 driver, numbered migrations, verified connection policy, explicit transactions, read-only connections, concurrent access, and isolated backup/restore verification |
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
@@ -45,6 +45,7 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
+| Operational observability | Protected aggregate `aj-admin metrics`, local spool pressure snapshots, and deterministic SQLite-full/WAL/free-reserve tests implemented. Backup-age evidence, deployment capacity measurements, and physical-volume exhaustion acceptance remain unresolved |
 
 ## Quick architecture
 
@@ -111,7 +112,7 @@ python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 29-path/31-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 30-path/32-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
 
 `make adapter-conformance` writes redacted per-scenario JSON and a completion
 manifest under `target/adapter-conformance`. CI retains only those JSON artifacts.
