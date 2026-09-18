@@ -215,6 +215,15 @@ termination before/after commit, restart pagination, and lost HTTP responses.
 
 **Goal:** make retained history useful without leaking inaccessible content.
 
+Implemented: authorized FTS5 search with document-local matching-span rank,
+sequence pagination, bounded whole-tree `reply-to` projections, typed clients,
+and `aj search/thread`. Rank does not use global BM25 statistics. Migration 4
+adds the reverse reply index. Protocol and OpenAPI specify traversal budgets
+and fail-closed exhaustion behavior. Portable tests exercise authorization,
+query/cursor rejection, concurrent append pagination, Unicode/NUL scoring,
+cycles, and independent depth/node/edge limits. The Unix `records-test` gate
+also exercises search/thread CLI behavior; it must run on a Unix host.
+
 ### Build
 
 - Enforce same-space, backward-only relation rules in service and storage.

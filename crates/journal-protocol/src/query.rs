@@ -1,4 +1,4 @@
-use crate::{ListPrincipalsQuery, ListRecordsQuery, PageQuery};
+use crate::{ListPrincipalsQuery, ListRecordsQuery, PageQuery, SearchOrder, SearchRecordsQuery};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,9 +148,90 @@ impl ListRecordsQuery {
     }
 }
 
+impl SearchRecordsQuery {
+    pub fn from_query(query: &str) -> Result<Self, InvalidQuery> {
+        let values = parse(
+            query,
+            &[
+                "q",
+                "cursor",
+                "limit",
+                "author",
+                "attention",
+                "since",
+                "order",
+            ],
+        )?;
+        let result = Self {
+            q: values.get("q").cloned().ok_or(InvalidQuery)?,
+            page: page(&values)?,
+            author: values.get("author").cloned(),
+            attention: values.get("attention").cloned(),
+            since: values.get("since").cloned(),
+            order: match values.get("order").map(String::as_str) {
+                None | Some("rank") => SearchOrder::Rank,
+                Some("seq") => SearchOrder::Seq,
+                _ => return Err(InvalidQuery),
+            },
+        };
+        result.validate().map_err(|_| InvalidQuery)?;
+        Ok(result)
+    }
+
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        let mut pairs = self.page.pairs();
+        pairs.push(("q".into(), self.q.clone()));
+        pairs.push((
+            "order".into(),
+            match self.order {
+                SearchOrder::Rank => "rank",
+                SearchOrder::Seq => "seq",
+            }
+            .into(),
+        ));
+        for (key, value) in [
+            ("author", &self.author),
+            ("attention", &self.attention),
+            ("since", &self.since),
+        ] {
+            if let Some(value) = value {
+                pairs.push((key.into(), value.clone()));
+            }
+        }
+        pairs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn search_roundtrip_and_boundaries() {
+        let query = SearchRecordsQuery::from_query("q=hello+%22world%22&order=seq&since=2026-01-01T00%3A00%3A00%2B01%3A00&attention=reader&author=writer&limit=100").unwrap();
+        assert_eq!(
+            SearchRecordsQuery::from_query(&query_string(&query.pairs())).unwrap(),
+            query
+        );
+        assert!(SearchRecordsQuery::from_query(&format!("q={}", "界".repeat(512))).is_ok());
+        for query in [
+            "",
+            "q=",
+            "q=a&q=b",
+            "q=a&order=wrong",
+            "q=a&limit=0",
+            "q=a&limit=101",
+            "q=a&since=yesterday",
+            "q=%ff",
+            "q=%xx",
+            "q=a&after_seq=1",
+            "q=a&cursor=x&cursor=y",
+            "q=a&unexpected=x",
+        ] {
+            assert!(SearchRecordsQuery::from_query(query).is_err(), "{query}");
+        }
+        assert!(SearchRecordsQuery::from_query(&format!("q={}", "界".repeat(513))).is_err());
+    }
+
     #[test]
     fn query_roundtrip_and_rejections() {
         let query = ListRecordsQuery {

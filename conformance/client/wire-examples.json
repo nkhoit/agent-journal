@@ -90,7 +90,7 @@
       "content": "hello",
       "created_at": "2026-01-01T00:00:00Z",
       "relations": [],
-      "score": 1.25,
+      "score": 1.0,
       "snippet": "hello"
     },
     "SearchPage": {"items": [], "next_cursor": null, "order": "rank", "consistency": "best-effort"},

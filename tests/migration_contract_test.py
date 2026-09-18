@@ -353,7 +353,8 @@ def main() -> None:
     ).fetchone() == ("fts-record",)
     connection.executescript((ROOT / "migrations" / "0002_enrollment_recovery.sql").read_text())
     connection.executescript((ROOT / "migrations" / "0003_records.sql").read_text())
-    assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (3,)
+    connection.executescript((ROOT / "migrations" / "0004_thread_index.sql").read_text())
+    assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (4,)
     make_record(connection, "position-record", "s1", 401)
     connection.execute(
         "INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at,position) VALUES ('position-record','refers-to','fts-record',?,31)",

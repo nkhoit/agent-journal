@@ -78,4 +78,28 @@ fn typed_methods_encode_path_query_and_idempotency_without_retries() {
         Client::without_transport().append(&token, "space", "", &input),
         Err(ClientError::InvalidRequest)
     ));
+    assert!(matches!(
+        client(
+            "GET",
+            "/v1/spaces/space%2Fone/search?limit=2&q=hello+%2B+%E7%95%8C&order=seq"
+        )
+        .search(
+            &token,
+            "space/one",
+            &SearchRecordsQuery::from_query("q=hello+%2B+%E7%95%8C&order=seq&limit=2").unwrap()
+        ),
+        Err(ClientError::Http { status: 404 })
+    ));
+    assert!(matches!(
+        client("GET", "/v1/records/record%2Fone/thread?limit=2").thread(
+            &token,
+            "record/one",
+            &PageQuery::new(None, Some(2))
+        ),
+        Err(ClientError::Http { status: 404 })
+    ));
+    assert!(matches!(
+        Client::without_transport().thread(&token, "record", &PageQuery::new(None, Some(101))),
+        Err(ClientError::InvalidRequest)
+    ));
 }

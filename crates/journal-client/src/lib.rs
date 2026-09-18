@@ -191,6 +191,52 @@ impl Client {
         )
     }
 
+    pub fn search(
+        &self,
+        token: &str,
+        space: &str,
+        query: &journal_protocol::SearchRecordsQuery,
+    ) -> Result<journal_protocol::SearchPage, ClientError> {
+        journal_protocol::domain::validate_identifier("space", space)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/spaces/{}/search?{}",
+                    journal_protocol::path_segment(space),
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn thread(
+        &self,
+        token: &str,
+        id: &str,
+        query: &journal_protocol::PageQuery,
+    ) -> Result<journal_protocol::RecordPage, ClientError> {
+        journal_protocol::domain::validate_identifier("record_id", id)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/records/{}/thread?{}",
+                    journal_protocol::path_segment(id),
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
     fn json<I: serde::Serialize, O: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: &str,
