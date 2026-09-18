@@ -351,6 +351,21 @@ def main() -> None:
     assert connection.execute(
         "SELECT record_id FROM records_fts WHERE records_fts MATCH 'needle'"
     ).fetchone() == ("fts-record",)
+    connection.executescript((ROOT / "migrations" / "0002_enrollment_recovery.sql").read_text())
+    connection.executescript((ROOT / "migrations" / "0003_records.sql").read_text())
+    assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (3,)
+    make_record(connection, "position-record", "s1", 401)
+    connection.execute(
+        "INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at,position) VALUES ('position-record','refers-to','fts-record',?,31)",
+        (NOW,),
+    )
+    expect_integrity(
+        connection,
+        "INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at,position) VALUES ('position-record','acknowledges','fts-record',?,32)",
+        (NOW,),
+    )
+    connection.execute("INSERT INTO journal_secrets VALUES ('cursor',?)", (bytes(32),))
+    expect_integrity(connection, "UPDATE journal_secrets SET secret=?", (bytes(31),))
     print("migration contract passed")
 
 

@@ -4,7 +4,7 @@ PYTHON ?= python3
 OPENAPI_FILE := api/openapi.yaml
 OPENAPI_STANDARDS_LINT ?= 0
 
-.PHONY: all build fmt fmt-check test migration-test contract-test bootstrap-test foreign-uid-test clippy openapi-check redocly-check markdown-check hygiene-check check
+.PHONY: all build fmt fmt-check test migration-test contract-test bootstrap-test records-test foreign-uid-test clippy openapi-check redocly-check markdown-check hygiene-check check
 
 all: check
 
@@ -29,6 +29,9 @@ contract-test:
 bootstrap-test: build
 	$(PYTHON) tests/s4_bootstrap_test.py
 
+records-test: build
+	$(PYTHON) tests/s5_records_test.py
+
 # Explicit privileged harness; never count an unprivileged skip as evidence.
 foreign-uid-test:
 	$(PYTHON) tests/s4_foreign_uid_test.py
@@ -52,4 +55,4 @@ markdown-check:
 hygiene-check:
 	$(PYTHON) scripts/public_hygiene.py
 
-check: fmt-check test clippy build migration-test contract-test bootstrap-test openapi-check redocly-check markdown-check hygiene-check
+check: fmt-check test clippy build migration-test contract-test bootstrap-test records-test openapi-check redocly-check markdown-check hygiene-check

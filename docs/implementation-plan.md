@@ -140,7 +140,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ## S4 — Protected administration, authentication, and enrollment
 
-**Status:** implemented and verified on Unix. `tests/s4_bootstrap_test.py` bootstraps a fresh daemon entirely through the CLIs, exercises the credential-class matrix, inspects secret outputs and persisted digests, and forces lost-response and post-commit file failures through deterministic forwarding proxies. Rust integration tests cover transaction rollback, subprocess termination, concurrent exchange, expiry, revocation, and installation ownership. S5+ remains unresolved.
+**Status:** implemented and verified on Unix. `tests/s4_bootstrap_test.py` bootstraps a fresh daemon entirely through the CLIs, exercises the credential-class matrix, inspects secret outputs and persisted digests, and forces lost-response and post-commit file failures through deterministic forwarding proxies. Rust integration tests cover transaction rollback, subprocess termination, concurrent exchange, expiry, revocation, and installation ownership. Delivery and runtime integrations remain unresolved.
 
 **Goal:** create the security bootstrap needed to test every later endpoint honestly.
 
@@ -174,6 +174,19 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 ## S5 — First product vertical: append, read, and list
 
 **Goal:** deliver the first useful end-to-end journal behavior.
+
+**Implemented:** UUIDv7 records; principal/space discovery; authenticated atomic
+append, get, and filtered sequence listing; typed client methods; and
+`aj me/spaces/post/get/list`. Migration 3 preserves relation order and persists
+the cursor MAC secret. S5 includes same-space backward relation validation and
+bounded route/filter/principal-bound pagination because append and list cannot
+safely defer these invariants to S6. Search and thread projections remain S6.
+
+Acceptance evidence is exercised by `journal-service/tests/records.rs`,
+`journald/tests/records_http.rs`, `journal-client/tests/records.rs`, and
+`make records-test` (Unix, bootstrapped through S4). Tests include concurrent
+sequences, UTF-8 and collection boundaries, rollback failpoints, child-process
+termination before/after commit, restart pagination, and lost HTTP responses.
 
 ### Build
 

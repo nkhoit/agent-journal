@@ -1,7 +1,8 @@
 use journal_protocol::{Request, Response, Transport, TransportError};
 use std::{io::Read, path::Path, time::Duration};
 
-const MAX_RESPONSE: u64 = 2 * 1024 * 1024;
+// A 100-record page can exceed 40 MiB when legal content needs JSON escaping.
+const MAX_RESPONSE: u64 = 64 * 1024 * 1024;
 
 pub struct HttpTransport {
     client: reqwest::blocking::Client,

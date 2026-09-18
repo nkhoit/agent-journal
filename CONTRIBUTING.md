@@ -22,6 +22,11 @@ Rust code must pass `cargo fmt --all -- --check`, `cargo test --locked --workspa
 
 The workspace pins Tokio, Axum, and Tower for the runnable S3 service shell, plus tracing for structured process and request events. The shell deliberately uses no connection pool: synchronous `rusqlite` work runs through an explicit bounded blocking executor and refuses excess work rather than growing an unbounded queue. The protocol crate pins `base64`, `hmac`, and `sha2` for authenticated cursors and Jiff without timezone-database features for RFC 3339 validation. The storage crate pins `rusqlite` with only bundled SQLite/FTS5 and online-backup features. Add any further dependency only with an exercised use case, a pinned version, and a documentation update explaining the choice; do not add an ORM, pool, or `async-trait` merely to fill a boundary.
 
+The S5 protocol query codec pins `form_urlencoded` and `percent-encoding` for
+shared client/server escaping and strict UTF-8 query validation. Record UUIDv7
+generation uses the existing injected secure-random source and server clock.
+`make records-test` runs the Unix CLI/API vertical through S4 provisioning.
+
 ## Change expectations
 
 - Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.

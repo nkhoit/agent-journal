@@ -43,6 +43,154 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    fn principal<O: serde::de::DeserializeOwned + serde::Serialize>(
+        &self,
+        token: &str,
+        mut request: Request,
+    ) -> Result<O, ClientError> {
+        if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ClientError::InvalidRequest);
+        }
+        request
+            .headers
+            .insert("Authorization".into(), format!("Bearer {token}"));
+        let response = self.send(request)?;
+        if !(200..300).contains(&response.status) {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
+    }
+
+    pub fn me(&self, token: &str) -> Result<journal_protocol::Me, ClientError> {
+        self.principal(token, Request::new("GET", "/v1/me", vec![]))
+    }
+
+    pub fn spaces(
+        &self,
+        token: &str,
+        query: &journal_protocol::PageQuery,
+    ) -> Result<journal_protocol::SpacePage, ClientError> {
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/spaces?{}",
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn principals(
+        &self,
+        token: &str,
+        query: &journal_protocol::ListPrincipalsQuery,
+    ) -> Result<journal_protocol::PrincipalPage, ClientError> {
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/principals?{}",
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn space(
+        &self,
+        token: &str,
+        space: &str,
+    ) -> Result<journal_protocol::domain::Space, ClientError> {
+        journal_protocol::domain::validate_identifier("space", space)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!("/v1/spaces/{}", journal_protocol::path_segment(space)),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn append(
+        &self,
+        token: &str,
+        space: &str,
+        key: &str,
+        input: &journal_protocol::AppendRecordRequest,
+    ) -> Result<journal_protocol::AppendRecordResponse, ClientError> {
+        journal_protocol::domain::validate_identifier("space", space)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        if !(1..=255).contains(&key.chars().count()) || key.chars().any(char::is_control) {
+            return Err(ClientError::InvalidRequest);
+        }
+        let body =
+            journal_protocol::canonical_append(input).map_err(|_| ClientError::InvalidRequest)?;
+        let mut request = Request::new(
+            "POST",
+            format!(
+                "/v1/spaces/{}/records",
+                journal_protocol::path_segment(space)
+            ),
+            body,
+        );
+        request
+            .headers
+            .insert("Content-Type".into(), "application/json".into());
+        request.headers.insert("Idempotency-Key".into(), key.into());
+        self.principal(token, request)
+    }
+
+    pub fn get(
+        &self,
+        token: &str,
+        id: &str,
+    ) -> Result<journal_protocol::domain::Record, ClientError> {
+        journal_protocol::domain::validate_identifier("record_id", id)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!("/v1/records/{}", journal_protocol::path_segment(id)),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn list(
+        &self,
+        token: &str,
+        space: &str,
+        query: &journal_protocol::ListRecordsQuery,
+    ) -> Result<journal_protocol::RecordPage, ClientError> {
+        journal_protocol::domain::validate_identifier("space", space)
+            .map_err(|_| ClientError::InvalidRequest)?;
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/spaces/{}/records?{}",
+                    journal_protocol::path_segment(space),
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
     fn json<I: serde::Serialize, O: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: &str,

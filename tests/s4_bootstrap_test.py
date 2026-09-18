@@ -132,7 +132,7 @@ class BootstrapTest(unittest.TestCase):
         self.secrets.append(value["secret"])
         return value
 
-    def proxy(self, callback, unix=False, lose_response=False):
+    def proxy(self, callback, unix=False, lose_response=False, expected_status=200):
         """Forward one exchange, then fail at a deterministic post-commit boundary."""
         listener = socket.socket(socket.AF_UNIX if unix else socket.AF_INET)
         address = str(self.directory / "proxy.sock") if unix else ("127.0.0.1", 0)
@@ -170,7 +170,7 @@ class BootstrapTest(unittest.TestCase):
                         response.begin()
                         payload = response.read()
                         request_id = response.getheader("X-Request-ID", "")
-                        if response.status != 200:
+                        if response.status != expected_status:
                             raise RuntimeError("forwarded operation failed")
                         callback(payload)
                         if not lose_response:
@@ -212,8 +212,17 @@ class BootstrapTest(unittest.TestCase):
             for path, method in paths:
                 for token in [None, "malformed", ticket, wrong["secret"]]:
                     self.assertEqual(self.request(path, token, method)[0], 401)
+                implemented = {
+                    ("/v1/me", "GET"): 200,
+                    ("/v1/principals", "GET"): 400,
+                    ("/v1/spaces", "GET"): 200,
+                    ("/v1/spaces/example", "GET"): 404,
+                    ("/v1/spaces/example/records", "GET"): 404,
+                    ("/v1/spaces/example/records", "POST"): 400,
+                    ("/v1/records/example", "GET"): 404,
+                }
                 self.assertEqual(self.request(path, good["secret"], method)[0],
-                                 200 if path == "/v1/me" else 501)
+                                 implemented.get((path, method), 501))
         for token in [None, ticket, principal["secret"], delivery["secret"]]:
             self.assertEqual(self.request("/v1/admin/principals", token, "POST")[0], 404)
         self.assertEqual(self.request("/unknown/" + principal["secret"])[0], 404)

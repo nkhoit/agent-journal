@@ -4,13 +4,112 @@ use journal_client::{
 use std::{io::Write, path::Path};
 
 pub fn run(args: &[String], mut error: impl Write) -> i32 {
-    match execute(args, &mut error) {
+    run_with_output(args, std::io::stdout(), &mut error)
+}
+
+pub fn run_with_output(args: &[String], mut output: impl Write, mut error: impl Write) -> i32 {
+    let result = if args.first().is_some_and(|s| s == "enroll") {
+        execute(args, &mut error)
+    } else {
+        journal(args, &mut output)
+    };
+    match result {
         Ok(()) => 0,
         Err(message) => {
             let _ = writeln!(error, "aj: {message}");
             1
         }
     }
+}
+
+fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str> {
+    use journal_client::journal_protocol::*;
+    use std::collections::BTreeMap;
+    let Some(command) = args.first().map(String::as_str) else {
+        return Err("expected me, spaces, post, get, list, or enroll");
+    };
+    let allowed: &[&str] = match command {
+        "me" => &[],
+        "spaces" => &["--cursor", "--limit"],
+        "post" => &["--space", "--idempotency-key", "--input"],
+        "get" => &["--record"],
+        "list" => &[
+            "--space",
+            "--cursor",
+            "--limit",
+            "--after-seq",
+            "--author",
+            "--attention",
+            "--kind",
+            "--relation",
+        ],
+        _ => return Err("expected me, spaces, post, get, list, or enroll"),
+    };
+    let mut options = BTreeMap::new();
+    for pair in args[1..].chunks(2) {
+        if pair.len() != 2
+            || (!["--endpoint", "--credential-file"].contains(&pair[0].as_str())
+                && !allowed.contains(&pair[0].as_str()))
+            || options.insert(pair[0].as_str(), pair[1].as_str()).is_some()
+        {
+            return Err("invalid or duplicate command option");
+        }
+    }
+    let required = |key| {
+        options
+            .get(key)
+            .copied()
+            .ok_or("missing required command option")
+    };
+    let bytes = private_file::read(Path::new(required("--credential-file")?))
+        .map_err(|_| "cannot read private credential file")?;
+    let credential: OneTimePrincipalClientSecret =
+        decode_json(bytes.as_bytes()).map_err(|_| "invalid credential file")?;
+    let client =
+        Client::new(HttpTransport::new(required("--endpoint")?).map_err(|_| "invalid endpoint")?);
+    let query_pairs: Vec<_> = options
+        .iter()
+        .filter(|(key, _)| {
+            [
+                "--cursor",
+                "--limit",
+                "--after-seq",
+                "--author",
+                "--attention",
+                "--kind",
+                "--relation",
+            ]
+            .contains(key)
+        })
+        .map(|(key, value)| {
+            (
+                key.trim_start_matches("--").replace('-', "_"),
+                (*value).to_owned(),
+            )
+        })
+        .collect();
+    let query = query_string(&query_pairs);
+    let token = &credential.secret;
+    let result = match command {
+        "me" => serde_json::to_value(client.me(token).map_err(|_|"request failed")?),
+        "spaces" => serde_json::to_value(client.spaces(token,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"request failed")?),
+        "get" => serde_json::to_value(client.get(token,required("--record")?).map_err(|_|"request failed")?),
+        "list" => serde_json::to_value(client.list(token,required("--space")?,&ListRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
+        "post" => {
+            use std::io::Read;
+            let input = required("--input")?;
+            let mut bytes = Vec::new();
+            let max = 1_048_576;
+            if input=="-" { std::io::stdin().take(max).read_to_end(&mut bytes).map_err(|_|"cannot read input")?; }
+            else { std::fs::File::open(input).map_err(|_|"cannot open input")?.take(max).read_to_end(&mut bytes).map_err(|_|"cannot read input")?; }
+            if bytes.len() as u64 == max { return Err("input too large"); }
+            let request: AppendRecordRequest = decode_json(&bytes).map_err(|_|"invalid append JSON")?;
+            serde_json::to_value(client.append(token,required("--space")?,required("--idempotency-key")?,&request).map_err(|_|"append failed or response lost; retry identical input with the same idempotency key")?)
+        },
+        _ => unreachable!(),
+    }.map_err(|_|"cannot encode response")?;
+    serde_json::to_writer(&mut *output, &result).map_err(|_| "cannot write response")?;
+    writeln!(output).map_err(|_| "cannot write response")
 }
 
 fn execute(args: &[String], error: &mut impl Write) -> Result<(), &'static str> {

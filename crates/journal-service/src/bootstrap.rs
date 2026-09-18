@@ -11,8 +11,17 @@ use thiserror::Error;
 
 use crate::Clock;
 
+#[path = "records.rs"]
+mod records;
+
 #[derive(Debug, Error)]
 pub enum BootstrapError {
+    #[error("idempotency key was used for another payload")]
+    IdempotencyConflict,
+    #[error("invalid journal request")]
+    InvalidJournal,
+    #[error("invalid persisted journal data")]
+    CorruptJournal,
     #[error("invalid request: {0}")]
     Invalid(#[from] WireValidationError),
     #[error("invalid or expired credential")]
