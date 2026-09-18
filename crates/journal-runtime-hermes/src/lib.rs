@@ -20,7 +20,7 @@ impl Adapter {
 }
 
 impl Runtime for Adapter {
-    fn inject(&self, _route: &Route, _envelope: &Envelope) -> CoreResult<String> {
+    fn inject(&self, _route: &Route, _envelope: &Envelope, _rendered: &str) -> CoreResult<String> {
         self.inject()
     }
 }

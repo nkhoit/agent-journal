@@ -641,9 +641,12 @@ dependencies = [
 name = "journal-adapter-core"
 version = "0.1.0"
 dependencies = [
+ "jiff",
+ "journal-client",
  "journal-domain",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
@@ -751,6 +754,9 @@ name = "journald"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "journal-adapter-core",
+ "journal-adapter-spool",
+ "journal-client",
  "journal-protocol",
  "journal-service",
  "journal-storage-sqlite",

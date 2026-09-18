@@ -379,6 +379,29 @@ reconciliation commit. Authenticated central reconciliation remains S10.
 
 **Goal:** implement custody-before-injection against fake boundaries.
 
+**Implemented:** `journal-adapter-core::Adapter::tick` composes `DeliveryJournal`
+(the existing typed HTTP client), `SqliteStore`, local routes, an injected clock,
+and a runtime port. It issues single-item claims after conservative admission,
+replays exact custody requests, reconciles only authenticated lease-expired
+responses, and rechecks registration immediately before sending. Metadata is
+JSON-quoted and rendered separately from the original untrusted body.
+
+Local schema 2 atomically persists runtime outcomes with their telemetry outbox.
+Terminal rows with unacknowledged events remain reporting work, never injection
+work. Event identity, payload, and timestamp survive response loss and restart.
+Runtime and transport backoff are durable, exponentially bounded at 256 seconds.
+No central schema, wire-operation, credential-class, or publishing changes.
+
+Evidence lives in core fake-port tests, spool orchestration and child-process
+tests, and `journald/tests/adapter_orchestration.rs` (real HTTP transport plus a
+Unix-only daemon subprocess). The process tests kill at claim, spool, central
+custody, injection-start, runtime acceptance, result, and telemetry boundaries.
+The local spool additionally kills before and after atomic result/outbox and
+acknowledgement commits. Acceptance-before-persistence visibly duplicates a send.
+Unix subprocess acceptance requires a filesystem that preserves private directory
+permissions; a Windows-mounted WSL checkout without those permissions fails closed.
+S11's reusable scenario runner and all vendor integrations remain separate.
+
 ### Build
 
 - Implement register → heartbeat → claim → durable spool → custody commit → persist confirmation → fence recheck → route resolution → envelope rendering → injection → result persistence → telemetry.

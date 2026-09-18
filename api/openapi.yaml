@@ -5,7 +5,7 @@ info:
   description: |
     Runtime-neutral v1 contract for a permissioned append-only journal and
     reliable attention delivery. This contract is normative; README.md tracks
-    implemented slices. Custody and runtime delivery remain unimplemented.
+    implemented slices. Vendor runtime integrations remain unresolved.
 servers:
   - url: https://journal.example.invalid
     description: Documentation placeholder only; deployments choose a private HTTPS origin.
