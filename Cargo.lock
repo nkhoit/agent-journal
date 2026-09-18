@@ -683,9 +683,11 @@ name = "journal-protocol"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "form_urlencoded",
  "hmac",
  "jiff",
  "journal-domain",
+ "percent-encoding",
  "serde",
  "serde_json",
  "sha2",
@@ -717,6 +719,7 @@ dependencies = [
  "journal-storage-sqlite",
  "rusqlite",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
 ]

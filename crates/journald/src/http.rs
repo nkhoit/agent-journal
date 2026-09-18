@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, HttpBody, to_bytes};
-use axum::extract::{Extension, FromRequest, State};
+use axum::extract::{Extension, FromRequest, FromRequestParts, State};
 use axum::http::{HeaderValue, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -137,7 +137,7 @@ async fn bootstrap<T: Serialize + Send + 'static>(
         }
         Ok(Err(error)) => {
             let (status, code, message) = match error {
-                BootstrapError::Invalid(_) => (
+                BootstrapError::Invalid(_) | BootstrapError::InvalidJournal => (
                     StatusCode::BAD_REQUEST,
                     "invalid-request",
                     "invalid request",
@@ -154,6 +154,11 @@ async fn bootstrap<T: Serialize + Send + 'static>(
                     StatusCode::CONFLICT,
                     "conflict",
                     "operation conflicts with existing state",
+                ),
+                BootstrapError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    "idempotency-conflict",
+                    "idempotency key was used for another payload",
                 ),
                 _ => (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -218,7 +223,9 @@ fn log_bootstrap_outcome(
                 _ => None,
             };
             let category = match error {
-                BootstrapError::Invalid(_) => "validation",
+                BootstrapError::Invalid(_) | BootstrapError::InvalidJournal => "validation",
+                BootstrapError::IdempotencyConflict => "idempotency_conflict",
+                BootstrapError::CorruptJournal => "persisted_data",
                 BootstrapError::NotFound => "not_found",
                 BootstrapError::Conflict => "conflict",
                 BootstrapError::Storage(_) => "storage",
@@ -230,7 +237,11 @@ fn log_bootstrap_outcome(
             };
             if matches!(
                 error,
-                BootstrapError::Invalid(_) | BootstrapError::NotFound | BootstrapError::Conflict
+                BootstrapError::Invalid(_)
+                    | BootstrapError::InvalidJournal
+                    | BootstrapError::IdempotencyConflict
+                    | BootstrapError::NotFound
+                    | BootstrapError::Conflict
             ) {
                 tracing::warn!(
                     event = "bootstrap_rejected",
@@ -424,6 +435,139 @@ async fn me(
     .await
 }
 
+async fn journal_operation(
+    State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
+    request: Request<Body>,
+) -> Response {
+    use journal_protocol::{ListPrincipalsQuery, ListRecordsQuery, PageQuery};
+    let Some(token) = bearer(request.headers()) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "invalid or expired credential",
+            request_id,
+        );
+    };
+    let authentication_token = token.clone();
+    let authentication = bootstrap(
+        state.clone(),
+        request_id.clone(),
+        StatusCode::NO_CONTENT,
+        "principal_authentication",
+        false,
+        move |s| {
+            s.authenticate(
+                &authentication_token,
+                journal_protocol::CredentialClass::PrincipalClient,
+            )
+            .map(|_| ())
+        },
+    )
+    .await;
+    if authentication.status() != StatusCode::NO_CONTENT {
+        return authentication;
+    }
+    let method = request.method().clone();
+    let query = request.uri().query().unwrap_or("").to_owned();
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|p| p.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let (mut parts, body) = request.into_parts();
+    let path =
+        match axum::extract::Path::<BTreeMap<String, String>>::from_request_parts(&mut parts, &())
+            .await
+        {
+            Ok(axum::extract::Path(path)) => path,
+            Err(_) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid-request",
+                    "invalid request",
+                    request_id,
+                );
+            }
+        };
+    let request = Request::from_parts(parts, body);
+    let space = path.get("space").cloned().unwrap_or_default();
+    let record = path.get("record_id").cloned().unwrap_or_default();
+    if method == axum::http::Method::POST {
+        let keys = request.headers().get_all("idempotency-key");
+        let key = if keys.iter().count() == 1 {
+            keys.iter()
+                .next()
+                .and_then(|h| std::str::from_utf8(h.as_bytes()).ok())
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let Some(key) = key else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "Idempotency-Key is required",
+                request_id,
+            );
+        };
+        let Ok(input) = strict_request::<journal_protocol::AppendRecordRequest>(request).await
+        else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "invalid request",
+                request_id,
+            );
+        };
+        return bootstrap(
+            state,
+            request_id,
+            StatusCode::CREATED,
+            "append_record",
+            true,
+            move |s| s.append_record(&token, &space, &key, &input),
+        )
+        .await;
+    }
+    bootstrap(
+        state,
+        request_id,
+        StatusCode::OK,
+        "journal_read",
+        false,
+        move |s| {
+            let value = match route.as_str() {
+                "/v1/spaces" => serde_json::to_value(s.list_spaces(
+                    &token,
+                    &PageQuery::from_query(&query).map_err(|_| BootstrapError::InvalidJournal)?,
+                )?),
+                "/v1/principals" => serde_json::to_value(
+                    s.list_principals(
+                        &token,
+                        &ListPrincipalsQuery::from_query(&query)
+                            .map_err(|_| BootstrapError::InvalidJournal)?,
+                    )?,
+                ),
+                "/v1/spaces/{space}" => serde_json::to_value(s.get_space(&token, &space)?),
+                "/v1/spaces/{space}/records" => serde_json::to_value(
+                    s.list_records(
+                        &token,
+                        &space,
+                        &ListRecordsQuery::from_query(&query)
+                            .map_err(|_| BootstrapError::InvalidJournal)?,
+                    )?,
+                ),
+                "/v1/records/{record_id}" => serde_json::to_value(s.get_record(&token, &record)?),
+                _ => return Err(BootstrapError::NotFound),
+            };
+            value.map_err(|_| BootstrapError::CorruptJournal)
+        },
+    )
+    .await
+}
+
 async fn authenticated_unimplemented(
     state: ServiceState,
     request_id: RequestId,
@@ -536,15 +680,15 @@ pub(crate) fn public_router_with_timeout(
         .route("/health/ready", get(ready))
         .route("/v1/enrollment/exchange", post(exchange))
         .route("/v1/me", get(me))
-        .route("/v1/principals", get(principal_unimplemented))
-        .route("/v1/spaces", get(principal_unimplemented))
-        .route("/v1/spaces/{space}", get(principal_unimplemented))
+        .route("/v1/principals", get(journal_operation))
+        .route("/v1/spaces", get(journal_operation))
+        .route("/v1/spaces/{space}", get(journal_operation))
         .route(
             "/v1/spaces/{space}/records",
-            get(principal_unimplemented).post(principal_unimplemented),
+            get(journal_operation).post(journal_operation),
         )
         .route("/v1/spaces/{space}/search", get(principal_unimplemented))
-        .route("/v1/records/{record_id}", get(principal_unimplemented))
+        .route("/v1/records/{record_id}", get(journal_operation))
         .route(
             "/v1/records/{record_id}/thread",
             get(principal_unimplemented),

@@ -30,6 +30,16 @@ Cursor version 1 is `base64url(payload).base64url(tag)` without padding. The com
 
 The filter fingerprint input must include every path value and effective query filter that determines membership, excluding `cursor` and `limit`; the ordering mode is carried separately. Decoding requires an exact route, fingerprint, and ordering match. Clients still treat the token as opaque and must never inspect, edit, or manufacture it.
 
+Record lists are ascending by `(space_seq, id)` and support `after_seq`, `author`,
+`attention`, `kind`, and relation-type filters. Discovery pages are ascending by
+identifier. Cursor scopes include the authenticated principal; current ACLs are
+rechecked on every page. The server generates and persists a private cursor
+MAC secret in SQLite, so ordinary restarts retain cursors. Duplicate, unknown,
+malformed, and out-of-range query parameters are rejected. Empty cursors mean
+the first page. Pages are keyset traversals, not multi-request snapshots.
+Because sequences are unique within a space, record-list index seeks start
+strictly after the greater of `after_seq` and the validated cursor sequence.
+
 ## Credential classes
 
 | Class | Transport | Scope |
@@ -55,6 +65,45 @@ Enrollment samples one clock instant after acquiring the transaction's write loc
 When a rotation response is lost together with its replacement identifier, the same enrollment recovery operation revokes the inaccessible replacement using the known adapter and installation binding. It intentionally revokes both classes, after which a fresh ticket supplies both credentials again. No credential secret is retrievable or replayable.
 
 `POST /v1/spaces/{space}/records` requires `Idempotency-Key`. The server derives `author` from the principal credential, validates the body, allocates a per-space sequence, inserts the immutable record, creates each attention mailbox item and its ordinal-1 `pending` attempt in one transaction, and stores the idempotency result. The uniqueness scope is `(principal, method, path, key)`. A repeated key with the same canonical validated payload returns the original result. A different payload returns `409 idempotency-conflict`.
+
+Both initial append and replay return `201`; replay preserves the original
+record and mailbox count and sets `replayed: true`. Authorization is rechecked
+before replay, but changes to recipient membership do not rewrite an existing
+result. New appends reject archived spaces, disabled recipients, and recipients
+without read membership. UUIDv7 IDs use server Unix milliseconds and secure
+random bits; per-space sequence, not UUID ordering, is the ordering authority.
+
+### Principal CLI
+
+After enrollment, commands read the principal credential JSON from a private
+file and emit JSON to stdout. Secrets are never command arguments:
+
+```sh
+aj me --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE"
+aj spaces --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" --limit 50
+aj post --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
+  --space space-example --idempotency-key stable-publish-key --input record.json
+aj get --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" --record "$RECORD_ID"
+aj list --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
+  --space space-example --after-seq 0 --limit 50
+```
+
+`post --input -` reads a strict append JSON object from stdin. The object contains
+`kind`, `content`, and optional `attention`, `relations`, `run_id`, and
+`routing_key`. Preserve the input and idempotency key until the result is known;
+retry both unchanged after response loss. `list` also accepts `--cursor`,
+`--author`, `--attention`, `--kind`, and `--relation`; `spaces` accepts
+`--cursor`. Commands return one bounded page and never silently fetch every page.
+Private credential-file support remains Unix-only.
+
+### Persisted compatibility
+
+Migration 3 adds relation positions and a private cursor-secret table without
+changing existing record, mailbox, or attempt states. Existing relation rows
+retain their previous insertion order as a tie-breaker; new appends store
+explicit positions. Database backups include the cursor secret and must remain
+protected. Older binaries reject the newer schema; rollback requires restoring
+a compatible pre-upgrade backup, not deleting migration history.
 
 The server applies these initial hard limits:
 

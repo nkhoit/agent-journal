@@ -6,6 +6,7 @@ mod canonical;
 mod cursor;
 mod dto;
 mod json;
+mod query;
 
 pub use canonical::{CanonicalizationError, canonical_append};
 pub use cursor::{CursorCodec, CursorError, CursorOrder, CursorPosition, CursorRoute, CursorScope};
@@ -13,6 +14,7 @@ pub use dto::*;
 pub use journal_domain as domain;
 pub use journal_domain::{DeliveryState, TelemetryState};
 pub use json::{decode_json, encode_json};
+pub use query::*;
 
 pub type Headers = BTreeMap<String, String>;
 

@@ -27,6 +27,8 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" build --locked --workspace
       - name: Protected bootstrap and recovery acceptance
         run: python3 tests/s4_bootstrap_test.py
+      - name: Journal CLI and lost-response acceptance
+        run: python3 tests/s5_records_test.py
       - name: Migration contract
         run: python3 tests/migration_contract_test.py
       - name: Public hygiene

@@ -2,9 +2,9 @@
 
 Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
-> **Status: S0–S4 foundations, protected administration, authentication, and enrollment implemented.**
+> **Status: S0–S5 foundations, protected bootstrap, and the first journal vertical implemented.**
 >
-> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, one-use enrollment, credential-class separation, immediate rotation/revocation, and explicit same-installation recovery after lost responses or credential-file failures. S5+ record APIs, web UI, durable adapter delivery, and runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
+> The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, and bounded authenticated pagination. Search, threads, web UI, durable adapter delivery, and runtime injection remain unresolved. Hermes and Muse injection surfaces require revalidation on supported releases.
 
 ## Product model
 
@@ -39,8 +39,9 @@ Record content is untrusted coordination data. It never grants permission to exe
 | SQLite kernel | Executable: pinned bundled SQLite/FTS5 driver, numbered migrations, verified connection policy, explicit transactions, read-only connections, concurrent access, and isolated backup/restore verification |
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
-| Record APIs and adapters | S5+ unresolved; no claim of working record or runtime delivery |
-| Binaries | `journald`, `aj enroll`, and `aj-admin` bootstrap commands work on Unix; runtime adapters remain explicit status-2 stubs |
+| Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, and same-space backward relations |
+| Adapter delivery | S7+ unresolved; mailbox obligations are persisted but not delivered |
+| Binaries | `journald`, `aj enroll/me/spaces/post/get/list`, and `aj-admin` bootstrap commands work on Unix; runtime adapters remain explicit status-2 stubs |
 | Hermes injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Muse injection | **Unresolved; revalidation required** on the installed supported runtime |
 | Recovery, crash, security, and live canaries | SQLite online backup and isolated restore verification are executable; service-level restore fencing and later acceptance work remain planned |
@@ -72,14 +73,14 @@ api/                         language-neutral OpenAPI and protocol fixtures
 crates/journal-domain/       constants, typed records, states, and validation
 crates/journal-protocol/     typed wire DTOs, strict JSON, canonical append, authenticated cursors
 crates/journal-storage-sqlite/ SQLite connections, migrations, transactions, FTS5, and backup/restore
-crates/journal-service/      concrete bootstrap transactions/authentication and future journal ports
-crates/journal-client/       typed bootstrap client, HTTP/Unix transports, private credential files
+crates/journal-service/      bootstrap, authenticated record transactions, and future delivery ports
+crates/journal-client/       typed bootstrap/journal client, HTTP/Unix transports, private credential files
 crates/journal-adapter-core/ registration, heartbeat, custody, routing, envelope ports
 crates/journal-adapter-spool/ crash-recovery contract and pending store
 crates/journal-runtime-hermes/ unresolved Hermes runtime boundary
 crates/journal-runtime-muse/ unresolved Muse runtime boundary
 crates/journald/             runnable shell, protected bootstrap handlers, authentication boundaries
-crates/aj/                   one-use enrollment CLI
+crates/aj/                   enrollment and principal journal CLI
 crates/aj-admin/             protected local provisioning, rotation, revocation, and recovery CLI
 crates/journal-adapter-hermes/ not-implemented Hermes adapter binary
 crates/journal-adapter-muse/ not-implemented Muse adapter binary

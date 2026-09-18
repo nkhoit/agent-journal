@@ -119,6 +119,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SpacePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/spaces/{space}:
     get:
@@ -154,7 +155,7 @@ paths:
             schema: { $ref: '#/components/schemas/AppendRecordRequest' }
       responses:
         '201':
-          description: Record published and obligations created.
+          description: Record published and obligations created. Replays return the original record and mailbox count with replayed true.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestID' }
           content:
