@@ -1,181 +1,591 @@
-//! Durable spool contract. The concrete SQLite-backed spool is intentionally
-//! pending; this crate makes the crash-recovery obligations explicit.
+//! Single-owner, synchronous SQLite custody spool. Runtime orchestration is separate.
 
-use std::time::SystemTime;
+use std::{
+    fs::{File, OpenOptions},
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::SystemTime,
+};
 
-use journal_adapter_core::{CoreError, CoreResult, InjectionState, Spool, SpoolItem};
+use fs2::FileExt;
+use journal_adapter_core::{
+    CoreError, CoreResult, CustodyResult, CustodyResultState, InjectionState, Spool, SpoolItem,
+};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
 
-pub const REQUIRED_PERSISTED_FIELDS: [&str; 14] = [
-    "mailbox_item_id",
-    "attempt_id",
-    "claim_id",
-    "instance_id",
-    "generation",
-    "record_id",
-    "space_id",
-    "routing_key",
-    "envelope",
-    "custody_confirmed",
-    "injection_state",
-    "runtime_receipt",
-    "failure_detail",
-    "next_runtime_try_at",
-];
+pub const MAX_RECOVERY_BATCH: usize = 100;
+const MAX_DETAIL_BYTES: usize = 4096;
+const APPLICATION_ID: i64 = 0x414A5350;
 
-pub const RECOVERABLE_INJECTION_STATES: [InjectionState; 4] = [
+pub const RECOVERABLE_INJECTION_STATES: [InjectionState; 3] = [
     InjectionState::Pending,
     InjectionState::InFlight,
     InjectionState::RetryableFailure,
-    InjectionState::RouteUnavailable,
 ];
 
-/// A store must fsync a complete item before the central custody commit and
-/// make every transition idempotent for the same attempt/binding.
-pub trait Store: Spool {
-    fn open(&self) -> CoreResult<()>;
-    fn close(&self) -> CoreResult<()>;
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Includes retained tombstones. Exhaustion requires operator action.
+    pub max_items: u64,
+    /// Serialized retained rows, not physical SQLite file size.
+    pub max_bytes: u64,
+    /// Free space that admissions must leave for transitions and SQLite journals.
+    pub min_free_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_items: 10_000,
+            max_bytes: 256 * 1024 * 1024,
+            min_free_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+struct Inner {
+    connection: Connection,
+    // Keep the lock until after the database connection has closed.
+    _lock: File,
+}
+
+pub struct SqliteStore {
+    inner: Mutex<Option<Inner>>,
+    directory: PathBuf,
+    limits: Limits,
+}
+
+fn unavailable(error: impl std::fmt::Display) -> CoreError {
+    CoreError::SpoolUnavailable(error.to_string())
+}
+
+fn terminal(state: InjectionState) -> bool {
+    matches!(
+        state,
+        InjectionState::Accepted
+            | InjectionState::RouteUnavailable
+            | InjectionState::TerminalFailure
+    )
+}
+
+fn time_key(time: SystemTime) -> CoreResult<i64> {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(unavailable)?
+        .as_nanos()
+        .try_into()
+        .map_err(unavailable)
 }
 
 pub fn is_recoverable(item: &SpoolItem, now: SystemTime) -> bool {
-    item.ready_for_injection()
+    !terminal(item.injection_state)
         && item.validate_binding().is_ok()
-        && item
-            .next_runtime_try_at
-            .map(|retry_at| retry_at <= now)
-            .unwrap_or(true)
+        && item.next_runtime_try_at.is_none_or(|retry| retry <= now)
 }
 
-/// Explicit placeholder for the future local transactional implementation.
-#[derive(Debug, Default)]
-pub struct NotImplementedStore;
-
-fn not_ready<T>() -> CoreResult<T> {
-    Err(CoreError::SpoolUnavailable(
-        "durable spool is not implemented".into(),
-    ))
-}
-
-impl Spool for NotImplementedStore {
-    fn put(&self, _item: &SpoolItem) -> CoreResult<()> {
-        not_ready()
+impl SqliteStore {
+    /// The parent directory must already exist and be private to the adapter.
+    /// A sidecar lock is deliberately never unlinked, avoiding lock-inode races.
+    pub fn open(path: impl AsRef<Path>, limits: Limits) -> CoreResult<Self> {
+        let path = path.as_ref();
+        let name = path
+            .file_name()
+            .ok_or_else(|| unavailable("missing database filename"))?;
+        let directory = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()
+            .map_err(unavailable)?;
+        let path = directory.join(name);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(unavailable("symlink database paths are not supported"));
+        }
+        let mut lock_name = name.to_os_string();
+        lock_name.push(".lock");
+        let lock_path = directory.join(lock_name);
+        if std::fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(unavailable("symlink lock paths are not supported"));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(lock_path).map_err(unavailable)?;
+        lock.try_lock_exclusive().map_err(unavailable)?;
+        let connection = Connection::open(&path).map_err(unavailable)?;
+        connection
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(unavailable)?;
+        let integrity: String = connection
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(unavailable)?;
+        if integrity != "ok" {
+            return Err(unavailable("spool integrity check failed"));
+        }
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(unavailable)?;
+        let application: i64 = connection
+            .query_row("PRAGMA application_id", [], |r| r.get(0))
+            .map_err(unavailable)?;
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(unavailable)?;
+        if !((version == 0 && application == 0 && tables == 0)
+            || (version == 1 && application == APPLICATION_ID))
+        {
+            return Err(unavailable("unsupported spool database"));
+        }
+        // DELETE + EXTRA syncs the rollback journal and its directory removal.
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA foreign_keys=ON;",
+            )
+            .map_err(unavailable)?;
+        if version == 0 {
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                 CREATE TABLE attempts (
+                    attempt_id TEXT PRIMARY KEY NOT NULL,
+                    fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
+                    item TEXT NOT NULL,
+                    bytes INTEGER NOT NULL CHECK(bytes>=0),
+                    terminal INTEGER NOT NULL CHECK(terminal IN (0,1)),
+                    retry_at INTEGER
+                 ) STRICT;
+                 CREATE INDEX recovery ON attempts(terminal, attempt_id);
+                 PRAGMA application_id=0x414A5350;
+                 PRAGMA user_version=1;
+                 COMMIT;",
+                )
+                .map_err(unavailable)?;
+        }
+        Ok(Self {
+            inner: Mutex::new(Some(Inner {
+                connection,
+                _lock: lock,
+            })),
+            directory,
+            limits,
+        })
     }
 
-    fn get(&self, _attempt_id: &str) -> CoreResult<SpoolItem> {
-        not_ready()
+    pub fn close(&self) -> CoreResult<()> {
+        self.inner.lock().map_err(unavailable)?.take();
+        Ok(())
+    }
+
+    fn with_connection<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        let mut guard = self.inner.lock().map_err(unavailable)?;
+        let inner = guard
+            .as_mut()
+            .ok_or_else(|| unavailable("spool is closed"))?;
+        f(&mut inner.connection)
+    }
+
+    /// Pre-claim admission check. The caller supplies the entire proposed batch's
+    /// maximum serialized bytes; put checks again. This does not reserve capacity.
+    pub fn check_capacity(&self, additional_items: u64, additional_bytes: u64) -> CoreResult<()> {
+        self.with_connection(|connection| {
+            self.capacity(connection, additional_items, additional_bytes)
+        })
+    }
+
+    fn capacity(&self, connection: &Connection, items: u64, bytes: u64) -> CoreResult<()> {
+        let (used_items, used_bytes): (i64, i64) = connection
+            .query_row(
+                "SELECT count(*), coalesce(sum(bytes),0) FROM attempts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(unavailable)?;
+        let used_items = u64::try_from(used_items).map_err(unavailable)?;
+        let used_bytes = u64::try_from(used_bytes).map_err(unavailable)?;
+        // Allow for page/index growth and rollback journal copies, not just JSON.
+        let disk_budget = bytes
+            .checked_mul(4)
+            .and_then(|n| {
+                items
+                    .checked_mul(16384)
+                    .and_then(|overhead| n.checked_add(overhead))
+            })
+            .and_then(|n| n.checked_add(self.limits.min_free_bytes))
+            .ok_or_else(|| unavailable("spool capacity overflow"))?;
+        if used_items
+            .checked_add(items)
+            .is_none_or(|n| n > self.limits.max_items)
+            || used_bytes
+                .checked_add(bytes)
+                .is_none_or(|n| n > self.limits.max_bytes)
+            || fs2::available_space(&self.directory).map_err(unavailable)? < disk_budget
+        {
+            return Err(unavailable("spool pressure: admission stopped"));
+        }
+        Ok(())
+    }
+
+    fn load(connection: &Connection, attempt_id: &str) -> CoreResult<SpoolItem> {
+        let data: String = connection
+            .query_row(
+                "SELECT item FROM attempts WHERE attempt_id=?1",
+                [attempt_id],
+                |r| r.get(0),
+            )
+            .map_err(unavailable)?;
+        let item: SpoolItem = serde_json::from_str(&data).map_err(unavailable)?;
+        item.validate_binding()?;
+        if item.attempt_id != attempt_id {
+            return Err(unavailable("corrupt attempt binding"));
+        }
+        Ok(item)
+    }
+
+    fn save(transaction: &Transaction<'_>, item: &SpoolItem) -> CoreResult<()> {
+        let data = serde_json::to_string(item).map_err(unavailable)?;
+        let retry = item.next_runtime_try_at.map(time_key).transpose()?;
+        transaction.execute(
+            "UPDATE attempts SET item=?2, bytes=?3, terminal=?4, retry_at=?5 WHERE attempt_id=?1",
+            params![item.attempt_id, data, data.len() as i64, terminal(item.injection_state), retry],
+        ).map_err(unavailable)?;
+        Ok(())
+    }
+
+    fn commit(transaction: Transaction<'_>) -> CoreResult<()> {
+        #[cfg(test)]
+        checkpoint("before");
+        transaction.commit().map_err(unavailable)?;
+        #[cfg(test)]
+        checkpoint("after");
+        Ok(())
+    }
+
+    fn update(
+        &self,
+        attempt_id: &str,
+        instance_id: &str,
+        generation: i64,
+        change: impl FnOnce(&mut SpoolItem) -> CoreResult<()>,
+    ) -> CoreResult<()> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(unavailable)?;
+            let mut item = Self::load(&transaction, attempt_id)?;
+            if item.instance_id != instance_id || item.generation != generation {
+                return Err(unavailable("conflicting installation or generation"));
+            }
+            change(&mut item)?;
+            Self::save(&transaction, &item)?;
+            Self::commit(transaction)
+        })
+    }
+
+    pub fn mark_retryable(
+        &self,
+        attempt_id: &str,
+        instance_id: &str,
+        generation: i64,
+        detail: &str,
+        next_try_at: SystemTime,
+    ) -> CoreResult<()> {
+        time_key(next_try_at)?;
+        self.fail(
+            attempt_id,
+            instance_id,
+            generation,
+            InjectionState::RetryableFailure,
+            detail,
+            Some(next_try_at),
+        )
+    }
+
+    fn fail(
+        &self,
+        attempt_id: &str,
+        instance_id: &str,
+        generation: i64,
+        state: InjectionState,
+        detail: &str,
+        retry: Option<SystemTime>,
+    ) -> CoreResult<()> {
+        if !matches!(
+            state,
+            InjectionState::RetryableFailure
+                | InjectionState::RouteUnavailable
+                | InjectionState::TerminalFailure
+        ) || detail.len() > MAX_DETAIL_BYTES
+        {
+            return Err(unavailable("invalid failure state or detail"));
+        }
+        self.update(attempt_id, instance_id, generation, |item| {
+            if !item.custody_confirmed {
+                return Err(CoreError::CustodyNotConfirmed);
+            }
+            if item.injection_state == state
+                && item.failure_detail == detail
+                && item.next_runtime_try_at == retry
+            {
+                return Ok(());
+            }
+            if terminal(item.injection_state) {
+                return Err(unavailable("attempt outcome is final"));
+            }
+            item.injection_state = state;
+            item.failure_detail = detail.into();
+            item.next_runtime_try_at = retry;
+            Ok(())
+        })
+    }
+
+    /// Explicit payload-retention decision after outcome reporting. Keep the
+    /// original fingerprint and all bindings so old puts cannot restore payload.
+    pub fn compact(&self, attempt_id: &str) -> CoreResult<()> {
+        let binding = self.get(attempt_id)?;
+        self.update(
+            attempt_id,
+            &binding.instance_id,
+            binding.generation,
+            |item| {
+                if !terminal(item.injection_state) {
+                    return Err(unavailable("cannot compact unfinished attempt"));
+                }
+                item.envelope.body.clear();
+                Ok(())
+            },
+        )
+    }
+
+    /// Keyset pagination includes unconfirmed custody work. Only confirmed rows
+    /// are eligible for injection; callers must still recheck central fencing.
+    pub fn recoverable_after(
+        &self,
+        now: SystemTime,
+        limit: usize,
+        after: Option<&str>,
+    ) -> CoreResult<Vec<SpoolItem>> {
+        if limit == 0 || limit > MAX_RECOVERY_BATCH {
+            return Err(unavailable("invalid recovery limit"));
+        }
+        let now_key = time_key(now)?;
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT attempt_id FROM attempts WHERE terminal=0 AND (?1 IS NULL OR attempt_id>?1)
+                 AND (retry_at IS NULL OR retry_at<=?2) ORDER BY attempt_id LIMIT ?3"
+            ).map_err(unavailable)?;
+            let ids = statement
+                .query_map(params![after, now_key, limit as i64], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(unavailable)?;
+            let mut result = Vec::new();
+            for id in ids {
+                let item = Self::load(connection, &id.map_err(unavailable)?)?;
+                if !is_recoverable(&item, now) {
+                    return Err(unavailable("corrupt recovery index"));
+                }
+                result.push(item);
+            }
+            Ok(result)
+        })
+    }
+}
+
+impl Spool for SqliteStore {
+    fn put(&self, item: &SpoolItem) -> CoreResult<()> {
+        item.validate_binding()?;
+        if item.attempt_id.is_empty()
+            || item.mailbox_item_id.is_empty()
+            || item.claim_id.is_empty()
+            || item.instance_id.is_empty()
+            || item.record_id.is_empty()
+            || item.space_id.is_empty()
+            || item.generation <= 0
+            || item.custody_confirmed
+            || item.injection_state != InjectionState::Pending
+            || !item.runtime_receipt.is_empty()
+            || !item.failure_detail.is_empty()
+            || item.next_runtime_try_at.is_some()
+        {
+            return Err(unavailable("put requires a complete new pending attempt"));
+        }
+        let data = serde_json::to_string(item).map_err(unavailable)?;
+        let fingerprint = Sha256::digest(data.as_bytes()).to_vec();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(unavailable)?;
+            let existing: Option<Vec<u8>> = transaction.query_row("SELECT fingerprint FROM attempts WHERE attempt_id=?1", [&item.attempt_id], |r| r.get(0)).optional().map_err(unavailable)?;
+            if let Some(existing) = existing {
+                return if existing == fingerprint { Ok(()) } else { Err(unavailable("conflicting attempt binding or payload")) };
+            }
+            self.capacity(&transaction, 1, data.len() as u64)?;
+            transaction.execute(
+                "INSERT INTO attempts(attempt_id,fingerprint,item,bytes,terminal,retry_at) VALUES(?1,?2,?3,?4,0,NULL)",
+                params![item.attempt_id, fingerprint, data, data.len() as i64]
+            ).map_err(unavailable)?;
+            Self::commit(transaction)
+        })
+    }
+
+    fn get(&self, attempt_id: &str) -> CoreResult<SpoolItem> {
+        self.with_connection(|connection| Self::load(connection, attempt_id))
+    }
+
+    fn reconcile_expired_claim(
+        &self,
+        expired: &CustodyResult,
+        replacement: &SpoolItem,
+    ) -> CoreResult<()> {
+        replacement.validate_binding()?;
+        if expired.claim_id.is_empty()
+            || replacement.claim_id.is_empty()
+            || expired.claim_id == replacement.claim_id
+            || expired.generation != replacement.generation
+            || expired
+                .items
+                .iter()
+                .filter(|result| {
+                    result.attempt_id == replacement.attempt_id
+                        || result.mailbox_item_id == replacement.mailbox_item_id
+                })
+                .count()
+                != 1
+            || !expired.items.iter().any(|result| {
+                result.attempt_id == replacement.attempt_id
+                    && result.mailbox_item_id == replacement.mailbox_item_id
+                    && result.result == CustodyResultState::LeaseExpired
+            })
+        {
+            return Err(unavailable("exact expired claim custody result required"));
+        }
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(unavailable)?;
+            let mut current = Self::load(&transaction, &replacement.attempt_id)?;
+            if current.custody_confirmed
+                || current.injection_state != InjectionState::Pending
+                || !current.runtime_receipt.is_empty()
+                || !current.failure_detail.is_empty()
+                || current.next_runtime_try_at.is_some()
+                || (current.claim_id != expired.claim_id
+                    && current.claim_id != replacement.claim_id)
+            {
+                return Err(unavailable("attempt cannot be rebound"));
+            }
+            let old_bytes = serde_json::to_vec(&current).map_err(unavailable)?.len();
+            current.claim_id.clone_from(&replacement.claim_id);
+            if current != *replacement {
+                return Err(unavailable("conflicting attempt binding or payload"));
+            }
+            let data = serde_json::to_vec(&current).map_err(unavailable)?;
+            self.capacity(&transaction, 0, data.len().saturating_sub(old_bytes) as u64)?;
+            Self::save(&transaction, &current)?;
+            transaction
+                .execute(
+                    "UPDATE attempts SET fingerprint=?2 WHERE attempt_id=?1",
+                    params![current.attempt_id, Sha256::digest(&data).to_vec()],
+                )
+                .map_err(unavailable)?;
+            Self::commit(transaction)
+        })
     }
 
     fn confirm_custody(
         &self,
-        _attempt_id: &str,
-        _claim_id: &str,
-        _instance_id: &str,
-        _generation: i64,
+        attempt_id: &str,
+        claim_id: &str,
+        instance_id: &str,
+        generation: i64,
     ) -> CoreResult<()> {
-        not_ready()
+        self.update(attempt_id, instance_id, generation, |item| {
+            if item.claim_id != claim_id {
+                return Err(unavailable("conflicting claim"));
+            }
+            item.custody_confirmed = true;
+            Ok(())
+        })
     }
 
     fn mark_injection_started(
         &self,
-        _attempt_id: &str,
-        _instance_id: &str,
-        _generation: i64,
+        attempt_id: &str,
+        instance_id: &str,
+        generation: i64,
     ) -> CoreResult<()> {
-        not_ready()
+        self.update(attempt_id, instance_id, generation, |item| {
+            if !item.custody_confirmed {
+                return Err(CoreError::CustodyNotConfirmed);
+            }
+            if terminal(item.injection_state) {
+                return Err(unavailable("attempt outcome is final"));
+            }
+            item.injection_state = InjectionState::InFlight;
+            item.next_runtime_try_at = None;
+            Ok(())
+        })
     }
 
     fn mark_injected(
         &self,
-        _attempt_id: &str,
-        _instance_id: &str,
-        _generation: i64,
-        _receipt: &str,
+        attempt_id: &str,
+        instance_id: &str,
+        generation: i64,
+        receipt: &str,
     ) -> CoreResult<()> {
-        not_ready()
+        if receipt.len() > MAX_DETAIL_BYTES {
+            return Err(unavailable("receipt too large"));
+        }
+        self.update(attempt_id, instance_id, generation, |item| {
+            if !item.custody_confirmed {
+                return Err(CoreError::CustodyNotConfirmed);
+            }
+            if item.injection_state == InjectionState::Accepted && item.runtime_receipt == receipt {
+                return Ok(());
+            }
+            if item.injection_state != InjectionState::InFlight {
+                return Err(unavailable("injection was not started"));
+            }
+            item.injection_state = InjectionState::Accepted;
+            item.runtime_receipt = receipt.into();
+            item.failure_detail.clear();
+            item.next_runtime_try_at = None;
+            Ok(())
+        })
     }
 
     fn mark_injection_failed(
         &self,
-        _attempt_id: &str,
-        _instance_id: &str,
-        _generation: i64,
-        _state: InjectionState,
-        _detail: &str,
+        attempt_id: &str,
+        instance_id: &str,
+        generation: i64,
+        state: InjectionState,
+        detail: &str,
     ) -> CoreResult<()> {
-        not_ready()
+        self.fail(attempt_id, instance_id, generation, state, detail, None)
     }
 
-    fn recoverable(&self, _now: SystemTime, _limit: usize) -> CoreResult<Vec<SpoolItem>> {
-        not_ready()
-    }
-}
-
-impl Store for NotImplementedStore {
-    fn open(&self) -> CoreResult<()> {
-        not_ready()
-    }
-
-    fn close(&self) -> CoreResult<()> {
-        not_ready()
+    fn recoverable(&self, now: SystemTime, limit: usize) -> CoreResult<Vec<SpoolItem>> {
+        self.recoverable_after(now, limit, None)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use journal_adapter_core::Envelope;
-
-    use super::*;
-
-    fn item(next_runtime_try_at: Option<SystemTime>) -> SpoolItem {
-        SpoolItem {
-            mailbox_item_id: "item-1".into(),
-            attempt_id: "attempt-1".into(),
-            claim_id: "claim-1".into(),
-            instance_id: "instance-1".into(),
-            generation: 1,
-            record_id: "record-1".into(),
-            space_id: "space".into(),
-            routing_key: Some("default".into()),
-            envelope: Envelope {
-                record_id: "record-1".into(),
-                mailbox_item_id: "item-1".into(),
-                attempt_id: "attempt-1".into(),
-                space_id: "space".into(),
-                from_principal: "source".into(),
-                source_run: None,
-                reply_to: None,
-                addressed_to: "destination".into(),
-                routing_key: Some("default".into()),
-                body: "body".into(),
-            },
-            custody_confirmed: true,
-            injection_state: InjectionState::RetryableFailure,
-            runtime_receipt: String::new(),
-            failure_detail: String::new(),
-            next_runtime_try_at,
+fn checkpoint(phase: &str) {
+    if std::env::var("SPOOL_CRASH_PHASE").is_ok_and(|value| value == phase) {
+        let path = PathBuf::from(std::env::var_os("SPOOL_CHILD_PATH").unwrap()).join("checkpoint");
+        File::create(path).unwrap().sync_all().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
-
-    #[test]
-    fn crash_recovery_contract_names_custody_and_attempt_state() {
-        assert!(REQUIRED_PERSISTED_FIELDS.contains(&"attempt_id"));
-        assert!(REQUIRED_PERSISTED_FIELDS.contains(&"custody_confirmed"));
-        assert!(REQUIRED_PERSISTED_FIELDS.contains(&"injection_state"));
-        assert!(REQUIRED_PERSISTED_FIELDS.contains(&"next_runtime_try_at"));
-        assert_eq!(RECOVERABLE_INJECTION_STATES.len(), 4);
-    }
-
-    #[test]
-    fn placeholder_never_claims_a_durable_store() {
-        assert!(NotImplementedStore.open().is_err());
-    }
-
-    #[test]
-    fn recovery_honors_the_persisted_retry_time() {
-        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
-        assert!(is_recoverable(&item(Some(now)), now));
-        assert!(!is_recoverable(
-            &item(Some(now + std::time::Duration::from_secs(1))),
-            now
-        ));
-    }
 }
+
+#[cfg(test)]
+mod tests;

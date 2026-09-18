@@ -50,6 +50,17 @@ pub trait Journal {
 pub trait Spool {
     fn put(&self, item: &SpoolItem) -> CoreResult<()>;
     fn get(&self, attempt_id: &str) -> CoreResult<SpoolItem>;
+    /// Rebind only an untouched, unconfirmed attempt after an authenticated
+    /// central LeaseExpired result for its exact old claim/item/attempt.
+    /// The caller must obtain replacement from a fresh claim under the same
+    /// credential, installation and generation. Timeouts and local clocks are
+    /// not evidence. Only claim_id may change; persistence is atomic with the
+    /// put fingerprint. Exact replay is allowed only while still unconfirmed.
+    fn reconcile_expired_claim(
+        &self,
+        expired: &CustodyResult,
+        replacement: &SpoolItem,
+    ) -> CoreResult<()>;
     fn confirm_custody(
         &self,
         attempt_id: &str,
@@ -232,7 +243,7 @@ impl EventRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InjectionState {
     Pending,
     InFlight,
@@ -242,7 +253,7 @@ pub enum InjectionState {
     TerminalFailure,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpoolItem {
     pub mailbox_item_id: String,
     pub attempt_id: String,
@@ -261,7 +272,7 @@ pub struct SpoolItem {
 }
 
 impl SpoolItem {
-    /// Accepted and terminal rows remain as deduplication tombstones and are
+    /// Accepted, route-unavailable, and terminal rows remain as tombstones and are
     /// never normal recovery candidates.
     pub fn ready_for_injection(&self) -> bool {
         self.custody_confirmed
@@ -270,7 +281,6 @@ impl SpoolItem {
                 InjectionState::Pending
                     | InjectionState::InFlight
                     | InjectionState::RetryableFailure
-                    | InjectionState::RouteUnavailable
             )
     }
 
@@ -419,7 +429,11 @@ mod tests {
         assert!(!spool_item.ready_for_injection());
         spool_item.custody_confirmed = true;
         assert!(spool_item.ready_for_injection());
-        for state in [InjectionState::Accepted, InjectionState::TerminalFailure] {
+        for state in [
+            InjectionState::Accepted,
+            InjectionState::RouteUnavailable,
+            InjectionState::TerminalFailure,
+        ] {
             spool_item.injection_state = state;
             assert!(!spool_item.ready_for_injection());
         }

@@ -1,0 +1,733 @@
+use super::*;
+use journal_adapter_core::Envelope;
+use std::{process::Command, time::Duration};
+
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "spool-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn open(&self) -> SqliteStore {
+        SqliteStore::open(self.0.join("spool.db"), Limits::default()).unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+fn item() -> SpoolItem {
+    SpoolItem {
+        mailbox_item_id: "item-1".into(),
+        attempt_id: "attempt-1".into(),
+        claim_id: "claim-1".into(),
+        instance_id: "instance-1".into(),
+        generation: 1,
+        record_id: "record-1".into(),
+        space_id: "space".into(),
+        routing_key: None,
+        envelope: Envelope {
+            record_id: "record-1".into(),
+            mailbox_item_id: "item-1".into(),
+            attempt_id: "attempt-1".into(),
+            space_id: "space".into(),
+            from_principal: "source".into(),
+            source_run: None,
+            reply_to: None,
+            addressed_to: "destination".into(),
+            routing_key: None,
+            body: "complete untrusted body".into(),
+        },
+        custody_confirmed: false,
+        injection_state: InjectionState::Pending,
+        runtime_receipt: String::new(),
+        failure_detail: String::new(),
+        next_runtime_try_at: None,
+    }
+}
+
+fn confirm(store: &SqliteStore) {
+    store
+        .confirm_custody("attempt-1", "claim-1", "instance-1", 1)
+        .unwrap();
+}
+
+fn start(store: &SqliteStore) {
+    store
+        .mark_injection_started("attempt-1", "instance-1", 1)
+        .unwrap();
+}
+
+fn expired() -> journal_adapter_core::CustodyResult {
+    use journal_adapter_core::{CustodyItemResult, CustodyResult, CustodyResultState};
+    CustodyResult {
+        claim_id: "claim-1".into(),
+        generation: 1,
+        items: vec![CustodyItemResult {
+            mailbox_item_id: "item-1".into(),
+            attempt_id: "attempt-1".into(),
+            result: CustodyResultState::LeaseExpired,
+        }],
+    }
+}
+
+fn reclaimed() -> SpoolItem {
+    let mut value = item();
+    value.claim_id = "claim-2".into();
+    value
+}
+
+#[test]
+fn expired_claim_reconciles_after_restart_before_custody() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    drop(store);
+    let store = fixture.open();
+    assert!(store.put(&reclaimed()).is_err());
+    store
+        .reconcile_expired_claim(&expired(), &reclaimed())
+        .unwrap();
+    store
+        .reconcile_expired_claim(&expired(), &reclaimed())
+        .unwrap();
+    store.put(&reclaimed()).unwrap();
+    assert!(store.put(&item()).is_err());
+    assert!(!store.get("attempt-1").unwrap().ready_for_injection());
+    assert!(
+        store
+            .confirm_custody("attempt-1", "claim-1", "instance-1", 1)
+            .is_err()
+    );
+    drop(store);
+    let store = fixture.open();
+    assert_eq!(store.get("attempt-1").unwrap(), reclaimed());
+    store
+        .confirm_custody("attempt-1", "claim-2", "instance-1", 1)
+        .unwrap();
+    assert!(store.get("attempt-1").unwrap().ready_for_injection());
+    assert!(
+        store
+            .reconcile_expired_claim(&expired(), &reclaimed())
+            .is_err()
+    );
+}
+
+#[test]
+fn reconciliation_rejects_changed_bindings_and_uncertain_custody() {
+    use journal_adapter_core::CustodyResultState;
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    for field in [
+        "instance",
+        "generation",
+        "body",
+        "recipient",
+        "mailbox",
+        "claim",
+    ] {
+        let mut replacement = reclaimed();
+        match field {
+            "instance" => replacement.instance_id.push('x'),
+            "generation" => replacement.generation += 1,
+            "body" => replacement.envelope.body.push('x'),
+            "recipient" => replacement.envelope.addressed_to.push('x'),
+            "mailbox" => {
+                replacement.mailbox_item_id.push('x');
+                replacement.envelope.mailbox_item_id.push('x');
+            }
+            _ => replacement.claim_id.clear(),
+        }
+        assert!(
+            store
+                .reconcile_expired_claim(&expired(), &replacement)
+                .is_err(),
+            "{field}"
+        );
+    }
+    for state in [
+        CustodyResultState::Committed,
+        CustodyResultState::AlreadyCommitted,
+        CustodyResultState::ClaimNotFound,
+        CustodyResultState::StaleGeneration,
+        CustodyResultState::AttemptMismatch,
+        CustodyResultState::SuppressedRevoked,
+    ] {
+        let mut result = expired();
+        result.items[0].result = state;
+        assert!(
+            store
+                .reconcile_expired_claim(&result, &reclaimed())
+                .is_err()
+        );
+    }
+    for field in ["claim", "generation", "attempt", "mailbox", "duplicate"] {
+        let mut result = expired();
+        match field {
+            "claim" => result.claim_id.push('x'),
+            "generation" => result.generation += 1,
+            "attempt" => result.items[0].attempt_id.push('x'),
+            "mailbox" => result.items[0].mailbox_item_id.push('x'),
+            _ => result.items.push(result.items[0].clone()),
+        }
+        assert!(
+            store
+                .reconcile_expired_claim(&result, &reclaimed())
+                .is_err(),
+            "{field}"
+        );
+    }
+    assert_eq!(store.get("attempt-1").unwrap(), item());
+    confirm(&store);
+    assert!(
+        store
+            .reconcile_expired_claim(&expired(), &reclaimed())
+            .is_err()
+    );
+    start(&store);
+    store
+        .mark_injected("attempt-1", "instance-1", 1, "receipt")
+        .unwrap();
+    assert!(
+        store
+            .reconcile_expired_claim(&expired(), &reclaimed())
+            .is_err()
+    );
+    store.compact("attempt-1").unwrap();
+    assert!(
+        store
+            .reconcile_expired_claim(&expired(), &reclaimed())
+            .is_err()
+    );
+}
+
+#[test]
+fn reconciliation_growth_is_bounded_and_sqlite_failure_rolls_back() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    drop(store);
+    let store = SqliteStore::open(
+        fixture.0.join("spool.db"),
+        Limits {
+            max_bytes: serde_json::to_vec(&item()).unwrap().len() as u64,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let mut larger = reclaimed();
+    larger.claim_id.push('x');
+    assert!(store.reconcile_expired_claim(&expired(), &larger).is_err());
+    assert_eq!(store.get("attempt-1").unwrap(), item());
+    drop(store);
+    let store = fixture.open();
+    store
+        .with_connection(|connection| {
+            connection
+                .execute_batch("PRAGMA max_page_count=4")
+                .map_err(unavailable)
+        })
+        .unwrap();
+    larger.claim_id = "x".repeat(100_000);
+    assert!(store.reconcile_expired_claim(&expired(), &larger).is_err());
+    assert_eq!(store.get("attempt-1").unwrap(), item());
+    store.put(&item()).unwrap();
+    store
+        .reconcile_expired_claim(&expired(), &reclaimed())
+        .unwrap();
+}
+
+#[test]
+fn complete_item_reopens_and_conflicting_bindings_fail() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    store.put(&item()).unwrap();
+    assert_eq!(store.get("attempt-1").unwrap(), item());
+    assert!(
+        store
+            .mark_injection_started("attempt-1", "instance-1", 1)
+            .is_err()
+    );
+    for field in ["claim", "instance", "generation", "body"] {
+        let mut conflict = item();
+        match field {
+            "claim" => conflict.claim_id.push('x'),
+            "instance" => conflict.instance_id.push('x'),
+            "generation" => conflict.generation += 1,
+            _ => conflict.envelope.body.push('x'),
+        }
+        assert!(store.put(&conflict).is_err());
+    }
+    assert!(
+        store
+            .confirm_custody("attempt-1", "wrong", "instance-1", 1)
+            .is_err()
+    );
+    assert!(
+        store
+            .confirm_custody("attempt-1", "claim-1", "instance-1", 2)
+            .is_err()
+    );
+    drop(store);
+    let store = fixture.open();
+    assert_eq!(store.get("attempt-1").unwrap(), item());
+    assert_eq!(
+        store.recoverable(SystemTime::now(), 1).unwrap(),
+        vec![item()]
+    );
+}
+
+#[test]
+fn lifecycle_retry_and_terminal_tombstones() {
+    for outcome in [
+        InjectionState::Accepted,
+        InjectionState::RouteUnavailable,
+        InjectionState::TerminalFailure,
+    ] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        store.put(&item()).unwrap();
+        confirm(&store);
+        confirm(&store);
+        start(&store);
+        start(&store);
+        let later = SystemTime::now() + Duration::from_secs(60);
+        store
+            .mark_retryable("attempt-1", "instance-1", 1, "busy", later)
+            .unwrap();
+        store
+            .mark_retryable("attempt-1", "instance-1", 1, "busy", later)
+            .unwrap();
+        assert!(store.recoverable(SystemTime::now(), 10).unwrap().is_empty());
+        assert_eq!(store.recoverable(later, 10).unwrap().len(), 1);
+        start(&store);
+        if outcome == InjectionState::Accepted {
+            store
+                .mark_injected("attempt-1", "instance-1", 1, "receipt")
+                .unwrap();
+            store
+                .mark_injected("attempt-1", "instance-1", 1, "receipt")
+                .unwrap();
+            assert!(
+                store
+                    .mark_injected("attempt-1", "instance-1", 1, "different")
+                    .is_err()
+            );
+        } else {
+            store
+                .mark_injection_failed("attempt-1", "instance-1", 1, outcome, "failure")
+                .unwrap();
+            store
+                .mark_injection_failed("attempt-1", "instance-1", 1, outcome, "failure")
+                .unwrap();
+        }
+        store.compact("attempt-1").unwrap();
+        store.compact("attempt-1").unwrap();
+        store.put(&item()).unwrap();
+        assert!(store.get("attempt-1").unwrap().envelope.body.is_empty());
+        assert!(
+            store
+                .mark_injection_started("attempt-1", "instance-1", 1)
+                .is_err()
+        );
+        assert!(
+            store
+                .mark_injection_failed(
+                    "attempt-1",
+                    "instance-1",
+                    1,
+                    InjectionState::RetryableFailure,
+                    "retry"
+                )
+                .is_err()
+        );
+        drop(store);
+        let store = fixture.open();
+        assert!(store.recoverable(SystemTime::now(), 10).unwrap().is_empty());
+        assert!(!store.get("attempt-1").unwrap().ready_for_injection());
+    }
+}
+
+#[test]
+fn pressure_and_bounded_recovery() {
+    let fixture = Fixture::new();
+    let store = SqliteStore::open(
+        fixture.0.join("spool.db"),
+        Limits {
+            max_items: 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    store.check_capacity(1, 1000).unwrap();
+    store.put(&item()).unwrap();
+    assert!(store.check_capacity(1, 1).is_err());
+    store.put(&item()).unwrap();
+    assert!(store.recoverable(SystemTime::now(), 0).is_err());
+    assert!(
+        store
+            .recoverable(SystemTime::now(), MAX_RECOVERY_BATCH + 1)
+            .is_err()
+    );
+    assert!(
+        store
+            .recoverable_after(SystemTime::now(), 1, Some("attempt-1"))
+            .unwrap()
+            .is_empty()
+    );
+    drop(store);
+    for limits in [
+        Limits {
+            max_bytes: 1,
+            ..Limits::default()
+        },
+        Limits {
+            min_free_bytes: fs2::total_space(&fixture.0).unwrap(),
+            ..Limits::default()
+        },
+    ] {
+        let store = SqliteStore::open(fixture.0.join("spool.db"), limits).unwrap();
+        assert!(store.check_capacity(1, 1000).is_err());
+    }
+}
+
+#[test]
+fn corrupt_database_is_rejected() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("spool.db"), b"not a database").unwrap();
+    assert!(SqliteStore::open(fixture.0.join("spool.db"), Limits::default()).is_err());
+}
+
+#[test]
+fn exact_byte_limits_and_invalid_inputs() {
+    let fixture = Fixture::new();
+    let mut value = item();
+    value.envelope.body = "é".repeat(200);
+    let bytes = serde_json::to_vec(&value).unwrap().len() as u64;
+    let path = fixture.0.join("spool.db");
+    let store = SqliteStore::open(
+        &path,
+        Limits {
+            max_bytes: bytes - 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert!(store.put(&value).is_err());
+    assert!(store.get(&value.attempt_id).is_err());
+    drop(store);
+    let store = SqliteStore::open(
+        &path,
+        Limits {
+            max_bytes: bytes,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    store.put(&value).unwrap();
+    let mut invalid = item();
+    invalid.envelope.attempt_id = "other".into();
+    assert!(store.put(&invalid).is_err());
+    invalid = item();
+    invalid.custody_confirmed = true;
+    assert!(store.put(&invalid).is_err());
+    confirm(&store);
+    assert!(store.compact("attempt-1").is_err());
+    assert!(
+        store
+            .mark_injected("attempt-1", "instance-1", 1, "receipt")
+            .is_err()
+    );
+    start(&store);
+    assert!(
+        store
+            .mark_injected("attempt-1", "other", 1, "receipt")
+            .is_err()
+    );
+    assert!(
+        store
+            .mark_injection_failed(
+                "attempt-1",
+                "instance-1",
+                1,
+                InjectionState::Accepted,
+                "bad"
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .mark_injection_failed(
+                "attempt-1",
+                "instance-1",
+                1,
+                InjectionState::RetryableFailure,
+                &"é".repeat(2049)
+            )
+            .is_err()
+    );
+    store
+        .mark_injection_failed(
+            "attempt-1",
+            "instance-1",
+            1,
+            InjectionState::RetryableFailure,
+            &"é".repeat(2048),
+        )
+        .unwrap();
+    store.close().unwrap();
+    store.close().unwrap();
+    assert!(store.get("attempt-1").is_err());
+    drop(store);
+    fixture.open();
+}
+
+#[test]
+fn sqlite_full_rolls_back_put_and_transition() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store
+        .with_connection(|connection| {
+            connection
+                .execute_batch("PRAGMA max_page_count=4")
+                .map_err(unavailable)
+        })
+        .unwrap();
+    let mut huge = item();
+    huge.envelope.body = "x".repeat(100_000);
+    assert!(store.put(&huge).is_err());
+    assert!(store.get("attempt-1").is_err());
+    store.put(&item()).unwrap();
+    confirm(&store);
+    start(&store);
+    let before = store.get("attempt-1").unwrap();
+    assert!(
+        store
+            .mark_injected("attempt-1", "instance-1", 1, &"r".repeat(4096))
+            .is_err()
+    );
+    assert_eq!(store.get("attempt-1").unwrap(), before);
+    drop(store);
+    assert_eq!(fixture.open().get("attempt-1").unwrap(), before);
+}
+
+#[test]
+fn recovery_keyset_does_not_starve_unconfirmed_rows() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    for number in 0..5 {
+        let mut value = item();
+        value.attempt_id = format!("attempt-{number}");
+        value.envelope.attempt_id = value.attempt_id.clone();
+        store.put(&value).unwrap();
+    }
+    let first = store.recoverable(SystemTime::now(), 2).unwrap();
+    let second = store
+        .recoverable_after(SystemTime::now(), 2, Some(&first[1].attempt_id))
+        .unwrap();
+    let last = store
+        .recoverable_after(SystemTime::now(), 2, Some(&second[1].attempt_id))
+        .unwrap();
+    assert_eq!(first[0].attempt_id, "attempt-0");
+    assert_eq!(second[0].attempt_id, "attempt-2");
+    assert_eq!(last.len(), 1);
+    assert_eq!(last[0].attempt_id, "attempt-4");
+    assert!(first.iter().all(|row| !row.ready_for_injection()));
+}
+
+#[test]
+fn malformed_rows_and_foreign_schema_fail_closed() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    store
+        .with_connection(|connection| {
+            connection
+                .execute("UPDATE attempts SET item='{}'", [])
+                .map_err(unavailable)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(store.get("attempt-1").is_err());
+    assert!(store.recoverable(SystemTime::now(), 1).is_err());
+    drop(store);
+    let connection = Connection::open(fixture.0.join("spool.db")).unwrap();
+    connection.execute_batch("PRAGMA user_version=2").unwrap();
+    drop(connection);
+    assert!(SqliteStore::open(fixture.0.join("spool.db"), Limits::default()).is_err());
+}
+
+#[test]
+fn crash_child() {
+    let Ok(path) = std::env::var("SPOOL_CHILD_PATH") else {
+        return;
+    };
+    let operation = std::env::var("SPOOL_CHILD_OPERATION").unwrap();
+    if operation == "lock" {
+        assert!(SqliteStore::open(Path::new(&path).join("spool.db"), Limits::default()).is_err());
+        return;
+    }
+    let store = SqliteStore::open(Path::new(&path).join("spool.db"), Limits::default()).unwrap();
+    match operation.as_str() {
+        "reconcile" => store
+            .reconcile_expired_claim(&expired(), &reclaimed())
+            .unwrap(),
+        "put" => store.put(&item()).unwrap(),
+        "custody" => confirm(&store),
+        "start" => start(&store),
+        "accepted" => store
+            .mark_injected("attempt-1", "instance-1", 1, "receipt")
+            .unwrap(),
+        "retry" => store
+            .mark_retryable(
+                "attempt-1",
+                "instance-1",
+                1,
+                "busy",
+                SystemTime::UNIX_EPOCH + Duration::from_secs(42),
+            )
+            .unwrap(),
+        "route" => store
+            .mark_injection_failed(
+                "attempt-1",
+                "instance-1",
+                1,
+                InjectionState::RouteUnavailable,
+                "missing",
+            )
+            .unwrap(),
+        "terminal" => store
+            .mark_injection_failed(
+                "attempt-1",
+                "instance-1",
+                1,
+                InjectionState::TerminalFailure,
+                "failed",
+            )
+            .unwrap(),
+        "compact" => store.compact("attempt-1").unwrap(),
+        _ => panic!("unknown operation"),
+    }
+}
+
+fn child(fixture: &Fixture, operation: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "tests::crash_child", "--nocapture"])
+        .env("SPOOL_CHILD_PATH", &fixture.0)
+        .env("SPOOL_CHILD_OPERATION", operation);
+    command
+}
+
+#[test]
+fn process_lock_is_exclusive_and_released() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    assert!(child(&fixture, "lock").status().unwrap().success());
+    drop(store);
+    assert!(child(&fixture, "put").status().unwrap().success());
+}
+
+#[test]
+fn kill_before_and_after_every_commit() {
+    for operation in [
+        "put",
+        "reconcile",
+        "custody",
+        "start",
+        "accepted",
+        "retry",
+        "route",
+        "terminal",
+        "compact",
+    ] {
+        for phase in ["before", "after"] {
+            let fixture = Fixture::new();
+            let store = fixture.open();
+            if operation != "put" {
+                store.put(&item()).unwrap();
+            }
+            if !matches!(operation, "put" | "reconcile" | "custody") {
+                confirm(&store);
+            }
+            if !matches!(operation, "put" | "reconcile" | "custody" | "start") {
+                start(&store);
+            }
+            if operation == "compact" {
+                store
+                    .mark_injected("attempt-1", "instance-1", 1, "receipt")
+                    .unwrap();
+            }
+            let before = store.get("attempt-1").ok();
+            drop(store);
+            let signal = fixture.0.join("checkpoint");
+            let mut process = child(&fixture, operation)
+                .env("SPOOL_CRASH_PHASE", phase)
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !signal.exists() {
+                assert!(
+                    process.try_wait().unwrap().is_none(),
+                    "child exited before checkpoint"
+                );
+                if std::time::Instant::now() > deadline {
+                    process.kill().unwrap();
+                    process.wait().unwrap();
+                    panic!("checkpoint timed out");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            process.kill().unwrap();
+            process.wait().unwrap();
+            let store = fixture.open();
+            let after = store.get("attempt-1").ok();
+            if phase == "before" {
+                assert_eq!(after, before, "{operation}");
+                if operation == "reconcile" {
+                    store.put(&item()).unwrap();
+                    assert!(store.put(&reclaimed()).is_err());
+                }
+            } else {
+                let saved = after.unwrap();
+                match operation {
+                    "reconcile" => {
+                        assert_eq!(saved, reclaimed());
+                        store.put(&reclaimed()).unwrap();
+                        assert!(store.put(&item()).is_err());
+                    }
+                    "put" => assert_eq!(saved, item()),
+                    "custody" => assert!(saved.custody_confirmed),
+                    "start" => assert_eq!(saved.injection_state, InjectionState::InFlight),
+                    "accepted" => assert_eq!(saved.runtime_receipt, "receipt"),
+                    "retry" => assert_eq!(
+                        saved.next_runtime_try_at,
+                        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(42))
+                    ),
+                    "route" => assert_eq!(saved.injection_state, InjectionState::RouteUnavailable),
+                    "terminal" => {
+                        assert_eq!(saved.injection_state, InjectionState::TerminalFailure)
+                    }
+                    "compact" => assert!(saved.envelope.body.is_empty()),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}

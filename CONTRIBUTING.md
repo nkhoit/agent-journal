@@ -31,6 +31,12 @@ telemetry, status, and requeue CLI/API verticals, including lost responses,
 service restart, same-attempt expiry, and retryable telemetry recovery.
 Both are part of `make check`.
 
+The S9 local spool uses the existing pinned `rusqlite`, `serde_json`, and `sha2`
+dependencies, plus pinned `fs2` 0.4.3 for cross-platform exclusive process locking
+and filesystem free-space checks. `cargo test --locked -p journal-adapter-spool`
+runs real-file recovery, child-process termination at durable boundaries, lock
+contention, corruption, and pressure/full-database rollback tests without a runtime.
+
 ## Change expectations
 
 - Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.

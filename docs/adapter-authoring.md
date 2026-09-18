@@ -21,7 +21,7 @@ Implement the shared ports in `crates/journal-adapter-core` and the durable cont
 9. deduplicate ordinary retries by `attempt_id` and retain `mailbox_item_id` and `record_id`;
 10. recheck registration/fencing before every new runtime injection;
 11. resolve only configured `(space, routing_key)` keys to private local targets, then pass the resolved `Route` together with the trusted `Envelope` to `Runtime::inject`;
-12. hold `route-unavailable` items for explicit operator action instead of silently using the default;
+12. retain `route-unavailable` as final for that attempt; fixing a route requires explicit central requeue rather than resuming the old attempt;
 13. render trusted envelope metadata separately from the untrusted body;
 14. report bounded non-secret runtime telemetry only after exact host acceptance; detail is compact serialized JSON of at most 4,096 UTF-8 bytes;
 15. use a separate principal-client credential for optional correlated replies;
@@ -31,9 +31,62 @@ Implement the shared ports in `crates/journal-adapter-core` and the durable cont
 
 Enrollment credentials are separate principal-client and delivery-adapter secrets. Persist each atomically in mode-`0600` storage without printing it. Lost enrollment responses or failed credential writes require protected administrator recovery that revokes both credential lineages, followed by a fresh ticket for the same installation. Never replay a consumed ticket or use recovery to claim another installation's registration.
 
-A minimal durable spool has `inbound_attempts`, `route_bindings`, and `adapter_meta`. Each inbound row persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `recoverable` returns unfinished rows after restart; accepted and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
+A durable spool persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `recoverable` returns unfinished rows after restart; accepted, route-unavailable, and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
 
-`journal-adapter-spool` currently exposes this contract and a `NotImplementedStore`; it does not claim durable storage. The future implementation must fsync the full row before host-custody commit and prove recovery with crash tests.
+`journal-adapter-spool::SqliteStore::open(path, limits)` implements local schema
+version 1 with SQLite `journal_mode=DELETE` and `synchronous=EXTRA`. Use one fixed
+database path in an existing private directory on a machine-local filesystem;
+network filesystems and hard-link aliases are unsupported. Symlink database and
+lock paths are rejected. The persistent `.lock` sidecar is exclusively locked
+until close/drop, including across process termination. Never unlink it while
+an adapter may be running. Directory ownership/permissions (or Windows ACLs)
+must prevent other users from replacing database or lock files.
+
+Before claiming, call `check_capacity` with the proposed batch's maximum item
+count and serialized byte size. This is an admission check, not a reservation;
+`put` repeats it atomically with insertion. Limits include retained tombstones.
+The disk check reserves four times incoming bytes plus 16 KiB per incoming row,
+in addition to the configured free-space reserve (64 MiB by default). Logical
+limits stop new puts, not custody/result persistence. Other processes can still
+consume disk after a check; SQLite errors roll back and must stop the adapter,
+never be treated as custody. The byte cap measures retained serialized rows,
+not database file size. Compaction frees reusable SQLite pages, not necessarily
+filesystem bytes. Exhausted tombstone capacity needs operator sizing, not deletion
+of deduplication history.
+
+Only fresh pending, unconfirmed attempts may be put. Exact original puts remain
+idempotent after transitions and compaction through a retained SHA-256 fingerprint.
+If the process dies after `put` but before central custody, expiry may return the
+same attempt under a new claim. Do not overwrite it with `put`. Retry the exact
+old custody request through the authenticated central client first. Only an
+exact `lease-expired` item result permits `reconcile_expired_claim(result, replacement)`;
+timeouts, local lease calculations, missing claims, and stale generations do not.
+Obtain the replacement from a fresh claim using the same credential, installation,
+and generation. The spool checks the result's claim/generation/item/attempt and
+requires every replacement field except `claim_id` to match the pending,
+unconfirmed row. Confirmed, in-flight, completed, and compacted rows cannot rebind.
+Reconciliation atomically updates the row, byte accounting, and put fingerprint;
+old puts then fail, and exact new puts/reconciliation retries are idempotent while
+unconfirmed. Growth remains subject to admission limits. It does not confirm
+custody: commit the new claim centrally and persist its confirmation before injection.
+The caller is responsible for authenticated result provenance and fresh-claim
+validation; fetching results and coordinating these steps remain S10, not spool I/O.
+`mark_retryable` atomically stores failure detail and next retry time; the shared
+port's `mark_injection_failed` retryable variant has no delay. Receipt and failure
+strings are capped at 4,096 UTF-8 bytes. `recoverable_after` offers keyset pagination
+over 1–100 unfinished rows including pending custody; injection still requires
+`ready_for_injection()` and an external registration/fencing recheck. In-flight
+recovery may duplicate a runtime turn, never imply exactly-once delivery.
+
+Call `compact` only after reporting a final outcome and deciding its body retention
+period is over. It drops the body but retains IDs, claim/installation/generation,
+metadata, custody, outcome and receipt/detail. A tombstone returned by `get` is not
+a complete injectable envelope. Unknown schema versions and malformed databases
+fail closed; never delete or recreate a spool to recover accepted custody. This
+first local schema has no upgrade/rollback conversion. Back up while the owner is
+stopped and restore only with compatible software and central fencing reconciliation.
+Route configuration, credential persistence, and orchestration remain outside this
+store's schema and belong to the S10 adapter composition.
 
 ## Configuration shape
 
@@ -47,7 +100,8 @@ replayed: another claim conflicts until its lease expires. Re-registration with 
 same valid installation credential keeps the generation; replacement requires protected
 administration and fresh enrollment. See the [claim protocol](protocol.md#central-mailbox-claims).
 S8 custody commits, post-custody telemetry, status, and protected requeue are
-available through typed clients and CLIs. Local durable spooling remains S9.
+available through typed clients and CLIs. S9 local durable spooling is implemented;
+connecting it to this sequence remains S10.
 Central commit is an assertion of existing local durability, not proof that a
 CLI user has spooled the payload. Retry the exact claim/item/attempt after a lost
 commit response. Retryable runtime failures may later report acceptance on the
