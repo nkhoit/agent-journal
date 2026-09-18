@@ -472,10 +472,15 @@ async fn closed_recovery_prevents_shared_viewer_startup() {
         .unwrap();
     db.recovery_audit().unwrap().close().unwrap();
     drop(db);
-    assert!(matches!(
-        Server::bind(configuration).await,
-        Err(ServerError::Database(StorageError::RecoveryClosed(_)))
-    ));
+    let result = Server::bind(configuration).await;
+    let unexpected_error = result.as_ref().err();
+    assert!(
+        matches!(
+            &result,
+            Err(ServerError::Database(StorageError::RecoveryClosed(_)))
+        ),
+        "unexpected server bind error: {unexpected_error:?}"
+    );
     assert!(!temporary.path("admin.sock").exists());
 }
 

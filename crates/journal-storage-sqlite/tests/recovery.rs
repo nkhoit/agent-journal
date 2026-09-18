@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use journal_storage_sqlite::Database;
+use journal_storage_sqlite::{ConnectionFactory, Database, StorageError};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -15,6 +15,11 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         Self(path)
     }
 
@@ -163,4 +168,172 @@ fn backup_under_writes_has_consistent_heads_and_hashes() {
             .unwrap(),
         expected
     );
+}
+
+#[test]
+fn closed_recovery_rejects_every_exported_writer_route_without_mutation() {
+    fn assert_closed(
+        label: &str,
+        attempt: impl FnOnce(&Database, &std::path::Path) -> Result<(), StorageError>,
+    ) {
+        let fixture = Fixture::new();
+        let central = fixture.0.join("central.db");
+        let audit = fixture.0.join("audit.db");
+        let database = Database::open_protected(&central, &audit).unwrap();
+        database
+            .with_transaction(|transaction| {
+                transaction.execute(
+                    "INSERT INTO principals(id,display_name,created_at) VALUES ('before','Before','2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok::<(), StorageError>(())
+            })
+            .unwrap();
+        let before = Database::open(&central)
+            .unwrap()
+            .connect_read_only()
+            .unwrap()
+            .query_row("SELECT count(*) FROM principals", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        database.recovery_audit().unwrap().close().unwrap();
+
+        assert!(
+            attempt(&database, &central).is_err(),
+            "{label} must fail closed"
+        );
+
+        let after = Database::open(&central)
+            .unwrap()
+            .connect_read_only()
+            .unwrap()
+            .query_row("SELECT count(*) FROM principals", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(after, before, "{label} changed protected data");
+    }
+
+    assert_closed("Database::connect", |database, _| {
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('connect','Connect','2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    });
+    assert_closed("Database::connection_factory", |database, _| {
+        let connection = database.connection_factory().connect()?;
+        connection.execute(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('factory','Factory','2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    });
+    assert_closed("ConnectionFactory::new", |_, central| {
+        let connection = ConnectionFactory::new(central).connect()?;
+        connection.execute(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('new-factory','New Factory','2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    });
+    assert_closed("Database::with_transaction", |database, _| {
+        database.with_transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO principals(id,display_name,created_at) VALUES ('transaction','Transaction','2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+    });
+    assert_closed("Database::with_transaction_for", |database, _| {
+        database.with_transaction_for(|transaction| {
+            transaction.execute(
+                "INSERT INTO principals(id,display_name,created_at) VALUES ('transaction-for','Transaction For','2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+    });
+    assert_closed("Database::open handle", |_, central| {
+        let reopened = Database::open(central)?;
+        reopened.with_transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO principals(id,display_name,created_at) VALUES ('reopened','Reopened','2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+    });
+}
+
+#[test]
+fn protected_recovery_rejects_unguarded_writer_routes_while_open() {
+    fn assert_rejected(
+        label: &str,
+        attempt: impl FnOnce(&Database, &std::path::Path) -> Result<(), StorageError>,
+    ) {
+        let fixture = Fixture::new();
+        let central = fixture.0.join("central.db");
+        let audit = fixture.0.join("audit.db");
+        let database = Database::open_protected(&central, &audit).unwrap();
+        database
+            .with_transaction(|transaction| {
+                transaction.execute(
+                    "INSERT INTO principals(id,display_name,created_at) VALUES ('before','Before','2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok::<(), StorageError>(())
+            })
+            .unwrap();
+
+        assert!(
+            attempt(&database, &central).is_err(),
+            "{label} must require the audited transaction wrapper"
+        );
+        let count: i64 = Database::open(&central)
+            .unwrap()
+            .connect_read_only()
+            .unwrap()
+            .query_row("SELECT count(*) FROM principals", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "{label} changed protected data");
+    }
+
+    assert_rejected("Database::connect", |database, _| {
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('connect','Connect','2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    });
+    assert_rejected("Database::connection_factory", |database, _| {
+        let connection = database.connection_factory().connect()?;
+        connection.execute(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('factory','Factory','2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    });
+    assert_rejected("ConnectionFactory::new", |_, central| {
+        let connection = ConnectionFactory::new(central).connect()?;
+        connection.execute(
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('new-factory','New Factory','2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    });
+    assert_rejected("Database::open handle", |_, central| {
+        let reopened = Database::open(central)?;
+        reopened.with_transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO principals(id,display_name,created_at) VALUES ('reopened','Reopened','2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+    });
 }

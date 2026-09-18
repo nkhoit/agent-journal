@@ -276,6 +276,8 @@ EXPECTED_ADAPTER_CASES = {
     "late-telemetry-after-requeue",
     "partial-custody-and-expired-replay",
     "duplicate-runtime-send",
+    "oversized-runtime-success",
+    "ambiguous-runtime-error",
     "revocation",
 }
 EXPECTED_ADAPTER_OPERATIONS = {

@@ -22,7 +22,7 @@ fn protected_reads_wait_for_writers_but_reject_abandoned_intents() {
     ];
     for read in readers {
         let guard = audit.lock().unwrap();
-        let mut connection = database.connect().unwrap();
+        let mut connection = database.connect_unchecked().unwrap();
         let transaction = connection.transaction().unwrap();
         let revision = audit.prepare(&transaction).unwrap();
         let reader_db = database.clone();
@@ -55,7 +55,7 @@ fn protected_reads_wait_for_writers_but_reject_abandoned_intents() {
         .backup_to(directory.join("second-backup.db"))
         .unwrap();
     let guard = audit.lock().unwrap();
-    let mut connection = database.connect().unwrap();
+    let mut connection = database.connect_unchecked().unwrap();
     let transaction = connection.transaction().unwrap();
     audit.prepare(&transaction).unwrap();
     transaction.rollback().unwrap();

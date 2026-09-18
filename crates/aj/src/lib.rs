@@ -3,11 +3,40 @@ use journal_client::{
 };
 use std::{io::Write, path::Path};
 
+const USAGE: &str = "Usage: aj COMMAND [OPTIONS]
+
+Commands:
+  me --endpoint URL --credential-file PATH
+  spaces --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
+  post --endpoint URL --credential-file PATH --space SPACE --idempotency-key KEY --input PATH|-
+  get --endpoint URL --credential-file PATH --record RECORD_ID
+  list --endpoint URL --credential-file PATH --space SPACE [filters]
+  search --endpoint URL --credential-file PATH --space SPACE --q QUERY [filters]
+  thread --endpoint URL --credential-file PATH --record RECORD_ID [--cursor CURSOR] [--limit N]
+  adapter-register --endpoint URL --credential-file PATH --instance ID
+  adapter-heartbeat --endpoint URL --credential-file PATH --instance ID --generation N
+  mailbox-claim --endpoint URL --credential-file PATH --instance ID --generation N --limit N
+  mailbox-status --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
+  custody-commit --endpoint URL --credential-file PATH --claim ID --input PATH|-
+  delivery-event --endpoint URL --credential-file PATH --item ID --input PATH|-
+  delivery-status --endpoint URL --credential-file PATH --record RECORD_ID [filters]
+  enroll --endpoint URL --ticket-file PATH --instance-id ID --principal-file PATH --delivery-file PATH
+
+Journal command responses are compact JSON on stdout; enrollment writes
+protected files and emits no secret-bearing output. Use `aj --help` for this summary.";
+
 pub fn run(args: &[String], mut error: impl Write) -> i32 {
     run_with_output(args, std::io::stdout(), &mut error)
 }
 
 pub fn run_with_output(args: &[String], mut output: impl Write, mut error: impl Write) -> i32 {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        let _ = writeln!(output, "{USAGE}");
+        return 0;
+    }
     let result = if args.first().is_some_and(|s| s == "enroll") {
         execute(args, &mut error)
     } else {
@@ -223,6 +252,23 @@ fn execute(args: &[String], error: &mut impl Write) -> Result<(), &'static str> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_is_local_and_describes_the_executable_surface() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        assert_eq!(
+            run_with_output(&["--help".into()], &mut output, &mut errors),
+            0
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Usage: aj COMMAND [OPTIONS]")
+        );
+        assert!(errors.is_empty());
+    }
+
     #[test]
     fn usage_does_not_echo_arguments() {
         let mut errors = Vec::new();

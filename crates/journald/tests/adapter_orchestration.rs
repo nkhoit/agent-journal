@@ -6,7 +6,7 @@ use journal_service::BootstrapService;
 use journal_storage_sqlite::Database;
 use std::{
     cell::{Cell, RefCell},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime},
 };
@@ -110,7 +110,7 @@ impl Clock for TestClock {
 
 struct LostResponses<'a> {
     inner: DeliveryJournal,
-    fixture: &'a Fixture,
+    revoke: Box<dyn Fn() + 'a>,
     commits: RefCell<Vec<CustodyRequest>>,
     events: RefCell<Vec<EventRequest>>,
     heartbeats: Cell<usize>,
@@ -124,10 +124,7 @@ impl Journal for LostResponses<'_> {
         let count = self.heartbeats.get() + 1;
         self.heartbeats.set(count);
         if count == self.revoke_at.get() {
-            self.fixture
-                .service
-                .revoke(&self.fixture.delivery_id, None)
-                .unwrap();
+            (self.revoke)();
         }
         self.inner.heartbeat(request)
     }
@@ -152,7 +149,33 @@ impl Journal for LostResponses<'_> {
     }
 }
 
-fn exercise(f: &Fixture, endpoint: &str) {
+#[cfg(unix)]
+fn revoke_via_admin(socket: &Path, credential_id: &str) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let body = serde_json::to_vec(&wire::CredentialRevokeRequest {
+        credential_id: credential_id.to_owned(),
+        reason: None,
+    })
+    .unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    write!(
+        stream,
+        "POST /v1/admin/credentials/revoke HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .unwrap();
+    stream.write_all(&body).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 204 "),
+        "admin revoke failed: {response}"
+    );
+}
+
+fn exercise<'a>(f: &'a Fixture, endpoint: &str, revoke: impl Fn() + 'a) {
     let client = Client::new(HttpTransport::new(endpoint).unwrap());
     let input = wire::AppendRecordRequest {
         kind: "note".into(),
@@ -175,7 +198,7 @@ fn exercise(f: &Fixture, endpoint: &str) {
             Client::new(HttpTransport::new(endpoint).unwrap()),
             f.delivery.clone(),
         ),
-        fixture: f,
+        revoke: Box::new(revoke),
         commits: RefCell::new(vec![]),
         events: RefCell::new(vec![]),
         heartbeats: Cell::new(0),
@@ -262,7 +285,11 @@ fn exercise(f: &Fixture, endpoint: &str) {
 #[test]
 fn real_http_client_spool_runtime_and_revocation() {
     let f = Fixture::new();
-    with_server(&f, |endpoint| exercise(&f, endpoint));
+    with_server(&f, |endpoint| {
+        exercise(&f, endpoint, || {
+            f.service.revoke(&f.delivery_id, None).unwrap();
+        })
+    });
 }
 
 fn with_server(f: &Fixture, exercise: impl FnOnce(&str)) {
@@ -499,7 +526,10 @@ fn temporary_journald_process_with_real_spool() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exercise(&f, &format!("http://{address}"))
+        let credential_id = f.delivery_id.clone();
+        exercise(&f, &format!("http://{address}"), || {
+            revoke_via_admin(&socket, &credential_id);
+        });
     }));
     child.kill().unwrap();
     child.wait().unwrap();

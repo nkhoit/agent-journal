@@ -25,7 +25,7 @@ SPEC.loader.exec_module(runner)
 class RunnerTests(unittest.TestCase):
     def test_checked_in_cases_are_exhaustive(self):
         cases = runner.load_cases(runner.ROOT / "conformance/adapter/scenarios.yaml")
-        self.assertEqual(len(cases), 17)
+        self.assertEqual(len(cases), 19)
         self.assertEqual({case["id"] for case in cases}, set(runner.SCENARIOS))
 
     def test_unknown_missing_duplicate_and_changed_contract_fail_closed(self):

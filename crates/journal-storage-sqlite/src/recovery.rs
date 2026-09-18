@@ -36,7 +36,7 @@ impl Database {
     pub(crate) fn recovery_verification_unguarded(
         &self,
     ) -> Result<RecoveryVerification, StorageError> {
-        let mut connection = self.connect()?;
+        let mut connection = self.connect_unchecked()?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO records_fts(records_fts) VALUES('integrity-check')",

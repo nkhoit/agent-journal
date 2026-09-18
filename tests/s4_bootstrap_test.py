@@ -374,7 +374,8 @@ class BootstrapTest(unittest.TestCase):
         self.assertTrue(any(event.get("category") == "sqlite" and
                             event.get("sqlite_code") == 5 and
                             event.get("outcome") == "not_confirmed" and
-                            event.get("request_id") for event in failures))
+                            event.get("request_id") for event in failures),
+                        failures)
 
 
 if __name__ == "__main__":

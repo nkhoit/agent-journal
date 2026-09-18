@@ -262,8 +262,12 @@ fn log_bootstrap_outcome(
                 BootstrapError::CorruptJournal => "persisted_data",
                 BootstrapError::NotFound => "not_found",
                 BootstrapError::Conflict => "conflict",
+                BootstrapError::Storage(
+                    journal_storage_sqlite::StorageError::Sqlite(_)
+                    | journal_storage_sqlite::StorageError::Migration { .. },
+                )
+                | BootstrapError::Sqlite(_) => "sqlite",
                 BootstrapError::Storage(_) => "storage",
-                BootstrapError::Sqlite(_) => "sqlite",
                 BootstrapError::Random => "random_source",
                 BootstrapError::Clock => "clock",
                 BootstrapError::Injected => "injected_failure",
