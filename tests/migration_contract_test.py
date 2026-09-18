@@ -367,6 +367,34 @@ def main() -> None:
     )
     connection.execute("INSERT INTO journal_secrets VALUES ('cursor',?)", (bytes(32),))
     expect_integrity(connection, "UPDATE journal_secrets SET secret=?", (bytes(31),))
+    connection.execute(
+        """INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at)
+           VALUES ('upgrade-item','fts-record','p2','claimed',?,?)""", (NOW, NOW)
+    )
+    connection.execute("UPDATE delivery_attempts SET state='claimed' WHERE mailbox_item_id='upgrade-item'")
+    connection.execute(
+        """INSERT INTO claims(id,adapter_id,principal_id,instance_id,generation,state,lease_expires_at,created_at)
+           SELECT 'upgrade-claim',adapter_id,principal_id,instance_id,generation,'active',lease_expires_at,created_at
+           FROM adapter_registrations WHERE adapter_id='adapter-1'"""
+    )
+    connection.execute("INSERT INTO claim_items VALUES ('upgrade-claim','upgrade-item','initial-upgrade-item')")
+    active = connection.execute("SELECT id FROM claims WHERE state='active'").fetchall()
+    assert ("upgrade-claim",) in active
+    attempts = connection.execute("SELECT attempt_id FROM delivery_attempts ORDER BY attempt_id").fetchall()
+    connection.executescript((ROOT / "migrations" / "0005_claim_credentials.sql").read_text())
+    assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone() == (5,)
+    assert connection.execute("SELECT attempt_id FROM delivery_attempts ORDER BY attempt_id").fetchall() == attempts
+    for (claim_id,) in active:
+        assert connection.execute("SELECT state,closed_at IS NOT NULL FROM claims WHERE id=?", (claim_id,)).fetchone() == ("cancelled", 1)
+    assert connection.execute("SELECT count(*) FROM claims WHERE state='active'").fetchone() == (0,)
+    assert connection.execute("SELECT state FROM delivery_attempts WHERE attempt_id='initial-upgrade-item'").fetchone() == ("pending",)
+    assert connection.execute("SELECT state FROM mailbox_items WHERE id='upgrade-item'").fetchone() == ("pending",)
+    expect_integrity(
+        connection,
+        """INSERT INTO claims(id,adapter_id,principal_id,instance_id,generation,state,lease_expires_at,created_at)
+           SELECT 'unbound-claim',adapter_id,principal_id,instance_id,generation,'active',lease_expires_at,created_at
+           FROM adapter_registrations WHERE status='active' LIMIT 1""",
+    )
     print("migration contract passed")
 
 

@@ -40,6 +40,14 @@ Enrollment response loss or failure to persist either credential requires protec
 
 Only one active adapter installation is allowed per principal in v1. Registration has a server-issued generation and `lease_expires_at`; heartbeats renew that lease. Replacement is compare-and-swap and fences later central operations from stale generations. Claims explicitly transition from `active` to `committed`, `expired`, or `cancelled`; the database permits only one active claim per adapter/generation, so expiry must be recorded before another claim is created. The unavoidable local check-to-send race means planned replacement should drain first and forced replacement must accept possible duplicate runtime turns.
 
+Replacement revokes both old enrollment credential lineages and outstanding tickets
+before transferring installation ownership. New credentials require fresh enrollment
+for the replacement installation; old secrets never gain authority over it. Ordinary
+registration only renews the credential's already-bound installation. Expired
+heartbeats and stale generations fail closed; same-installation registration can
+renew an expired lease without changing generation. Claim selection repeats these
+checks inside its write transaction and stores the issuing credential ID.
+
 Central restore is a recovery event: close ingress, quiesce adapters, reconcile protected audit events, invalidate claims/registrations, advance generations, compare spools/checkpoints, run ACL and delivery probes, and reopen only after evidence is complete. If evidence is incomplete, remain read-only and rotate affected credentials.
 
 ## Audit and privacy

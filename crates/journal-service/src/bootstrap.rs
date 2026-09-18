@@ -11,6 +11,8 @@ use thiserror::Error;
 
 use crate::Clock;
 
+#[path = "delivery.rs"]
+mod delivery;
 #[path = "records.rs"]
 mod records;
 
@@ -409,6 +411,7 @@ impl BootstrapService {
             tx.execute("INSERT INTO credential_audit(credential_id,operation,occurred_at) SELECT id,'recovered',? FROM credentials WHERE enrollment_adapter_id=? AND instance_id=? AND revoked_at IS NULL",params![now,adapter_id,instance_id])?;
             tx.execute("UPDATE credentials SET revoked_at=?,revocation_reason='enrollment recovery' WHERE enrollment_adapter_id=? AND instance_id=? AND revoked_at IS NULL",params![now,adapter_id,instance_id])?;
             self.checkpoint("recovery-revoked")?;
+            delivery::close_claims(tx, adapter_id, &now, true)?;
             tx.execute("UPDATE adapter_registrations SET status='revoked' WHERE adapter_id=? AND instance_id=?",params![adapter_id,instance_id])?;
             tx.execute("UPDATE enrollment_tickets SET invalidated_at=? WHERE adapter_id=? AND consumed_at IS NULL AND invalidated_at IS NULL",params![now,adapter_id])?;
             tx.execute("UPDATE enrollment_installations SET recovery_authorized=1 WHERE adapter_id=? AND instance_id=?",params![adapter_id,instance_id])?;

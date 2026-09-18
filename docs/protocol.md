@@ -171,6 +171,74 @@ Attention is notify-only and does not alter read visibility or create task owner
 
 ## Delivery state machine
 
+### Central mailbox claims
+
+Self-registration validates `instance_id` against the delivery credential's installation,
+renews a 60-second registration lease, and returns the existing generation. It can
+renew an expired lease for that same installation; it cannot revive a revoked or
+replaced credential. Heartbeats require the current generation and an unexpired
+registration lease. The heartbeat hint is 20 seconds. Request installation fields
+are assertions against authentication, never authority to select another installation.
+
+Protected replacement compares `expected_generation`, requires a different installation,
+advances the generation, cancels active claims, and returns their existing attempts
+to pending. It atomically revokes both old enrollment credential lineages, invalidates
+outstanding tickets, transfers enrollment ownership, and records an audit event.
+Issue a fresh enrollment ticket for the new installation afterward. Enrollment
+advances the generation again; use the generation actually returned by enrollment
+or registration. A repeated replacement with the old generation returns `409`.
+This is not the same as same-installation enrollment recovery.
+
+Claims contain at most 20 complete records, ordered by mailbox creation time and ID.
+The selection transaction rechecks credentials, registration generation and lease,
+and current read membership. Revoked pending/claimed obligations become
+`suppressed-revoked`; their bodies are never returned. Suppression is retained
+after membership is restored. Claim rows bind the exact credential, principal,
+adapter, installation, generation, and item/attempt set.
+
+One active claim is permitted per generation. An additional claim request returns
+`409`, including after a lost response: without a claim request idempotency key,
+clients wait for expiry rather than assuming the response can be replayed.
+Claim leases last at most 30 seconds and never outlive the registration lease.
+Expiry is applied on subsequent registration, claim, or mailbox-status operations;
+it closes the old claim and returns the same attempt to pending, never creating
+a new attempt. Heartbeats do not extend claim leases.
+
+An empty immediate request or long-poll timeout returns an empty, closed `committed`
+claim; it acquires no custody and does not block the next claim. During a long poll
+(at most 30 seconds), empty selections create no claim. The handler releases its
+transaction and blocking-worker permit before waiting on a change notification,
+shutdown, or a one-second retry timer, then repeats all authorization checks.
+Disconnected waits leave no active empty claim. A disconnect after a nonempty
+transaction commits still requires ordinary lease recovery.
+
+Mailbox status is a single-entry page for the authenticated recipient, with a null
+continuation cursor, pending count, and nullable oldest pending timestamp. Expired
+claims and suppressed memberships are reconciled before counting. The protected
+admin endpoint selects an existing principal explicitly. Neither endpoint returns bodies.
+
+Use the delivery credential file, not the principal credential file:
+
+```sh
+aj adapter-register --endpoint "$ENDPOINT" --credential-file "$DELIVERY_FILE" --instance "$INSTANCE"
+aj adapter-heartbeat --endpoint "$ENDPOINT" --credential-file "$DELIVERY_FILE" --instance "$INSTANCE" --generation 1
+aj mailbox-claim --endpoint "$ENDPOINT" --credential-file "$DELIVERY_FILE" --instance "$INSTANCE" --generation 1 --limit 20 --wait-seconds 30
+aj mailbox-status --endpoint "$ENDPOINT" --credential-file "$DELIVERY_FILE"
+aj-admin --socket "$ADMIN_SOCKET" mailbox-status principal-example
+aj-admin --socket "$ADMIN_SOCKET" adapter-replace adapter-example 1 installation-replacement
+```
+
+`mailbox-claim` prints untrusted record data as JSON for inspection; it does not
+provide durable local custody or runtime delivery. S8 commit, telemetry, requeue,
+and record delivery-status remain unimplemented.
+
+Migration 5 adds `claims.credential_id` and a binding trigger. Legacy active claims
+are cancelled, with their existing claimed attempts returned to pending. History,
+records, and attempt IDs remain intact. A schema-4 binary rejects schema 5; rollback
+requires a compatible pre-upgrade backup rather than deleting migration history.
+
+### States
+
 ```text
 published → pending → claimed → host-accepted → adapter-reported-runtime-accepted
                          ├──────────→ adapter-reported-retryable-failure

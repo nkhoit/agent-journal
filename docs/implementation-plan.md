@@ -250,6 +250,20 @@ also exercises search/thread CLI behavior; it must run on a Unix host.
 
 **Goal:** make central mailbox custody claimable without yet injecting a runtime.
 
+Implemented: installation-bound registration and heartbeat, protected CAS replacement,
+credential-bound bounded claims, lazy same-attempt expiry, current-membership suppression,
+and recipient/admin mailbox status. Migration 5 binds new claims to credentials and
+cancels unbound legacy claims without replacing attempts. Empty selections wait on
+notifications outside SQLite and blocking-worker permits; retries also observe expiry
+and out-of-process mutations. Typed clients and `aj`/`aj-admin` commands accompany
+the endpoints. S8 custody, telemetry, requeue, record delivery-status, and admin adapter
+listing remain explicit `501`; no spool or runtime injection is implemented.
+
+Acceptance gates: `journal-service/tests/delivery.rs`, `journald/tests/delivery_http.rs`,
+`journal-client/tests/delivery.rs`, the migration contract, and `make delivery-test`
+(real Unix service/CLI provisioning, lost claim response, expiry, replacement,
+fresh enrollment, and membership suppression).
+
 ### Build
 
 - Implement self-registration, heartbeat, generation fencing, bounded claim, and mailbox status.

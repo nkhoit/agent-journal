@@ -41,6 +41,13 @@ See [`../config/examples/adapter.yaml`](../config/examples/adapter.yaml). The ex
 
 ## Conformance sequence
 
+S7 central registration, heartbeat, claims, expiry, replacement, and mailbox status
+are available through typed `journal-client` methods. A lost claim response is not
+replayed: another claim conflicts until its lease expires. Re-registration with the
+same valid installation credential keeps the generation; replacement requires protected
+administration and fresh enrollment. See the [claim protocol](protocol.md#central-mailbox-claims).
+Host custody and runtime telemetry remain S8, and local durable spooling remains S9.
+
 Use a fake runtime before connecting a vendor runtime:
 
 - register and heartbeat fence stale installations;

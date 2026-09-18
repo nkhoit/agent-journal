@@ -20,15 +20,21 @@ use crate::executor::{BlockingError, BlockingExecutor};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+#[path = "delivery.rs"]
+mod delivery;
+use delivery::*;
+
 #[derive(Debug, Clone)]
 pub struct ServiceState {
     blocking: BlockingExecutor,
+    mailbox_changes: watch::Sender<u64>,
 }
 
 impl ServiceState {
     pub fn new(database: Database, blocking_limit: usize) -> Result<Self, BlockingError> {
         Ok(Self {
             blocking: BlockingExecutor::new(database, blocking_limit)?,
+            mailbox_changes: watch::channel(0).0,
         })
     }
 
@@ -105,6 +111,31 @@ async fn bootstrap<T: Serialize + Send + 'static>(
     mutation: bool,
     operation: impl FnOnce(BootstrapService) -> Result<T, BootstrapError> + Send + 'static,
 ) -> Response {
+    match bootstrap_result(&state, &request_id, operation_name, mutation, operation).await {
+        Ok(value) => success_response(status, value),
+        Err(response) => response,
+    }
+}
+
+fn success_response(status: StatusCode, value: impl Serialize) -> Response {
+    let mut response = if status == StatusCode::NO_CONTENT {
+        status.into_response()
+    } else {
+        (status, Json(value)).into_response()
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn bootstrap_result<T: Send + 'static>(
+    state: &ServiceState,
+    request_id: &RequestId,
+    operation_name: &'static str,
+    mutation: bool,
+    operation: impl FnOnce(BootstrapService) -> Result<T, BootstrapError> + Send + 'static,
+) -> Result<T, Response> {
     let correlation = request_id.0.clone();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     match state
@@ -125,15 +156,12 @@ async fn bootstrap<T: Serialize + Send + 'static>(
         .await
     {
         Ok(Ok(value)) => {
-            let mut response = if status == StatusCode::NO_CONTENT {
-                status.into_response()
-            } else {
-                (status, Json(value)).into_response()
-            };
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            response
+            if mutation {
+                state
+                    .mailbox_changes
+                    .send_modify(|version| *version = version.wrapping_add(1));
+            }
+            Ok(value)
         }
         Ok(Err(error)) => {
             let (status, code, message) = match error {
@@ -166,7 +194,7 @@ async fn bootstrap<T: Serialize + Send + 'static>(
                     "service dependency unavailable",
                 ),
             };
-            error_response(status, code, message, request_id)
+            Err(error_response(status, code, message, request_id.clone()))
         }
         Err(error) => {
             let category = match error {
@@ -182,12 +210,12 @@ async fn bootstrap<T: Serialize + Send + 'static>(
                 category,
                 outcome = "unknown"
             );
-            error_response(
+            Err(error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service-unavailable",
                 "service dependency unavailable",
-                request_id,
-            )
+                request_id.clone(),
+            ))
         }
     }
 }
@@ -707,17 +735,18 @@ pub(crate) fn public_router_with_timeout(
             "/v1/records/{record_id}/delivery-status",
             get(principal_unimplemented),
         )
-        .route("/v1/adapters/self/register", post(delivery_unimplemented))
-        .route("/v1/adapters/self/heartbeat", post(delivery_unimplemented))
-        .route("/v1/mailbox/claims", post(delivery_unimplemented))
+        .route("/v1/adapters/self/register", post(register_adapter))
+        .route("/v1/adapters/self/heartbeat", post(heartbeat_adapter))
+        .route("/v1/mailbox/claims", post(claim_mailbox))
         .route("/v1/claims/{claim_id}/commit", post(delivery_unimplemented))
         .route(
             "/v1/mailbox-items/{item_id}/events",
             post(delivery_unimplemented),
         )
-        .route("/v1/mailbox/status", get(delivery_unimplemented))
+        .route("/v1/mailbox/status", get(mailbox_status))
         .fallback(unimplemented_route)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(Extension(shutdown.clone()))
         .layer(middleware::from_fn_with_state(
             BodyLimits {
                 max_bytes: max_body_bytes,
@@ -755,11 +784,11 @@ pub(crate) fn admin_router_with_timeout(
         .route("/v1/admin/enrollment/recover", post(recover))
         .route(
             "/v1/admin/adapters/{adapter_id}/replace",
-            post(admin_unimplemented),
+            post(replace_adapter),
         )
         .route(
             "/v1/admin/mailboxes/{principal}/status",
-            get(admin_unimplemented),
+            get(admin_mailbox_status),
         )
         .route(
             "/v1/admin/mailbox-items/{item_id}/requeue",
