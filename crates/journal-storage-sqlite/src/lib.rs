@@ -171,6 +171,7 @@ impl Database {
     }
 
     pub fn connect_read_only(&self) -> Result<Connection, StorageError> {
+        let _guard = self.audit.as_ref().map(|audit| audit.lock()).transpose()?;
         if let Some(audit) = &self.audit {
             audit.ensure_open(self)?;
         }
@@ -186,6 +187,7 @@ impl Database {
     pub fn recovery_status(&self) -> Result<RecoveryStatus, StorageError> {
         match &self.audit {
             Some(audit) => {
+                let _guard = audit.lock()?;
                 audit.ensure_open(self)?;
                 audit.status()
             }
@@ -241,8 +243,21 @@ impl Database {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<BackupVerification, StorageError> {
+        let _guard = self.audit.as_ref().map(|audit| audit.lock()).transpose()?;
+        if let Some(audit) = &self.audit {
+            audit.ensure_open(self)?;
+        }
+        self.backup_to_unguarded(destination)
+    }
+
+    // The audit backup path already holds the non-reentrant writer guard.
+    pub(crate) fn backup_to_unguarded(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupVerification, StorageError> {
         let destination = ReservedDestination::new(destination.as_ref(), self.path())?;
-        let source = self.connect_read_only()?;
+        let source = self.factory.connect_read_only()?;
+        verify_schema(&source)?;
         copy_database(&source, destination.path())?;
         let verification = Self::verify_backup(destination.path())?;
         destination.commit();
@@ -547,3 +562,6 @@ fn remove_sqlite_files(path: &Path) {
         let _ = fs::remove_file(PathBuf::from(companion));
     }
 }
+
+#[cfg(test)]
+mod recovery_reads;

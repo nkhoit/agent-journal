@@ -22,6 +22,15 @@ private directory. Audit and lock files are mode `0600` on Unix; symlink files,
 hard-linked audit files, and non-private parents are rejected. Keep the persistent
 lock file; never unlink it to bypass a running owner.
 
+First initialization builds the complete audit in a private sibling named
+`<audit>.initializing`, syncs it, renames it to the final audit path, and syncs
+the directory before committing central adoption. Reserve that sibling name and
+its SQLite `-journal` sidecar for initialization. Under the lifetime lock, an
+interrupted staging file can be discarded and rebuilt only when the final audit
+is absent and the central anchor is not audit-required and remains at revision
+zero. A published baseline is reused after a crash before adoption. Required
+audits are never replaced by this retry path.
+
 The audit is a separate SQLite database using rollback journaling and
 `synchronous=EXTRA`. A sibling file is a separate recovery unit, not a separate
 disk fault domain. Protect and replicate it independently. Never overwrite it
@@ -36,7 +45,10 @@ and next revision before committing the central transaction. The central revisio
 commits with the mutation; only then is external completion recorded. Read-only
 operations do not advance the revision. Failure or process death between those
 commits is deliberately uncertain, not reported as rollback. Subsequent service
-operations fail closed until protected reconciliation. Snapshots include principal
+operations fail closed until protected reconciliation. Protected read, status,
+and verification gate checks serialize with in-flight audit writers, waiting for
+completion rather than treating transient prepared intents as recovery failures;
+abandoned intents still fail closed. Snapshots include principal
 disablement, spaces, ACLs, installation ownership, registration generations,
 credential and ticket metadata, audit history, relations, and space sequence
 heads. They contain credential digests, not plaintext bearer secrets, and must

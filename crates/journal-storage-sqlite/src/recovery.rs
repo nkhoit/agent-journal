@@ -22,9 +22,20 @@ pub struct RecoveryVerification {
 impl Database {
     /// Runs all probes against one snapshot, not independently changing connections.
     pub fn recovery_verification(&self) -> Result<RecoveryVerification, StorageError> {
+        let _guard = self
+            .recovery_audit()
+            .map(|audit| audit.lock())
+            .transpose()?;
         if let Some(audit) = self.recovery_audit() {
             audit.ensure_open(self)?;
         }
+        self.recovery_verification_unguarded()
+    }
+
+    // Offline reconciliation must probe while the recovery gate is closed.
+    pub(crate) fn recovery_verification_unguarded(
+        &self,
+    ) -> Result<RecoveryVerification, StorageError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         transaction.execute(

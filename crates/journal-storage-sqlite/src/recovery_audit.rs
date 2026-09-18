@@ -116,11 +116,38 @@ impl RecoveryAudit {
                     "required external audit is missing",
                 ));
             }
-            let file = private_file(path, true)?;
-            file.sync_all()
-                .map_err(|source| io("sync recovery audit", path, source))?;
-            sync_parent(path)?;
-            let audit = audit_connection(path)?;
+            // Only an unadopted revision-zero anchor may discard interrupted
+            // initialization. The final path never contains a partial baseline.
+            let mut staging_name = path.as_os_str().to_owned();
+            staging_name.push(".initializing");
+            let staging = PathBuf::from(staging_name);
+            let mut journal_name = staging.as_os_str().to_owned();
+            journal_name.push("-journal");
+            for leftover in [&PathBuf::from(journal_name), &staging] {
+                if leftover
+                    .try_exists()
+                    .map_err(|source| io("inspect incomplete recovery audit", leftover, source))?
+                {
+                    validate_file(leftover)?;
+                    if std::fs::canonicalize(leftover)
+                        .map_err(|source| io("resolve incomplete audit", leftover, source))?
+                        == std::fs::canonicalize(database.path()).map_err(|source| {
+                            io("resolve central database", database.path(), source)
+                        })?
+                    {
+                        return Err(StorageError::RecoveryClosed(
+                            "audit staging and central database must differ",
+                        ));
+                    }
+                    std::fs::remove_file(leftover).map_err(|source| {
+                        io("remove incomplete recovery audit", leftover, source)
+                    })?;
+                }
+            }
+            let file = private_file(&staging, true)?;
+            #[cfg(test)]
+            initialization_boundary("created");
+            let audit = audit_connection(&staging)?;
             audit.execute_batch(
                 "CREATE TABLE control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                    journal_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','closed')));
@@ -131,16 +158,25 @@ impl RecoveryAudit {
                    detail TEXT NOT NULL,
                    occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));",
             )?;
+            #[cfg(test)]
+            initialization_boundary("schema");
             let snapshot = serde_json::to_string(&snapshot(&central)?)?;
             audit.execute(
                 "INSERT INTO events(revision,snapshot,outcome) VALUES (0,?,'committed')",
                 [&snapshot],
             )?;
             audit.execute("INSERT INTO control VALUES(1,?,'open')", [&journal_id])?;
-            central.execute(
-                "UPDATE recovery_anchor SET audit_required=1 WHERE singleton=1",
-                [],
-            )?;
+            drop(audit);
+            file.sync_all()
+                .map_err(|source| io("sync recovery audit", &staging, source))?;
+            drop(file);
+            #[cfg(test)]
+            initialization_boundary("baseline");
+            std::fs::rename(&staging, path)
+                .map_err(|source| io("publish recovery audit", path, source))?;
+            sync_parent(path)?;
+            #[cfg(test)]
+            initialization_boundary("published");
         }
         validate_file(path)?;
         let audit = Self {
@@ -257,7 +293,7 @@ impl RecoveryAudit {
         let _guard = self.lock()?;
         self.ensure_open(database)?;
         protect_parent(destination)?;
-        database.backup_to(destination)?;
+        database.backup_to_unguarded(destination)?;
         sync_parent(destination)?;
         let verification = Database::open(destination)?.recovery_verification()?;
         self.connection()?.execute(
@@ -367,7 +403,7 @@ impl RecoveryAudit {
             [revision],
         )?;
         transaction.commit()?;
-        let verification = database.recovery_verification()?;
+        let verification = database.recovery_verification_unguarded()?;
         let adapters = installation_inventory(&audit)?;
         let clients = identifiers(&connection, "SELECT id FROM principals ORDER BY id")?;
         let approval = RecoveryApproval {
@@ -421,7 +457,7 @@ impl RecoveryAudit {
             "SELECT detail FROM recovery_events WHERE kind='reconciled' ORDER BY id DESC LIMIT 1",
             [], |row| row.get(0),
         ).optional()?;
-        let verification = database.recovery_verification()?;
+        let verification = database.recovery_verification_unguarded()?;
         let mut recorded: RecoveryApproval = serde_json::from_str(
             reconciled
                 .as_deref()
@@ -729,6 +765,17 @@ fn sync_parent(path: &Path) -> Result<(), StorageError> {
 }
 
 #[cfg(test)]
+fn initialization_boundary(stage: &str) {
+    if std::env::var("JOURNAL_AUDIT_INIT_STAGE").as_deref() == Ok(stage) {
+        let root = PathBuf::from(std::env::var_os("JOURNAL_AUDIT_INIT_ROOT").unwrap());
+        std::fs::write(root.join("ready"), stage).unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -737,7 +784,7 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
+            let path = std::env::current_dir().unwrap().join(format!(
                 "journal-audit-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
@@ -815,6 +862,137 @@ mod tests {
         drop(audit);
         std::fs::remove_file(fixture.0.join("audit.db")).unwrap();
         assert!(RecoveryAudit::open(&database, &fixture.0.join("audit.db")).is_err());
+        assert!(!fixture.0.join("audit.db").exists());
+    }
+
+    #[test]
+    fn initialization_crash_child() {
+        let Some(root) = std::env::var_os("JOURNAL_AUDIT_INIT_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let database = Database::open(root.join("central.db")).unwrap();
+        let _audit = RecoveryAudit::open(&database, &root.join("audit.db")).unwrap();
+        panic!("initialization boundary was not reached");
+    }
+
+    #[test]
+    fn killed_initialization_resumes_startup_and_recovery() {
+        for stage in ["created", "schema", "baseline", "published"] {
+            let fixture = Fixture::new();
+            let database = fixture.database();
+            seed(&database);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "recovery_audit::tests::initialization_crash_child",
+                    "--nocapture",
+                ])
+                .env("JOURNAL_AUDIT_INIT_ROOT", &fixture.0)
+                .env("JOURNAL_AUDIT_INIT_STAGE", stage)
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !fixture.0.join("ready").exists() {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "child exited before {stage}"
+                );
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("child did not reach {stage}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(fixture.0.join("audit.db").exists(), stage == "published");
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let published =
+                (stage == "published").then(|| std::fs::read(fixture.0.join("audit.db")).unwrap());
+            let anchor: (i64, bool) = database
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT revision,audit_required FROM recovery_anchor",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(anchor, (0, false), "{stage}");
+            let audit = fixture.audit(&database);
+            audit.ensure_open(&database).unwrap();
+            if let Some(published) = published {
+                assert_eq!(
+                    std::fs::read(fixture.0.join("audit.db")).unwrap(),
+                    published,
+                    "completed publication must be reused"
+                );
+            }
+            let (revision, baseline, outcome) = head(&audit.connection().unwrap()).unwrap();
+            assert_eq!(revision, 0);
+            assert_eq!(outcome, "committed");
+            assert_eq!(
+                serde_json::from_str::<Snapshot>(&baseline).unwrap(),
+                snapshot(&database.connect().unwrap()).unwrap(),
+                "{stage}"
+            );
+            assert!(!fixture.0.join("audit.db.initializing").exists());
+            drop(audit);
+            let audit = fixture.audit(&database);
+            audit.ensure_open(&database).unwrap();
+            let mut approval = audit.reconcile(&database, true).unwrap();
+            approval.inventory_complete = true;
+            approval.accepted_record_loss = true;
+            audit.reopen(&database, &approval).unwrap();
+            audit.ensure_open(&database).unwrap();
+            drop(audit);
+            std::fs::remove_file(fixture.0.join("audit.db")).unwrap();
+            assert!(RecoveryAudit::open(&database, &fixture.0.join("audit.db")).is_err());
+            assert!(!fixture.0.join("audit.db").exists());
+        }
+    }
+
+    #[test]
+    fn initialization_never_discards_required_or_nonzero_audit() {
+        for (revision, required) in [(0, true), (1, false)] {
+            let fixture = Fixture::new();
+            let database = fixture.database();
+            database
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE recovery_anchor SET revision=?,audit_required=?",
+                    params![revision, required],
+                )
+                .unwrap();
+            let staging = fixture.0.join("audit.db.initializing");
+            private_file(&staging, true).unwrap();
+            std::fs::write(&staging, b"incomplete").unwrap();
+            assert!(RecoveryAudit::open(&database, &fixture.0.join("audit.db")).is_err());
+            assert_eq!(std::fs::read(&staging).unwrap(), b"incomplete");
+            assert!(!fixture.0.join("audit.db").exists());
+        }
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        drop(fixture.audit(&database));
+        let path = fixture.0.join("audit.db");
+        std::fs::write(&path, b"damaged adopted audit").unwrap();
+        assert!(RecoveryAudit::open(&database, &path).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"damaged adopted audit");
+    }
+
+    #[test]
+    fn initialization_staging_cannot_replace_the_central_database() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("audit.db.initializing");
+        let database = Database::open(&path).unwrap();
+        seed(&database);
+        assert!(RecoveryAudit::open(&database, &fixture.0.join("audit.db")).is_err());
+        assert_eq!(
+            snapshot(&database.connect().unwrap()).unwrap().space_heads,
+            vec![("s".to_owned(), 2)]
+        );
         assert!(!fixture.0.join("audit.db").exists());
     }
 
