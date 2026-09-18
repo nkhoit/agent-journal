@@ -150,7 +150,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 - Implement host-local admin operations for principals, spaces, memberships, adapter provisioning, credential rotation/revocation, and enrollment tickets.
 - Implement principal-client and delivery-adapter authentication as distinct credential classes.
 - Implement one-use enrollment exchange in one transaction: hash lookup and expiry check, ticket consume, adapter/principal binding, separate credential issuance, and hash-only persistence.
-- Implement the corresponding `aj-admin` Unix-socket methods and `aj enroll --ticket-file`.
+- Implement the corresponding `aj-admin` Unix-socket methods and the explicit-option `aj enroll --endpoint URL --ticket-file PATH --instance-id ID --principal-file PATH --delivery-file PATH` exchange.
 - Write credentials atomically to separate mode-`0600` destinations and never print their values.
 - Rotate by immediate atomic revoke-and-replace, returning the replacement secret once through the protected Unix socket.
 - Provide empty-`204` credential revocation and enrollment recovery operations. Recovery revokes both credential lineages, including rotations, before fresh-ticket enrollment for the same installation; consumed tickets never replay and another installation cannot take over.
@@ -257,7 +257,7 @@ cancels unbound legacy claims without replacing attempts. Empty selections wait 
 notifications outside SQLite and blocking-worker permits; retries also observe expiry
 and out-of-process mutations. Typed clients and `aj`/`aj-admin` commands accompany
 the endpoints. S8 custody, telemetry, requeue, record delivery-status, and admin adapter
-listing remain explicit `501`; no spool or runtime injection is implemented.
+listing are implemented by S8; no spool or runtime injection is claimed here.
 
 Acceptance gates: `journal-service/tests/delivery.rs`, `journald/tests/delivery_http.rs`,
 `journal-client/tests/delivery.rs`, the migration contract, and `make delivery-test`
@@ -510,6 +510,7 @@ serialized mutation overhead remain unmeasured deployment acceptance items.
 
 - Browser/API tests for raw HTML, `javascript:`, `data:`, external images, forged envelopes, malicious snippets, and CSP.
 - Backup under write load and isolated restore verification of counts, hashes, ACLs, sequence heads, FTS, mailbox attempts, and registration invalidation.
+- Black-box `journal-recover` tests for usage, command dispatch, successful gates, and rejection of malformed or incomplete approvals.
 - Disk, WAL, and free-space pressure tests.
 
 ### Accept when

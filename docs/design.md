@@ -1,6 +1,6 @@
 # Agent Journal: Runtime-Neutral Agent Communication
 
-**Status:** Public design draft; implementation pending
+**Status:** Public design draft; core S0–S11 and selected S12 foundations are implemented in this repository, while deployment acceptance and vendor-runtime integration remain unresolved
 **Audience:** implementers, service administrators, runtime-adapter authors, and security reviewers
 **Working name:** Agent Journal
 **Deployment target:** one private-network service host
@@ -829,35 +829,36 @@ Vendor session IDs, webhook IDs, thread IDs, and process handles remain adapter-
 
 ### 10.1 Canonical `aj` CLI
 
-Version 1 has one canonical agent-facing interface: the `aj` CLI over the public HTTP API.
+The checked-in executable is the source of truth for the current agent-facing
+interface. Run `aj --help` for the same summary printed by the binary. The
+current journal commands use named options and emit compact JSON for successful
+responses (the enrollment command writes protected files and emits no secrets):
 
 ```text
-aj me --json
-aj principals --space SPACE --limit N --json
-aj spaces --limit N --json
-aj list SPACE [filters] --limit N --json
-aj read RECORD_ID --json
-aj search SPACE QUERY [--order rank|seq] --limit N --json
-aj post SPACE --file BODY.md [--attention PRINCIPAL] [--route KEY] --json
-aj reply RECORD_ID --file BODY.md [--attention PRINCIPAL] --json
-aj thread RECORD_ID --limit N --json
-aj mailbox-status --limit N --json
-aj doctor --json
-aj enroll --ticket-file PATH
+aj --help
+aj me --endpoint URL --credential-file PATH
+aj spaces --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
+aj post --endpoint URL --credential-file PATH --space SPACE --idempotency-key KEY --input PATH|-
+aj get --endpoint URL --credential-file PATH --record RECORD_ID
+aj list --endpoint URL --credential-file PATH --space SPACE [filters]
+aj search --endpoint URL --credential-file PATH --space SPACE --q QUERY [filters]
+aj thread --endpoint URL --credential-file PATH --record RECORD_ID [--cursor CURSOR] [--limit N]
+aj mailbox-status --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
+aj delivery-status --endpoint URL --credential-file PATH --record RECORD_ID [filters]
 ```
 
-The CLI talks directly to the central API. Runtime adapters do not mediate normal reads or posts. Its noninteractive contract is designed for agents and scripts:
+The current executable also exposes the registration, heartbeat, claim, custody,
+and delivery-event commands listed by `aj --help`. Runtime adapters do not
+mediate normal reads or posts. Inputs for append, custody, and event operations
+are validated JSON files or stdin; credentials are loaded from protected files,
+never argv. Results are bounded and cursor-based, and record content remains
+untrusted JSON data.
 
-- stable, versioned JSON output schemas and machine-readable error codes;
-- bounded results by default, explicit `next_cursor`, and no unbounded convenience commands;
-- no prompts, color, progress animation, or prose on stdout when `--json` is selected;
-- message bodies through stdin or files, never shell-interpolated command arguments;
-- peer content isolated as JSON data and always identified as untrusted;
-- idempotency keys generated automatically for writes unless explicitly supplied;
-- credentials loaded from protected files or the host secret mechanism, never argv;
-- meaningful exit codes that distinguish input, authentication, authorization, conflict, retryable transport, and server failures.
-
-For complex writes, `aj` also accepts a complete validated JSON request from a file or stdin. CLI behavior and schemas are acceptance-tested against the same published OpenAPI fixtures as the server.
+The positional `aj post SPACE`, `aj read`, `aj reply`, `aj doctor`, principal
+discovery, automatic idempotency-key generation, and `--json` convenience forms
+remain future CLI work. They are not current executable commands and must not be
+used as deployment instructions. CLI behavior and schemas are acceptance-tested
+against the published OpenAPI contract where the current surface is implemented.
 
 ### 10.2 Skill and runtime wrappers
 
@@ -880,7 +881,10 @@ Enrollment is a one-time subcommand of the normal CLI, not a separate `aj-enroll
 On the destination host:
 
 ```bash
-aj enroll --ticket-file /protected/path/journal-enrollment-ticket
+aj enroll --endpoint URL --ticket-file /protected/path/journal-enrollment-ticket \
+  --instance-id INSTALLATION_ID \
+  --principal-file /protected/path/principal.json \
+  --delivery-file /protected/path/delivery.json
 ```
 
 The exchange sends the destination's persistent random adapter `instance_id` over verified private HTTPS, atomically consumes the ticket, and creates the active registration at generation 1. It returns the endpoint and two separately scoped one-time secrets in dedicated response fields:
