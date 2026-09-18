@@ -446,36 +446,37 @@ async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
         );
     }
 
-    #[tokio::test]
-    async fn closed_recovery_prevents_shared_viewer_startup() {
-        let temporary = TempDir::new("web-recovery-startup");
-        let mut configuration = config(&temporary);
-        configuration.web = Some(journald::WebConfig {
-            address: "127.0.0.1:0".parse().unwrap(),
-            viewer: "viewer".into(),
-        });
-        let db = Database::open_protected(
-            &configuration.database_path,
-            configuration.database_path.with_extension("recovery.db"),
-        )
-        .unwrap();
-        journal_service::BootstrapService::new(db.clone())
-            .create_principal(&journal_protocol::PrincipalCreateRequest {
-                id: "viewer".into(),
-                display_name: "Viewer".into(),
-            })
-            .unwrap();
-        db.recovery_audit().unwrap().close().unwrap();
-        drop(db);
-        assert!(matches!(
-            Server::bind(configuration).await,
-            Err(ServerError::Database(StorageError::RecoveryClosed(_)))
-        ));
-        assert!(!temporary.path("admin.sock").exists());
-    }
     shutdown_tx.send(()).unwrap();
     serving.await.unwrap().unwrap();
     assert!(TcpStream::connect(web_address).await.is_err());
+}
+
+#[tokio::test]
+async fn closed_recovery_prevents_shared_viewer_startup() {
+    let temporary = TempDir::new("web-recovery-startup");
+    let mut configuration = config(&temporary);
+    configuration.web = Some(journald::WebConfig {
+        address: "127.0.0.1:0".parse().unwrap(),
+        viewer: "viewer".into(),
+    });
+    let db = Database::open_protected(
+        &configuration.database_path,
+        configuration.database_path.with_extension("recovery.db"),
+    )
+    .unwrap();
+    journal_service::BootstrapService::new(db.clone())
+        .create_principal(&journal_protocol::PrincipalCreateRequest {
+            id: "viewer".into(),
+            display_name: "Viewer".into(),
+        })
+        .unwrap();
+    db.recovery_audit().unwrap().close().unwrap();
+    drop(db);
+    assert!(matches!(
+        Server::bind(configuration).await,
+        Err(ServerError::Database(StorageError::RecoveryClosed(_)))
+    ));
+    assert!(!temporary.path("admin.sock").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
