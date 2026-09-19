@@ -775,6 +775,7 @@ name = "journald"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "fs2",
  "journal-adapter-core",
  "journal-adapter-hermes",
  "journal-adapter-spool",
