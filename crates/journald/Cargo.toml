@@ -34,7 +34,6 @@ journal-adapter-hermes = { path = "../journal-adapter-hermes" }
 journal-adapter-spool = { path = "../journal-adapter-spool" }
 journal-client = { path = "../journal-client" }
 journal-runtime-fake = { path = "../journal-runtime-fake" }
-socket2.workspace = true
 
 [lints]
 workspace = true
