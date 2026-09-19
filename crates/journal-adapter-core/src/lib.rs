@@ -3,6 +3,7 @@
 mod client;
 mod orchestration;
 pub use client::DeliveryJournal;
+pub use journal_domain::MAX_LONG_POLL_SECONDS;
 pub use journal_domain::TelemetryState as OutcomeState;
 pub use orchestration::*;
 
@@ -819,5 +820,188 @@ mod tests {
             .replace("\r\n", "\n");
         let (_, expected) = fixture.split_once("\n\n").unwrap();
         assert_eq!(envelope.render(), expected);
+    }
+
+    struct RecordingJournal {
+        claims: RefCell<Vec<ClaimRequest>>,
+    }
+
+    impl RecordingJournal {
+        fn registration() -> Registration {
+            Registration {
+                adapter_id: "adapter".into(),
+                principal_id: "beta".into(),
+                instance_id: "instance-1".into(),
+                generation: 1,
+                status: RegistrationStatus::Active,
+                lease_expires_at: "2030-01-01T00:00:00Z".into(),
+                heartbeat_after_seconds: 20,
+            }
+        }
+    }
+
+    impl Journal for RecordingJournal {
+        fn register(&self, _: RegisterRequest) -> CoreResult<Registration> {
+            Ok(Self::registration())
+        }
+        fn heartbeat(&self, _: HeartbeatRequest) -> CoreResult<Registration> {
+            Ok(Self::registration())
+        }
+        fn claim(&self, request: ClaimRequest) -> CoreResult<ClaimBatch> {
+            self.claims.borrow_mut().push(request);
+            Ok(ClaimBatch {
+                claim_id: "claim-1".into(),
+                state: ClaimState::Active,
+                lease_expires_at: "2030-01-01T00:00:00Z".into(),
+                items: Vec::new(),
+            })
+        }
+        fn commit_host_custody(&self, _: CustodyRequest) -> CoreResult<CustodyResult> {
+            panic!("unexpected custody commit")
+        }
+        fn record_event(&self, _: &str, _: EventRequest) -> CoreResult<()> {
+            panic!("unexpected event")
+        }
+    }
+
+    struct EmptySpool;
+
+    impl Spool for EmptySpool {
+        fn put(&self, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected put")
+        }
+        fn get(&self, _: &str) -> CoreResult<SpoolItem> {
+            panic!("unexpected get")
+        }
+        fn reconcile_expired_claim(&self, _: &CustodyResult, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected reconcile")
+        }
+        fn confirm_custody(&self, _: &str, _: &str, _: &str, _: i64) -> CoreResult<()> {
+            panic!("unexpected confirm")
+        }
+        fn mark_injection_started(&self, _: &str, _: &str, _: i64) -> CoreResult<()> {
+            panic!("unexpected mark")
+        }
+        fn mark_injected(&self, _: &str, _: &str, _: i64, _: &str) -> CoreResult<()> {
+            panic!("unexpected mark")
+        }
+        fn mark_injection_failed(
+            &self,
+            _: &str,
+            _: &str,
+            _: i64,
+            _: InjectionState,
+            _: &str,
+        ) -> CoreResult<()> {
+            panic!("unexpected mark")
+        }
+        fn recoverable(&self, _: SystemTime, _: usize) -> CoreResult<Vec<SpoolItem>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl AdapterSpool for EmptySpool {
+        fn check_capacity(&self, _: u64, _: u64) -> CoreResult<()> {
+            Ok(())
+        }
+        fn find(&self, _: &str) -> CoreResult<Option<SpoolItem>> {
+            Ok(None)
+        }
+        fn work_after(&self, _: SystemTime, _: Option<&str>) -> CoreResult<Option<SpoolItem>> {
+            Ok(None)
+        }
+        fn finish(&self, _: &SpoolItem, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected finish")
+        }
+        fn acknowledge_event(&self, _: &str, _: &EventRequest) -> CoreResult<()> {
+            panic!("unexpected event")
+        }
+        fn suppress(&self, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected suppression")
+        }
+        fn backoff(&self) -> CoreResult<Backoff> {
+            Ok(Backoff::default())
+        }
+        fn set_backoff(&self, _: &Backoff) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn claim_carries_configured_long_poll_wait() {
+        let journal = RecordingJournal {
+            claims: RefCell::new(Vec::new()),
+        };
+        let spool = EmptySpool;
+        let runtime = RecordingRuntime::default();
+        let mut adapter = Adapter::new(
+            &journal,
+            &spool,
+            &ForbiddenResolver,
+            &runtime,
+            &SystemClock,
+            "instance-1".into(),
+        )
+        .unwrap()
+        .with_wait_seconds(25)
+        .unwrap();
+        assert!(matches!(adapter.tick(), Ok(Progress::Idle)));
+        let claims = journal.claims.borrow();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].wait_seconds, 25);
+    }
+
+    #[test]
+    fn claim_defaults_to_immediate_return() {
+        let journal = RecordingJournal {
+            claims: RefCell::new(Vec::new()),
+        };
+        let spool = EmptySpool;
+        let runtime = RecordingRuntime::default();
+        let mut adapter = Adapter::new(
+            &journal,
+            &spool,
+            &ForbiddenResolver,
+            &runtime,
+            &SystemClock,
+            "instance-1".into(),
+        )
+        .unwrap();
+        assert!(matches!(adapter.tick(), Ok(Progress::Idle)));
+        assert_eq!(journal.claims.borrow()[0].wait_seconds, 0);
+    }
+
+    #[test]
+    fn wait_seconds_rejects_above_server_bound() {
+        let journal = RecordingJournal {
+            claims: RefCell::new(Vec::new()),
+        };
+        let spool = EmptySpool;
+        let runtime = RecordingRuntime::default();
+        // `with_wait_seconds` consumes the adapter, so build one per case.
+        let adapter = Adapter::new(
+            &journal,
+            &spool,
+            &ForbiddenResolver,
+            &runtime,
+            &SystemClock,
+            "instance-1".into(),
+        )
+        .unwrap();
+        assert!(adapter.with_wait_seconds(MAX_LONG_POLL_SECONDS).is_ok());
+        let adapter = Adapter::new(
+            &journal,
+            &spool,
+            &ForbiddenResolver,
+            &runtime,
+            &SystemClock,
+            "instance-1".into(),
+        )
+        .unwrap();
+        assert!(
+            adapter
+                .with_wait_seconds(MAX_LONG_POLL_SECONDS + 1)
+                .is_err()
+        );
     }
 }
