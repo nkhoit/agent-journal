@@ -1,6 +1,6 @@
 # Agent Journal: Runtime-Neutral Agent Communication
 
-**Status:** Public design draft; core S0–S11, selected S12 foundations, and the Hermes Runs API runtime-acceptance adapter are implemented in this repository. Muse and deployment acceptance remain unresolved.
+**Status:** Public design draft; core S0–S11, selected S12 foundations, the Hermes Runs API runtime-acceptance adapter, and the Muse hook drop-point adapter are implemented in this repository. Deployment acceptance remains unresolved.
 **Audience:** implementers, service administrators, runtime-adapter authors, and security reviewers
 **Working name:** Agent Journal
 **Deployment target:** one private-network service host
@@ -777,31 +777,31 @@ The generic `aj` CLI integration is separate: Hermes agents use it to search, ap
 
 ### 9.2 Muse adapter
 
-The initial Muse integration investigation found the following version-specific behavior, which must be revalidated against the supported release before shipping:
+The initial Muse integration investigation found the following version-specific behavior, revalidated 2026-09-18 against Agent Kit v0.1.6 before shipping:
 
 - Chats are persistent objects; `main` is a stable chat ID and side chats have opaque persistent IDs.
-- There is no documented external inbound chat API or CLI.
-- `chat.send_message` queues a turn and returns a queued turn ID.
+- There is no documented external inbound chat API, webhook, or socket for a local process: `muse.py --help` lists only Hindsight/Zulip client actions (`post`, `reply`, `inbox`, `ack`, `retain`, `recall`, `get-document`, `memory-status`, …).
+- `chat.send_message` queues a turn and returns a queued turn ID, but it is only callable from inside the platform.
 - Busy chats queue work rather than exposing a verified external interrupt mechanism.
-- Hooks are polling Bash scripts with a minimum interval of five seconds; `wake(reason, payload)` launches a worker.
+- Hooks are polling scripts with a minimum interval; `wake(reason, payload)` launches a worker.
 - There are no verified read/model-observation receipts or platform idempotency keys.
 
-Therefore the initial Muse adapter path is:
+Because no supported external injection surface exists, the shipped Muse adapter path keeps the SQLite spool as the single durable handoff for custody and recovery, and places the runtime boundary after custody:
 
 ```text
 journal mailbox
   → host adapter local SQLite spool
-  → Muse hook polls the same adapter-owned spool through a narrow local helper
-  → helper transactionally leases one pending item to the hook worker
-  → chat.send_message(bound_chat_id, rendered envelope)
-  → queued turn ID stored as runtime receipt
+  → central host-custody commit
+  → runtime inject: durable drop file per attempt in a private watched directory
+  → platform hook worker picks up the drop and calls chat.send_message(bound_chat_id, rendered envelope)
+  → drop file name stored as runtime receipt
 ```
 
-The SQLite spool is the single durable handoff; there is no second file queue. The helper owns locking, attempt IDs, lease expiry, fsync, retry timing, and receipt persistence. Crashes before lease, after lease, before send, after send, and before receipt persistence are conformance cases. If the supported Muse release accepts no idempotency key, a crash after `chat.send_message` and before receipt persistence may create a duplicate turn; the envelope’s stable record ID lets the receiving agent recognize it, but exactly-once injection is impossible.
+The drop file is the injection artifact, not a second custody queue: the adapter never reads drop files back for recovery. Each file is named `muse-<sha256(attempt_id)>.drop.json` and carries `version`, a stable `dedupe_key` (the attempt ID), the private `target_chat`, envelope correlation IDs, the rendered body, and a content hash. Exact replay returns the same receipt without rewriting; conflicting or unreadable files fail closed; a vanished directory is retryable. If the supported Muse release accepts no idempotency key, a hook worker that redelivers may create a duplicate turn; the deployment's worker must keep a durable seen-set on the stable `dedupe_key`, the adapter itself never creates two drop files for one attempt, and exactly-once injection is impossible.
 
-Local bindings default to `main` only when no routing key is supplied; explicit allowlisted project bindings may target eligible side chats by opaque ID. Channel-linked chats that reject cross-chat handoff are excluded.
+Local bindings default to `main` only when no routing key is supplied; explicit allowlisted project bindings may target eligible side chats by opaque ID. Channel-linked chats that reject cross-chat handoff are excluded by operator configuration.
 
-The queued turn ID is adapter-reported runtime acceptance only. A reply record is the only portable evidence that the receiving agent chose to respond. Its Muse-side journal client uses a separately provisioned principal-client credential to append that reply; the hook never exposes the delivery credential.
+The drop receipt proves durable local handoff only, not hook execution, queued-turn durability, or model observation. A reply record is the only portable evidence that the receiving agent chose to respond. Its Muse-side journal client uses a separately provisioned principal-client credential to append that reply; the hook never exposes the delivery credential.
 
 ### 9.3 Future adapters
 
@@ -1074,12 +1074,12 @@ agent-journal/
 │   ├── journal-adapter-core/  registration, custody, routing, and envelope ports
 │   ├── journal-adapter-spool/ crash-recovery contract and pending store
 │   ├── journal-runtime-hermes/ Hermes Runs API runtime client
-│   ├── journal-runtime-muse/  unresolved Muse runtime boundary
+│   ├── journal-runtime-muse/  Muse hook drop-point runtime client
 │   ├── journald/              service stub binary
 │   ├── aj/                    principal CLI stub binary
 │   ├── aj-admin/              protected-admin CLI stub binary
 │   ├── journal-adapter-hermes/ Hermes durable-spool adapter binary
-│   └── journal-adapter-muse/ Muse adapter stub binary
+│   └── journal-adapter-muse/ Muse durable-spool adapter binary
 ├── api/
 │   └── openapi.yaml           language-neutral contract
 ├── integrations/shared/agent-journal/SKILL.md

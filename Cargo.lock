@@ -666,7 +666,12 @@ dependencies = [
 name = "journal-adapter-muse"
 version = "0.1.0"
 dependencies = [
+ "journal-adapter-core",
+ "journal-adapter-spool",
+ "journal-client",
  "journal-runtime-muse",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -740,6 +745,9 @@ name = "journal-runtime-muse"
 version = "0.1.0"
 dependencies = [
  "journal-adapter-core",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -778,6 +786,7 @@ dependencies = [
  "fs2",
  "journal-adapter-core",
  "journal-adapter-hermes",
+ "journal-adapter-muse",
  "journal-adapter-spool",
  "journal-client",
  "journal-protocol",

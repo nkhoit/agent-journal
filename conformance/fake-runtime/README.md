@@ -68,5 +68,6 @@ package does not certify its runtime, and zero matching tests fail.
 
 The default gate covers generic orchestration with the fake runtime only.
 The Hermes Runs API adapter has separate focused HTTP and real-`journald`
-integration gates; Muse remains an explicitly unresolved status-2 stub. Runtime
-acceptance is not model-completion evidence.
+integration gates; the Muse hook drop-point adapter has separate focused
+contract and real-`journald` integration gates. Runtime acceptance is not
+model-completion evidence.

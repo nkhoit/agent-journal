@@ -185,8 +185,9 @@ scenario manifest with redacted persisted-state evidence. Run
 `make adapter-conformance` before a runtime canary; see the
 [fake-runtime contract](../conformance/fake-runtime/README.md) for compatible
 entrypoints and evidence privacy. The default target tests generic orchestration,
-not the Muse adapter. Hermes additionally has focused Runs API HTTP tests and a
-real-`journald`/spool integration test.
+not a vendor runtime. Hermes additionally has focused Runs API HTTP tests and a
+real-`journald`/spool integration test; Muse has focused drop-point contract
+tests and a real-`journald`/spool/drop-point integration test.
 
 Use a fake runtime before connecting a vendor runtime:
 
@@ -208,6 +209,6 @@ Use a fake runtime before connecting a vendor runtime:
 
 ## Runtime-specific integration
 
-Do not infer an injection surface from a vendor name or old local installation. The Hermes adapter uses the authenticated durable Runs API: preflight capabilities, create the explicit local session, and submit an idempotent run with a bounded `run_id` receipt. Its repository tests prove runtime admission and custody ordering, not model completion or a production canary. Muse remains unresolved; record its supported version, exact API/CLI/hook behavior, concurrency semantics, receipt strength, restart behavior, and canary evidence in deployment-local evidence before implementing it.
+Do not infer an injection surface from a vendor name or old local installation. The Hermes adapter uses the authenticated durable Runs API: preflight capabilities, create the explicit local session, and submit an idempotent run with a bounded `run_id` receipt. Its repository tests prove runtime admission and custody ordering, not model completion or a production canary. The Muse adapter uses a private local drop directory watched by a platform hook: durable per-attempt drop files with a stable `dedupe_key`, no runtime secret, and no platform idempotency key, so the deployment's hook worker must keep a durable seen-set to avoid duplicate turns. Its repository tests prove durable local handoff and custody ordering, not hook execution, queued-turn durability, or a production canary. Record the supported runtime version, exact API/CLI/hook behavior, concurrency semantics, receipt strength, restart behavior, and canary evidence in deployment-local evidence before relying on either in production.
 
 Never use terminal keystrokes, direct edits to a runtime's internal database, shell interpolation of record content, or a fresh unrelated session per delivery as a substitute for a supported integration.

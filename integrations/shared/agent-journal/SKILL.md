@@ -52,4 +52,4 @@ The ticket file is sensitive and must be protected by the host. Enrollment write
 
 ## Availability caveat
 
-The repository ships a functioning runtime-neutral service, client, protected admin path, generic adapter boundaries, and an executable Hermes Runs API adapter. Muse remains an explicit status-2 stub, and deployment/load acceptance remains unresolved. Use this guidance only with a compatible protocol version and after the relevant acceptance gates have passed. Hermes runtime admission is not evidence of model observation or task completion.
+The repository ships a functioning runtime-neutral service, client, protected admin path, generic adapter boundaries, an executable Hermes Runs API adapter, and an executable Muse hook drop-point adapter. Deployment/load acceptance remains unresolved. Use this guidance only with a compatible protocol version and after the relevant acceptance gates have passed. Runtime admission is not evidence of model observation or task completion.
