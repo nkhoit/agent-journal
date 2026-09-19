@@ -1,10 +1,13 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::pin::Pin;
+#[cfg(unix)]
+use std::task::{Context, Poll};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -196,7 +199,7 @@ impl Server {
             .transpose()
     }
 
-    pub async fn serve<S>(mut self, shutdown: S) -> Result<(), ServerError>
+    pub async fn serve<S>(self, shutdown: S) -> Result<(), ServerError>
     where
         S: Future<Output = ()> + Send + 'static,
     {
@@ -220,6 +223,8 @@ impl Server {
         let admin_router =
             admin_router.layer(axum::Extension(crate::http::AdminOwner(admin_owner)));
         let shutdown_timeout = self.shutdown_timeout;
+        let (admin_listener, admin_guard) =
+            self.admin.into_parts().map_err(ServerError::ServeAdmin)?;
         let mut listeners = JoinSet::new();
         if let Some((listener, viewer)) = self.web_listener {
             let router = web_router_with_timeout(
@@ -245,11 +250,7 @@ impl Server {
                 .map_err(ServerError::ServePublic)
         });
         let admin_shutdown = shutdown_rx;
-        let admin_listener = self
-            .admin
-            .take_listener()
-            .map_err(ServerError::ServeAdmin)?;
-        listeners.spawn(async move {
+        let admin_serving = async move {
             axum::serve(
                 admin_listener,
                 admin_router.into_make_service_with_connect_info::<crate::http::AdminPeer>(),
@@ -257,6 +258,13 @@ impl Server {
             .with_graceful_shutdown(wait_for_shutdown(admin_shutdown))
             .await
             .map_err(ServerError::ServeAdmin)
+        };
+        // Keep the serving future, which owns the listener, before the guard.
+        // If this outer future is cancelled, JoinSet aborts this task and the
+        // listener is dropped before the guard can release ownership.
+        listeners.spawn(AdminServing {
+            serving: Box::pin(admin_serving),
+            _guard: admin_guard,
         });
         tracing::info!(
             event = "service_ready",
@@ -343,17 +351,18 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 #[cfg(unix)]
 const ADMIN_ARTIFACT_MAX_BYTES: u64 = 4096;
 #[cfg(unix)]
-const ADMIN_MARKER_VERSION: &str = "1";
+const ADMIN_MARKER_VERSION: &str = "2";
 #[cfg(unix)]
 const ADMIN_LOCK_SUFFIX: &str = ".lock";
 #[cfg(unix)]
 const ADMIN_MARKER_SUFFIX: &str = ".marker";
 #[cfg(unix)]
-// Keep this deliberately short: the final socket path can already be close
-// to macOS's SUN_LEN limit, and the pending name is joined to the same parent.
-const ADMIN_PENDING_PREFIX: &[u8] = b".p";
+const ADMIN_PENDING_ALPHABET: &[u8] =
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 #[cfg(unix)]
-static NEXT_PENDING: AtomicU64 = AtomicU64::new(0);
+const ADMIN_PENDING_MAX_CANDIDATES: u64 = 4096;
+#[cfg(unix)]
+const ADMIN_PENDING_MAX_NAME_BYTES: usize = 256;
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -382,14 +391,33 @@ struct Artifact {
 }
 
 #[cfg(unix)]
+struct OwnerLock {
+    path: PathBuf,
+    file: File,
+    identity: ArtifactIdentity,
+}
+
+#[cfg(unix)]
+impl OwnerLock {
+    fn verify(&self) -> io::Result<()> {
+        if validate_open_private_file(&self.path, &self.file)? != self.identity {
+            return Err(invalid_data("administrative owner lock changed"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 #[derive(Debug)]
 enum MarkerState {
     Empty,
     Pending {
+        owner_lock: ArtifactIdentity,
         identity: ArtifactIdentity,
         pending_name: OsString,
     },
     Published {
+        owner_lock: ArtifactIdentity,
         identity: ArtifactIdentity,
         pending_name: Option<OsString>,
     },
@@ -406,7 +434,7 @@ struct MarkerFile {
 struct AdminSocketGuard {
     path: PathBuf,
     marker: MarkerFile,
-    owner_lock: File,
+    owner_lock: OwnerLock,
     identity: ArtifactIdentity,
 }
 
@@ -420,15 +448,37 @@ struct AdminSocket {
 }
 
 #[cfg(unix)]
+struct AdminServing<F> {
+    serving: Pin<Box<F>>,
+    _guard: AdminSocketGuard,
+}
+
+#[cfg(unix)]
+impl<F> Future for AdminServing<F>
+where
+    F: Future<Output = Result<(), ServerError>> + Send,
+{
+    type Output = Result<(), ServerError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // AdminServing is pinned as a whole. Poll only the serving future in
+        // place; its field is declared before _guard so cancellation drops
+        // the listener before the owner lock.
+        self.get_mut().serving.as_mut().poll(context)
+    }
+}
+
+#[cfg(unix)]
 impl AdminSocket {
     fn path(&self) -> &Path {
         self.guard.path()
     }
 
-    fn take_listener(&mut self) -> io::Result<tokio::net::UnixListener> {
-        self.listener
-            .take()
+    fn into_parts(self) -> io::Result<(tokio::net::UnixListener, AdminSocketGuard)> {
+        let Self { listener, guard } = self;
+        listener
             .ok_or_else(|| invalid_data("administrative listener is unavailable"))
+            .map(|listener| (listener, guard))
     }
 }
 
@@ -505,7 +555,7 @@ fn validate_open_private_file(path: &Path, file: &File) -> io::Result<ArtifactId
 }
 
 #[cfg(unix)]
-fn open_owner_lock(path: &Path) -> io::Result<File> {
+fn open_owner_lock(path: &Path) -> io::Result<OwnerLock> {
     for _ in 0..2 {
         let exists = match fs::symlink_metadata(path) {
             Ok(metadata) => {
@@ -530,11 +580,13 @@ fn open_owner_lock(path: &Path) -> io::Result<File> {
         };
         let identity = validate_open_private_file(path, &file)?;
         file.try_lock_exclusive()?;
-        if validate_open_private_file(path, &file)? != identity {
-            let _ = FileExt::unlock(&file);
-            return Err(invalid_data("administrative owner lock changed"));
-        }
-        return Ok(file);
+        let owner_lock = OwnerLock {
+            path: path.to_owned(),
+            file,
+            identity,
+        };
+        owner_lock.verify()?;
+        return Ok(owner_lock);
     }
     Err(invalid_data("administrative owner lock creation raced"))
 }
@@ -542,13 +594,11 @@ fn open_owner_lock(path: &Path) -> io::Result<File> {
 #[cfg(unix)]
 fn marker_name(name: &OsStr) -> io::Result<String> {
     let bytes = name.as_bytes();
-    if bytes.len() <= ADMIN_PENDING_PREFIX.len()
-        || bytes.is_empty()
-        || bytes == b"."
-        || bytes == b".."
-        || bytes.iter().any(|byte| *byte == 0 || *byte == b'/')
-        || !bytes.starts_with(ADMIN_PENDING_PREFIX)
-        || bytes.len() > 256
+    if bytes.is_empty()
+        || bytes.len() > ADMIN_PENDING_MAX_NAME_BYTES
+        || !bytes
+            .iter()
+            .all(|byte| ADMIN_PENDING_ALPHABET.contains(byte))
     {
         return Err(invalid_data(
             "administrative marker has an invalid pending path",
@@ -598,8 +648,21 @@ fn marker_number(text: &str) -> io::Result<u64> {
             "administrative marker has an invalid identity",
         ));
     }
-    text.parse()
-        .map_err(|_| invalid_data("administrative marker has an invalid identity"))
+    let number = text
+        .parse::<u64>()
+        .map_err(|_| invalid_data("administrative marker has an invalid identity"))?;
+    if number.to_string() != text {
+        return Err(invalid_data(
+            "administrative marker has an invalid identity",
+        ));
+    }
+    Ok(number)
+}
+
+#[cfg(unix)]
+fn marker_field<'a>(line: &'a str, prefix: &str) -> io::Result<&'a str> {
+    line.strip_prefix(prefix)
+        .ok_or_else(|| invalid_data("administrative marker format is invalid"))
 }
 
 #[cfg(unix)]
@@ -612,47 +675,67 @@ fn parse_marker(bytes: &[u8]) -> io::Result<MarkerState> {
     let lines: Vec<&str> = text
         .strip_suffix('\n')
         .map_or_else(Vec::new, |text| text.split('\n').collect());
-    if lines == ["version=1", "state=empty"] {
+    if lines == ["version=2", "state=empty"] {
         return Ok(MarkerState::Empty);
     }
-    let parse_identity = |lines: &[&str]| -> io::Result<ArtifactIdentity> {
-        if lines.len() < 5 || lines[0] != "version=1" || lines[2] != "type=socket" {
-            return Err(invalid_data("administrative marker format is invalid"));
-        }
-        let dev = lines[3]
-            .strip_prefix("dev=")
-            .ok_or_else(|| invalid_data("administrative marker format is invalid"))?;
-        let ino = lines[4]
-            .strip_prefix("ino=")
-            .ok_or_else(|| invalid_data("administrative marker format is invalid"))?;
+    let identity = |dev: &str, ino: &str| -> io::Result<ArtifactIdentity> {
         Ok(ArtifactIdentity {
-            device: marker_number(dev)?,
-            inode: marker_number(ino)?,
+            device: marker_number(marker_field(dev, "dev=")?)?,
+            inode: marker_number(marker_field(ino, "ino=")?)?,
+        })
+    };
+    let owner_lock = |dev: &str, ino: &str| -> io::Result<ArtifactIdentity> {
+        Ok(ArtifactIdentity {
+            device: marker_number(marker_field(dev, "lock-dev=")?)?,
+            inode: marker_number(marker_field(ino, "lock-ino=")?)?,
         })
     };
     match lines.as_slice() {
-        ["version=1", "state=pending", "type=socket", _, _, pending] => {
-            let identity = parse_identity(&lines)?;
-            let encoded = pending
-                .strip_prefix("pending=")
-                .ok_or_else(|| invalid_data("administrative marker format is invalid"))?;
+        [
+            "version=2",
+            "state=pending",
+            "type=socket",
+            lock_dev,
+            lock_ino,
+            dev,
+            ino,
+            pending,
+        ] => {
+            let encoded = marker_field(pending, "pending=")?;
             Ok(MarkerState::Pending {
-                identity,
+                owner_lock: owner_lock(lock_dev, lock_ino)?,
+                identity: identity(dev, ino)?,
                 pending_name: decode_marker_name(encoded)?,
             })
         }
-        ["version=1", "state=published", "type=socket", _, _, pending] => {
-            let identity = parse_identity(&lines)?;
-            let encoded = pending
-                .strip_prefix("pending=")
-                .ok_or_else(|| invalid_data("administrative marker format is invalid"))?;
+        [
+            "version=2",
+            "state=published",
+            "type=socket",
+            lock_dev,
+            lock_ino,
+            dev,
+            ino,
+            pending,
+        ] => {
+            let encoded = marker_field(pending, "pending=")?;
             Ok(MarkerState::Published {
-                identity,
+                owner_lock: owner_lock(lock_dev, lock_ino)?,
+                identity: identity(dev, ino)?,
                 pending_name: Some(decode_marker_name(encoded)?),
             })
         }
-        ["version=1", "state=published", "type=socket", _, _] => Ok(MarkerState::Published {
-            identity: parse_identity(&lines)?,
+        [
+            "version=2",
+            "state=published",
+            "type=socket",
+            lock_dev,
+            lock_ino,
+            dev,
+            ino,
+        ] => Ok(MarkerState::Published {
+            owner_lock: owner_lock(lock_dev, lock_ino)?,
+            identity: identity(dev, ino)?,
             pending_name: None,
         }),
         _ => Err(invalid_data("administrative marker format is invalid")),
@@ -664,21 +747,25 @@ fn marker_bytes(state: &MarkerState) -> io::Result<Vec<u8>> {
     let text = match state {
         MarkerState::Empty => format!("version={ADMIN_MARKER_VERSION}\nstate=empty\n"),
         MarkerState::Pending {
+            owner_lock,
             identity,
             pending_name,
         } => format!(
-            "version={ADMIN_MARKER_VERSION}\nstate=pending\ntype=socket\ndev={}\nino={}\npending={}\n",
+            "version={ADMIN_MARKER_VERSION}\nstate=pending\ntype=socket\nlock-dev={}\nlock-ino={}\ndev={}\nino={}\npending={}\n",
+            owner_lock.device,
+            owner_lock.inode,
             identity.device,
             identity.inode,
             marker_name(pending_name)?
         ),
         MarkerState::Published {
+            owner_lock,
             identity,
             pending_name,
         } => {
             let mut text = format!(
-                "version={ADMIN_MARKER_VERSION}\nstate=published\ntype=socket\ndev={}\nino={}\n",
-                identity.device, identity.inode
+                "version={ADMIN_MARKER_VERSION}\nstate=published\ntype=socket\nlock-dev={}\nlock-ino={}\ndev={}\nino={}\n",
+                owner_lock.device, owner_lock.inode, identity.device, identity.inode
             );
             if let Some(pending_name) = pending_name {
                 text.push_str("pending=");
@@ -693,19 +780,24 @@ fn marker_bytes(state: &MarkerState) -> io::Result<Vec<u8>> {
 
 #[cfg(unix)]
 impl MarkerFile {
-    fn write_state(&mut self, state: &MarkerState) -> io::Result<()> {
+    fn write_state(&mut self, state: &MarkerState, owner_lock: &OwnerLock) -> io::Result<()> {
         let bytes = marker_bytes(state)?;
         if bytes.len() as u64 > ADMIN_ARTIFACT_MAX_BYTES {
             return Err(invalid_data("administrative marker is oversized"));
         }
+        owner_lock.verify()?;
         if validate_open_private_file(&self.path, &self.file)? != self.identity {
             return Err(invalid_data("administrative marker changed"));
         }
+        // The lock check is deliberately immediately before the in-place
+        // marker transition. A later pathname replacement is fail-closed.
+        owner_lock.verify()?;
         self.file.set_len(0)?;
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&bytes)?;
         self.file.sync_all()?;
         sync_parent(&self.path)?;
+        owner_lock.verify()?;
         if validate_open_private_file(&self.path, &self.file)? != self.identity {
             return Err(invalid_data("administrative marker changed"));
         }
@@ -714,7 +806,7 @@ impl MarkerFile {
 }
 
 #[cfg(unix)]
-fn open_marker(path: &Path) -> io::Result<(MarkerFile, MarkerState)> {
+fn open_marker(path: &Path, owner_lock: &OwnerLock) -> io::Result<(MarkerFile, MarkerState)> {
     for _ in 0..2 {
         let exists = match fs::symlink_metadata(path) {
             Ok(metadata) => {
@@ -751,7 +843,7 @@ fn open_marker(path: &Path) -> io::Result<(MarkerFile, MarkerState)> {
                 .read_to_end(&mut bytes)?;
             parse_marker(&bytes)?
         } else {
-            marker.write_state(&MarkerState::Empty)?;
+            marker.write_state(&MarkerState::Empty, owner_lock)?;
             MarkerState::Empty
         };
         return Ok((marker, state));
@@ -760,7 +852,22 @@ fn open_marker(path: &Path) -> io::Result<(MarkerFile, MarkerState)> {
 }
 
 #[cfg(unix)]
-fn remove_owned(path: &Path, expected: ArtifactIdentity) -> io::Result<bool> {
+fn remove_owned(
+    owner_lock: &OwnerLock,
+    path: &Path,
+    expected: ArtifactIdentity,
+) -> io::Result<bool> {
+    owner_lock.verify()?;
+    let Some(actual) = artifact(path)? else {
+        return Ok(false);
+    };
+    if actual.kind != ArtifactKind::Socket || actual.identity != expected {
+        return Err(invalid_data("administrative socket identity changed"));
+    }
+    // POSIX has no atomic conditional unlink by dev/inode. Recheck both
+    // identities immediately before unlink and rely on the owner lock plus
+    // the private parent directory for conforming-process serialization.
+    owner_lock.verify()?;
     let Some(actual) = artifact(path)? else {
         return Ok(false);
     };
@@ -773,12 +880,14 @@ fn remove_owned(path: &Path, expected: ArtifactIdentity) -> io::Result<bool> {
 
 #[cfg(unix)]
 fn recover_marker(
+    owner_lock: &OwnerLock,
     marker: &mut MarkerFile,
     state: MarkerState,
     final_path: &Path,
-    parent: &Path,
+    parent: Option<&Path>,
 ) -> io::Result<()> {
-    let (identity, pending_name) = match state {
+    owner_lock.verify()?;
+    let (marker_owner_lock, identity, pending_name) = match state {
         MarkerState::Empty => {
             if artifact(final_path)?.is_some() {
                 return Err(invalid_data("unmarked administrative socket is preserved"));
@@ -786,25 +895,39 @@ fn recover_marker(
             return Ok(());
         }
         MarkerState::Pending {
+            owner_lock,
             identity,
             pending_name,
         }
         | MarkerState::Published {
+            owner_lock,
             identity,
             pending_name: Some(pending_name),
-        } => (identity, Some(pending_name)),
+        } => (owner_lock, identity, Some(pending_name)),
         MarkerState::Published {
+            owner_lock,
             identity,
             pending_name: None,
-        } => (identity, None),
+        } => (owner_lock, identity, None),
     };
-    let pending_path = pending_name.map(|name| parent.join(name));
+    if marker_owner_lock != owner_lock.identity {
+        return Err(invalid_data("administrative marker owner lock changed"));
+    }
+    let pending_path = pending_name
+        .map(|name| parent.map_or_else(|| PathBuf::from(&name), |parent| parent.join(&name)));
     if pending_path
         .as_deref()
         .is_some_and(|path| path == final_path)
     {
         return Err(invalid_data(
             "administrative marker pending path is final path",
+        ));
+    }
+    if pending_path.as_deref().is_some_and(|path| {
+        path.as_os_str().as_bytes().len() > final_path.as_os_str().as_bytes().len()
+    }) {
+        return Err(invalid_data(
+            "administrative marker pending path exceeds final path budget",
         ));
     }
     for path in [Some(final_path), pending_path.as_deref()]
@@ -817,80 +940,132 @@ fn recover_marker(
             }
         }
     }
-    remove_owned(final_path, identity)?;
+    remove_owned(owner_lock, final_path, identity)?;
     if let Some(path) = pending_path {
-        remove_owned(&path, identity)?;
+        remove_owned(owner_lock, &path, identity)?;
     }
     sync_parent(final_path)?;
-    marker.write_state(&MarkerState::Empty)
+    marker.write_state(&MarkerState::Empty, owner_lock)
 }
 
 #[cfg(unix)]
-fn next_pending_path(parent: &Path) -> PathBuf {
-    let sequence = NEXT_PENDING.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(".p{:x}{:x}", std::process::id(), sequence))
+fn pending_candidate(index: u64, max_bytes: usize) -> Option<OsString> {
+    let base = ADMIN_PENDING_ALPHABET.len() as u64;
+    let mut value = index;
+    let mut bytes = Vec::new();
+    loop {
+        bytes.push(ADMIN_PENDING_ALPHABET[(value % base) as usize]);
+        value /= base;
+        if value == 0 {
+            break;
+        }
+    }
+    bytes.reverse();
+    if bytes.len() > max_bytes || bytes.len() > ADMIN_PENDING_MAX_NAME_BYTES {
+        None
+    } else {
+        Some(OsString::from_vec(bytes))
+    }
 }
 
 #[cfg(unix)]
 async fn bind_admin_listener(path: &Path) -> io::Result<AdminSocket> {
     let parent = path
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let final_name = path
+        .file_name()
+        .ok_or_else(|| invalid_data("administrative socket has no final name"))?;
+    let final_name_bytes = final_name.as_bytes();
+    if final_name_bytes.is_empty() {
+        return Err(invalid_data("administrative socket has no final name"));
+    }
     let lock_path = sidecar_path(path, ADMIN_LOCK_SUFFIX);
     let owner_lock = open_owner_lock(&lock_path)?;
     let marker_path = sidecar_path(path, ADMIN_MARKER_SUFFIX);
-    let (mut marker, marker_state) = open_marker(&marker_path)?;
-    recover_marker(&mut marker, marker_state, path, parent)?;
+    let (mut marker, marker_state) = open_marker(&marker_path, &owner_lock)?;
+    recover_marker(&owner_lock, &mut marker, marker_state, path, parent)?;
 
-    let (listener, pending_path, identity) = loop {
-        let pending_path = next_pending_path(parent);
-        match tokio::net::UnixListener::bind(&pending_path) {
-            Ok(listener) => {
-                let Some(artifact) = artifact(&pending_path)? else {
-                    return Err(invalid_data("pending administrative socket disappeared"));
-                };
-                if artifact.kind != ArtifactKind::Socket {
-                    return Err(invalid_data("pending administrative path is not a socket"));
-                }
-                break (listener, pending_path, artifact.identity);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::AlreadyExists | io::ErrorKind::AddrInUse
-                ) =>
-            {
+    let (listener, pending_path, identity) = {
+        let mut selected = None;
+        for candidate_index in 0..ADMIN_PENDING_MAX_CANDIDATES {
+            let Some(pending_name) = pending_candidate(candidate_index, final_name_bytes.len())
+            else {
+                break;
+            };
+            if pending_name.as_os_str().as_bytes() == final_name_bytes {
                 continue;
             }
-            Err(error) => return Err(error),
+            let pending_path = parent.map_or_else(
+                || PathBuf::from(&pending_name),
+                |parent| parent.join(&pending_name),
+            );
+            if pending_path.as_os_str().as_bytes().len() > path.as_os_str().as_bytes().len() {
+                continue;
+            }
+            if artifact(&pending_path)?.is_some() {
+                continue;
+            }
+            match tokio::net::UnixListener::bind(&pending_path) {
+                Ok(listener) => {
+                    let Some(artifact) = artifact(&pending_path)? else {
+                        return Err(invalid_data("pending administrative socket disappeared"));
+                    };
+                    if artifact.kind != ArtifactKind::Socket {
+                        return Err(invalid_data("pending administrative path is not a socket"));
+                    }
+                    selected = Some((listener, pending_path, artifact.identity));
+                    break;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::AlreadyExists | io::ErrorKind::AddrInUse
+                    ) => {}
+                Err(error) => return Err(error),
+            }
         }
+        selected.ok_or_else(|| {
+            invalid_data("administrative pending socket name candidates exhausted")
+        })?
     };
+    owner_lock.verify()?;
     fs::set_permissions(&pending_path, fs::Permissions::from_mode(0o600))?;
-    marker.write_state(&MarkerState::Pending {
-        identity,
-        pending_name: pending_path
-            .file_name()
-            .ok_or_else(|| invalid_data("pending administrative socket has no name"))?
-            .to_os_string(),
-    })?;
+    let pending_name = pending_path
+        .file_name()
+        .ok_or_else(|| invalid_data("pending administrative socket has no name"))?
+        .to_os_string();
+    marker.write_state(
+        &MarkerState::Pending {
+            owner_lock: owner_lock.identity,
+            identity,
+            pending_name: pending_name.clone(),
+        },
+        &owner_lock,
+    )?;
+    // Publication is protected by the same pinned lock identity as marker
+    // transitions. The final unlink/link checks remain identity-based.
+    owner_lock.verify()?;
     fs::hard_link(&pending_path, path)?;
     sync_parent(path)?;
-    marker.write_state(&MarkerState::Published {
-        identity,
-        pending_name: Some(
-            pending_path
-                .file_name()
-                .ok_or_else(|| invalid_data("pending administrative socket has no name"))?
-                .to_os_string(),
-        ),
-    })?;
-    remove_owned(&pending_path, identity)?;
+    marker.write_state(
+        &MarkerState::Published {
+            owner_lock: owner_lock.identity,
+            identity,
+            pending_name: Some(pending_name),
+        },
+        &owner_lock,
+    )?;
+    remove_owned(&owner_lock, &pending_path, identity)?;
     sync_parent(path)?;
-    marker.write_state(&MarkerState::Published {
-        identity,
-        pending_name: None,
-    })?;
+    marker.write_state(
+        &MarkerState::Published {
+            owner_lock: owner_lock.identity,
+            identity,
+            pending_name: None,
+        },
+        &owner_lock,
+    )?;
     Ok(AdminSocket {
         listener: Some(listener),
         guard: AdminSocketGuard {
@@ -916,11 +1091,15 @@ impl Drop for AdminSocketGuard {
         // guard. Only an identity-matching socket may be removed. A replaced
         // path deliberately leaves the published marker behind for fail-closed
         // recovery on the next startup.
-        if remove_owned(&self.path, self.identity).unwrap_or(false) {
+        if self.owner_lock.verify().is_ok()
+            && remove_owned(&self.owner_lock, &self.path, self.identity).unwrap_or(false)
+        {
             let _ = sync_parent(&self.path);
-            let _ = self.marker.write_state(&MarkerState::Empty);
+            let _ = self
+                .marker
+                .write_state(&MarkerState::Empty, &self.owner_lock);
         }
-        let _ = FileExt::unlock(&self.owner_lock);
+        let _ = FileExt::unlock(&self.owner_lock.file);
     }
 }
 

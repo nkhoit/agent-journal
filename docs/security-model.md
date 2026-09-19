@@ -69,6 +69,36 @@ Record content, Markdown, `kind`, `run_id`, routing key, relation labels, future
 
 Adapters place authenticated envelope metadata outside the body where the runtime supports structured metadata. Text-only runtimes still receive an explicit warning, but authority checks remain outside the model.
 
+## Local admin-socket ownership and recovery
+
+The admin socket uses a private mode-`0700` parent, a persistent mode-`0600`
+owner-lock inode, and a durable marker. Every non-empty marker records the lock
+device/inode and the owned socket artifact device/inode. Startup, publication, marker
+transitions, and cleanup recheck both the held lock file descriptor and the lock
+pathname as the same private regular single-link file. A crash restart is
+therefore valid only when the persistent lock inode is unchanged. Replacing the
+lock pathname causes the next bind to fail closed and leaves the live socket and
+marker untouched. This serialization relies on conforming processes using the
+owner lock and private parent; POSIX does not provide an atomic conditional
+unlink primitive, so the final socket identity is rechecked immediately before
+each unlink rather than described as impossible to race.
+
+The service UID is trusted. Code already running as that UID can rewrite the
+database, marker, lock, credentials, or binary, so same-UID malicious code is
+outside this boundary; the lock protocol is for crash recovery and conforming
+service instances, not privilege separation from that UID.
+
+Pending socket names come from a bounded safe ASCII grammar and never exceed the
+final socket path budget. An occupied candidate is skipped; bounded exhaustion
+fails closed. A crash before the pending marker is durable can leave an unknown
+pending socket, which is skipped on the next bind and does not prevent final
+startup unless the bounded candidate set is exhausted.
+
+Marker updates intentionally use a bounded in-place write. A kill during that
+write can leave an empty or partial marker; startup rejects it rather than
+guessing ownership. Manual recovery must first verify the socket and lock
+identities, then remove the damaged marker/artifacts under the protected parent.
+
 ## Fencing and recovery
 
 Credential rotation is one atomic revoke-and-replace transaction with immediate revocation, not an overlap period. The replacement secret is returned once through protected Unix administration and written atomically to mode-`0600` storage without stdout or logging. A lost response or post-commit file-write failure requires administrator revocation of the inaccessible replacement; rollback or secret replay is not available.
