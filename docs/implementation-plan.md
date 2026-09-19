@@ -31,8 +31,9 @@ S0 contract gate
                              │       └─ S11 fake-runtime conformance
                              └─ S12 operations + read-only web
 
-Hermes has a separate Runs API implementation gate after S11; Muse remains a
-conditional canary workstream.
+Hermes has a separate Runs API implementation gate after S11, and Muse has a
+hook drop-point implementation gate after S11; live production canaries for
+both remain conditional deployment workstreams.
 ```
 
 Every slice should be one reviewable PR unless its acceptance gate cannot be demonstrated without two tightly coupled changes.
@@ -403,8 +404,9 @@ acknowledgement commits. Acceptance-before-persistence visibly duplicates a send
 Unix subprocess acceptance requires a filesystem that preserves private directory
 permissions; a Windows-mounted WSL checkout without those permissions fails closed.
 S11 adds the reusable scenario runner below; the Hermes Runs API adapter is
-covered by a separate focused HTTP gate and a real-`journald` integration gate.
-Muse remains unresolved.
+covered by a separate focused HTTP gate and a real-`journald` integration gate,
+and the Muse hook drop-point adapter is covered by a separate focused contract
+gate and a real-`journald` integration gate.
 
 ### Build
 
@@ -447,8 +449,9 @@ persistence, followed by a restart that visibly accepts the same attempt twice.
 Identity relationships are anonymized within each execution; raw fixture databases
 are not publishable evidence. The runner and its regression tests are part of
 `make check` and CI. See the [runtime contract](../conformance/fake-runtime/README.md)
-for compatible future runtime entrypoints. Hermes now has a supported Runs API
-adapter; Muse remains a status-2 stub.
+for compatible future runtime entrypoints. Both the Hermes Runs API adapter and
+the Muse hook drop-point adapter are executable runtime-acceptance adapters
+without claiming model completion.
 No public API, central or spool migration, or credential-class change is introduced.
 
 ### Build
@@ -468,8 +471,8 @@ No public API, central or spool migration, or credential-class change is introdu
 
 - Every scenario ID passes with durable-state evidence.
 - The suite demonstrates at-least-once behavior and visible duplicate risk rather than hiding it.
-- Muse still identifies as unresolved; Hermes identifies as an executable
-  runtime-acceptance adapter without claiming model completion.
+- Every runtime adapter identifies its supported surface honestly; Hermes identifies as an executable
+  runtime-acceptance adapter and Muse as an executable drop-point handoff adapter, both without claiming model completion.
 
 ## S12 — Operations, recovery, and safe read-only web
 
@@ -527,16 +530,23 @@ serialized mutation overhead remain unmeasured deployment acceptance items.
 
 ## Conditional runtime adapters
 
-Muse remains a separate, non-blocking workstream after S11. The Hermes adapter
-has passed its implementation gate, while production canary evidence remains a
-deployment release gate. Runtime adapter release gates are:
+Both runtime adapters have passed their implementation gates; production
+canary evidence for each remains a deployment release gate. The Muse adapter
+uses a hook drop-point handoff because the installed supported runtime
+exposes no authenticated injection API to local processes — see
+[Runtime integrations](runtime-integrations.md). Runtime adapter release
+gates are:
 
 1. record the supported runtime version;
 2. identify a supported injection surface;
 3. document busy-session and restart behavior;
 4. define the strongest honest acceptance receipt;
 5. keep opaque runtime targets in destination-local configuration;
-6. pass all S11 fake-runtime scenarios;
+6. pass all S11 fake-runtime scenarios, or the runtime-specific equivalent:
+   the generic `Adapter` orchestration is shared, so each adapter additionally
+   passes its own focused contract/HTTP tests plus a real-`journald`
+   integration test proving custody-before-injection, receipt persistence,
+   and restart behavior;
 7. pass a private Alpha → Journal → Beta → correlated-reply canary.
 
 If a surface cannot be revalidated, that adapter stays an explicit status-2 stub.
