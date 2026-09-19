@@ -787,6 +787,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "socket2",
  "thiserror",
  "tokio",
  "tower",

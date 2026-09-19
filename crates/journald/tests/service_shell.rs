@@ -17,6 +17,7 @@ use journald::{
     public_router,
 };
 use serde_json::Value;
+use socket2::{Domain, SockAddr, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::oneshot;
@@ -756,8 +757,13 @@ async fn bounded_pending_name_exhaustion_fails_closed() {
 async fn saturated_active_listener_is_rejected_and_preserved_without_connect_probe() {
     let temporary = TempDir::new("saturated-listener");
     let socket_path = temporary.path("admin.sock");
-    let occupied =
-        std::os::unix::net::UnixListener::bind(&socket_path).expect("bind active listener");
+    let occupied = Socket::new(Domain::UNIX, Type::STREAM, None).expect("create active socket");
+    occupied
+        .bind(&SockAddr::unix(&socket_path).expect("encode active socket path"))
+        .expect("bind active listener");
+    occupied
+        .listen(1)
+        .expect("set a deterministic small backlog");
     let mut clients = Vec::new();
     let mut refused = false;
     for _ in 0..256 {
