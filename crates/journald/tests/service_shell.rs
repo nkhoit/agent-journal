@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +45,41 @@ impl TempDir {
     fn path(&self, name: &str) -> PathBuf {
         self.path.join(name)
     }
+}
+
+fn sidecar(socket: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = socket.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn write_private(path: &std::path::Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("write private fixture");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("protect private fixture");
+}
+
+fn owner_lock_identity(socket: &std::path::Path) -> (u64, u64) {
+    let lock_path = sidecar(socket, ".lock");
+    write_private(&lock_path, b"");
+    let metadata = fs::symlink_metadata(lock_path).expect("stat owner lock fixture");
+    (metadata.dev(), metadata.ino())
+}
+
+fn published_marker(lock_device: u64, lock_inode: u64, device: u64, inode: u64) -> Vec<u8> {
+    format!(
+        "version=2\nstate=published\ntype=socket\nlock-dev={lock_device}\nlock-ino={lock_inode}\ndev={device}\nino={inode}\n"
+    )
+    .into_bytes()
+}
+
+fn marker_hex_name(name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(name.len() * 2);
+    for byte in name.bytes() {
+        encoded.push(char::from(HEX[(byte >> 4) as usize]));
+        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    encoded
 }
 
 impl Drop for TempDir {
@@ -634,6 +669,291 @@ async fn chunked_health_bodies_are_bounded() {
         .expect("server result");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_socket_publication_keeps_pending_path_within_macos_budget() {
+    let temporary = TempDir::new("socket-budget");
+    let mut largest = None;
+    for length in 1..=256 {
+        let candidate = temporary.path(&"s".repeat(length));
+        match std::os::unix::net::UnixListener::bind(&candidate) {
+            Ok(listener) => {
+                drop(listener);
+                fs::remove_file(&candidate).expect("remove direct socket probe");
+                largest = Some((length, candidate));
+            }
+            Err(_) if largest.is_some() => break,
+            Err(_) => {}
+        }
+    }
+    let (length, final_path) = largest.expect("find a direct Unix socket path boundary");
+    assert!(
+        std::os::unix::net::UnixListener::bind(&final_path).is_ok(),
+        "the selected final path must bind directly"
+    );
+    fs::remove_file(&final_path).expect("remove final direct socket probe");
+    assert!(
+        std::os::unix::net::UnixListener::bind(temporary.path(&"s".repeat(length + 1))).is_err(),
+        "the next longer path should exceed the platform socket budget"
+    );
+
+    let mut settings = config(&temporary);
+    settings.admin_socket_path = final_path.clone();
+    let server = Server::bind(settings)
+        .await
+        .expect("bind at socket boundary");
+    assert_eq!(server.admin_socket_path(), final_path.as_path());
+    let socket_path = server.admin_socket_path().to_owned();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(async move {
+        let _ = shutdown_rx.await;
+    }));
+    let response = unix_request(
+        &socket_path,
+        b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    shutdown_tx.send(()).expect("request boundary shutdown");
+    serving
+        .await
+        .expect("boundary server task")
+        .expect("boundary server result");
+
+    for name in ["a", "ab", "abc"] {
+        let mut settings = config(&temporary);
+        settings.admin_socket_path = temporary.path(name);
+        let server = Server::bind(settings)
+            .await
+            .expect("bind short final socket filename");
+        assert!(std::os::unix::net::UnixStream::connect(server.admin_socket_path()).is_ok());
+        drop(server);
+    }
+}
+
+#[tokio::test]
+async fn bounded_pending_name_exhaustion_fails_closed() {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+    let temporary = TempDir::new("pending-exhaustion");
+    for byte in ALPHABET {
+        let name = std::str::from_utf8(std::slice::from_ref(byte)).expect("ASCII candidate");
+        write_private(&temporary.path(name), b"occupied");
+    }
+    let mut settings = config(&temporary);
+    settings.admin_socket_path = temporary.path("!");
+    let error = match Server::bind(settings).await {
+        Ok(_) => panic!("all bounded pending candidates were occupied"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("administrative pending socket name candidates exhausted"),
+        "unexpected exhaustion error: {error}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn saturated_active_listener_is_rejected_and_preserved_without_connect_probe() {
+    let temporary = TempDir::new("saturated-listener");
+    let socket_path = temporary.path("admin.sock");
+    let occupied =
+        std::os::unix::net::UnixListener::bind(&socket_path).expect("bind active listener");
+    let mut clients = Vec::new();
+    let mut refused = false;
+    for _ in 0..256 {
+        match std::os::unix::net::UnixStream::connect(&socket_path) {
+            Ok(client) => clients.push(client),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                refused = true;
+                break;
+            }
+            Err(error) => panic!("unexpected saturated-listener connect error: {error}"),
+        }
+    }
+    assert!(refused, "the active listener backlog must be saturated");
+    assert!(Server::bind(config(&temporary)).await.is_err());
+    assert!(
+        socket_path.exists(),
+        "rejected bind preserves the active listener path"
+    );
+    drop(clients);
+    drop(occupied);
+}
+
+#[tokio::test]
+async fn concurrent_server_is_rejected_by_the_admin_owner_lock() {
+    let temporary = TempDir::new("admin-owner-lock");
+    let first = Server::bind(config(&temporary))
+        .await
+        .expect("bind first server");
+    let socket_path = first.admin_socket_path().to_owned();
+    let second = Server::bind(config(&temporary)).await;
+    assert!(matches!(second, Err(ServerError::BindAdmin { .. })));
+    assert!(
+        socket_path.exists(),
+        "the live owner's socket was preserved"
+    );
+    assert!(std::os::unix::net::UnixStream::connect(&socket_path).is_ok());
+    drop(first);
+}
+
+#[tokio::test]
+async fn replacing_the_owner_lock_path_fails_closed_and_preserves_the_live_socket() {
+    let temporary = TempDir::new("lock-pin");
+    let first = Server::bind(config(&temporary))
+        .await
+        .expect("bind first server");
+    let socket_path = first.admin_socket_path().to_owned();
+    let lock_path = sidecar(&socket_path, ".lock");
+    fs::remove_file(&lock_path).expect("remove owner lock pathname");
+    write_private(&lock_path, b"replacement lock inode");
+
+    let second = Server::bind(config(&temporary)).await;
+    assert!(matches!(second, Err(ServerError::BindAdmin { .. })));
+    assert!(socket_path.exists(), "the first socket path was preserved");
+    assert!(
+        std::os::unix::net::UnixStream::connect(&socket_path).is_ok(),
+        "the first listener remains reachable"
+    );
+    drop(first);
+    assert!(
+        socket_path.exists(),
+        "a replaced lock path must prevent cleanup of the first socket"
+    );
+}
+
+#[tokio::test]
+async fn unmarked_and_invalid_admin_artifacts_fail_closed() {
+    let regular = TempDir::new("admin-regular");
+    let regular_socket = regular.path("admin.sock");
+    fs::write(&regular_socket, b"regular sentinel").expect("write regular artifact");
+    assert!(Server::bind(config(&regular)).await.is_err());
+    assert_eq!(fs::read(&regular_socket).unwrap(), b"regular sentinel");
+
+    let directory = TempDir::new("admin-directory");
+    let directory_socket = directory.path("admin.sock");
+    fs::create_dir(&directory_socket).expect("create directory artifact");
+    assert!(Server::bind(config(&directory)).await.is_err());
+    assert!(directory_socket.is_dir());
+
+    let symlink = TempDir::new("admin-symlink");
+    let symlink_socket = symlink.path("admin.sock");
+    let symlink_target = symlink.path("target");
+    fs::write(&symlink_target, b"symlink target").expect("write symlink target");
+    std::os::unix::fs::symlink(&symlink_target, &symlink_socket).expect("create symlink artifact");
+    assert!(Server::bind(config(&symlink)).await.is_err());
+    assert!(symlink_socket.is_symlink());
+    assert_eq!(fs::read(&symlink_target).unwrap(), b"symlink target");
+
+    let invalid = TempDir::new("admin-invalid-marker");
+    let invalid_marker = sidecar(&invalid.path("admin.sock"), ".marker");
+    write_private(&invalid_marker, b"invalid marker\n");
+    assert!(Server::bind(config(&invalid)).await.is_err());
+    assert_eq!(fs::read(&invalid_marker).unwrap(), b"invalid marker\n");
+
+    let oversized = TempDir::new("admin-oversized-marker");
+    let oversized_marker = sidecar(&oversized.path("admin.sock"), ".marker");
+    let oversized_bytes = vec![b'x'; 4097];
+    write_private(&oversized_marker, &oversized_bytes);
+    assert!(Server::bind(config(&oversized)).await.is_err());
+    assert_eq!(fs::read(&oversized_marker).unwrap(), oversized_bytes);
+
+    let changed = TempDir::new("identity");
+    let changed_socket = changed.path("admin.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&changed_socket).expect("bind identity fixture");
+    let identity = fs::symlink_metadata(&changed_socket).expect("stat identity fixture");
+    drop(listener);
+    fs::remove_file(&changed_socket).expect("remove identity fixture");
+    fs::write(&changed_socket, b"replacement").expect("write changed identity");
+    let changed_marker = sidecar(&changed_socket, ".marker");
+    let (changed_lock_dev, changed_lock_ino) = owner_lock_identity(&changed_socket);
+    write_private(
+        &changed_marker,
+        &published_marker(
+            changed_lock_dev,
+            changed_lock_ino,
+            identity.dev(),
+            identity.ino(),
+        ),
+    );
+    assert!(Server::bind(config(&changed)).await.is_err());
+    assert_eq!(fs::read(&changed_socket).unwrap(), b"replacement");
+    assert_eq!(
+        fs::read(&changed_marker).unwrap(),
+        published_marker(
+            changed_lock_dev,
+            changed_lock_ino,
+            identity.dev(),
+            identity.ino(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn marker_owned_pending_and_published_paths_recover_without_probes() {
+    let pending = TempDir::new("pending-recovery");
+    let pending_socket = pending.path("pfixture");
+    let pending_listener =
+        std::os::unix::net::UnixListener::bind(&pending_socket).expect("bind pending fixture");
+    let pending_metadata = fs::symlink_metadata(&pending_socket).expect("stat pending fixture");
+    drop(pending_listener);
+    let pending_final = pending.path("admin.sock");
+    fs::hard_link(&pending_socket, &pending_final).expect("publish pending fixture");
+    let pending_marker = sidecar(&pending_final, ".marker");
+    let (pending_lock_dev, pending_lock_ino) = owner_lock_identity(&pending_final);
+    write_private(
+        &pending_marker,
+        format!(
+            "version=2\nstate=pending\ntype=socket\nlock-dev={pending_lock_dev}\nlock-ino={pending_lock_ino}\ndev={}\nino={}\npending={}\n",
+            pending_metadata.dev(),
+            pending_metadata.ino(),
+            marker_hex_name("pfixture")
+        )
+        .as_bytes(),
+    );
+    let recovered = Server::bind(config(&pending))
+        .await
+        .expect("recover pending marker");
+    assert!(
+        !pending_socket.exists(),
+        "owned pending artifact is recovered"
+    );
+    drop(recovered);
+
+    let published = TempDir::new("published-recovery");
+    let published_socket = published.path("admin.sock");
+    let published_listener =
+        std::os::unix::net::UnixListener::bind(&published_socket).expect("bind published fixture");
+    let published_metadata =
+        fs::symlink_metadata(&published_socket).expect("stat published fixture");
+    drop(published_listener);
+    let published_marker_path = sidecar(&published_socket, ".marker");
+    let (published_lock_dev, published_lock_ino) = owner_lock_identity(&published_socket);
+    write_private(
+        &published_marker_path,
+        &published_marker(
+            published_lock_dev,
+            published_lock_ino,
+            published_metadata.dev(),
+            published_metadata.ino(),
+        ),
+    );
+    let recovered = Server::bind(config(&published))
+        .await
+        .expect("recover published marker");
+    assert!(
+        published_socket.exists(),
+        "new listener is published at the final path"
+    );
+    drop(recovered);
+    assert!(
+        !published_socket.exists(),
+        "recovered listener cleans up normally"
+    );
+}
+
 #[tokio::test]
 async fn shutdown_preserves_a_replacement_at_the_admin_socket_path() {
     let temporary = TempDir::new("sock-replace");
@@ -645,6 +965,72 @@ async fn shutdown_preserves_a_replacement_at_the_admin_socket_path() {
     drop(server);
     assert_eq!(
         fs::read(&socket_path).expect("read replacement file"),
+        b"replacement"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_serve_releases_admin_ownership_before_restart() {
+    let temporary = TempDir::new("serve-cancellation");
+    for _ in 0..16 {
+        let server = Server::bind(config(&temporary))
+            .await
+            .expect("bind cancellable server");
+        let socket_path = server.admin_socket_path().to_owned();
+        let serving = tokio::spawn(server.serve(std::future::pending::<()>()));
+        let mut connected = false;
+        for _ in 0..100 {
+            if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(connected, "admin serving task did not start");
+
+        serving.abort();
+        assert!(
+            serving
+                .await
+                .expect_err("serve must be cancelled")
+                .is_cancelled()
+        );
+
+        let mut replacement = None;
+        for _ in 0..10_000 {
+            match Server::bind(config(&temporary)).await {
+                Ok(server) => {
+                    replacement = Some(server);
+                    break;
+                }
+                Err(error) => {
+                    drop(error);
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        let replacement = replacement.expect("restart after serve cancellation");
+        assert!(std::os::unix::net::UnixStream::connect(replacement.admin_socket_path()).is_ok());
+        drop(replacement);
+    }
+
+    let server = Server::bind(config(&temporary))
+        .await
+        .expect("bind replacement-preservation server");
+    let socket_path = server.admin_socket_path().to_owned();
+    fs::remove_file(&socket_path).expect("unlink socket before cancellation");
+    fs::write(&socket_path, b"replacement").expect("write replacement before cancellation");
+    let serving = tokio::spawn(server.serve(std::future::pending::<()>()));
+    tokio::task::yield_now().await;
+    serving.abort();
+    assert!(
+        serving
+            .await
+            .expect_err("replacement serve must be cancelled")
+            .is_cancelled()
+    );
+    assert_eq!(
+        fs::read(&socket_path).expect("read preserved replacement"),
         b"replacement"
     );
 }
@@ -800,6 +1186,39 @@ fn terminate_journald(child: &mut std::process::Child) -> std::process::ExitStat
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn binary_recovers_the_admin_socket_after_sigkill() {
+    let temporary = TempDir::new("sigkill-recovery");
+    let (mut child, ready_rx, admin_socket) = start_journald(&temporary);
+    let _ = wait_for_process_ready(&mut child, &ready_rx);
+
+    let signal_status = Command::new("kill")
+        .args(["-KILL", &child.id().to_string()])
+        .status()
+        .expect("signal journald with SIGKILL");
+    assert!(signal_status.success());
+    let killed = child.wait().expect("wait for SIGKILL");
+    assert!(
+        !killed.success(),
+        "SIGKILL must not be mistaken for graceful exit"
+    );
+    assert!(
+        admin_socket.exists(),
+        "SIGKILL leaves the published socket path"
+    );
+
+    let (mut restarted, restarted_ready, restarted_socket) = start_journald(&temporary);
+    let _ = wait_for_process_ready(&mut restarted, &restarted_ready);
+    assert_eq!(restarted_socket, admin_socket);
+    assert!(std::os::unix::net::UnixStream::connect(&restarted_socket).is_ok());
+    let status = terminate_journald(&mut restarted);
+    assert!(status.success(), "restarted journald exit status: {status}");
+    assert!(
+        !admin_socket.exists(),
+        "restarted graceful cleanup removes the socket"
+    );
 }
 
 #[test]
