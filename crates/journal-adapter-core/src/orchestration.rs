@@ -57,6 +57,7 @@ pub struct Adapter<'a, J, S, R, T, C> {
     pub runtime: &'a T,
     pub clock: &'a C,
     instance: String,
+    wait_seconds: u64,
     registration: Option<Registration>,
     after: Option<String>,
 }
@@ -80,9 +81,21 @@ impl<'a, J: Journal, S: AdapterSpool, R: RouteResolver, T: Runtime, C: Clock>
             runtime,
             clock,
             instance,
+            wait_seconds: 0,
             registration: None,
             after: None,
         })
+    }
+
+    /// Bound, in seconds, for long-polling mailbox claims. Zero (the default)
+    /// preserves the historical immediate-return claim; up to
+    /// [`journal_domain::MAX_LONG_POLL_SECONDS`] the central holds an empty
+    /// claim until mail arrives or the bound elapses. The bound only affects
+    /// the claim wait — custody, fencing, and spooling are unchanged.
+    pub fn with_wait_seconds(mut self, wait_seconds: u64) -> CoreResult<Self> {
+        journal_domain::validate_long_poll_seconds(wait_seconds)?;
+        self.wait_seconds = wait_seconds;
+        Ok(self)
     }
 
     pub fn tick(&mut self) -> CoreResult<Progress> {
@@ -174,7 +187,7 @@ impl<'a, J: Journal, S: AdapterSpool, R: RouteResolver, T: Runtime, C: Clock>
                 instance_id: self.instance.clone(),
                 generation: registration.generation,
                 limit: 1,
-                wait_seconds: 0,
+                wait_seconds: self.wait_seconds,
             })
             .map_err(|error| match error {
                 // A lost claim response has no replay key. Wait for server expiry.
