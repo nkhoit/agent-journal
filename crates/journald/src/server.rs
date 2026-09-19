@@ -74,9 +74,7 @@ pub enum ServerError {
 pub struct Server {
     public_listener: tokio::net::TcpListener,
     public_address: SocketAddr,
-    // Declare the guard before the listener so the listener drops first.
-    admin_socket: AdminSocketGuard,
-    admin_listener: tokio::net::UnixListener,
+    admin: AdminSocket,
     state: ServiceState,
     max_body_bytes: usize,
     body_read_timeout: Duration,
@@ -117,12 +115,12 @@ impl Server {
         // Acquire the admin ownership lock before opening any other service
         // resource. A second conforming server must fail at this lock, not at
         // an incidental database or listener dependency.
-        let (admin_listener, admin_socket) = bind_admin_listener(&config.admin_socket_path)
+        let admin = bind_admin_listener(&config.admin_socket_path)
             .await
             .map_err(|source| ServerError::BindAdmin {
-            path: config.admin_socket_path.clone(),
-            source,
-        })?;
+                path: config.admin_socket_path.clone(),
+                source,
+            })?;
 
         let database_path = config.database_path.clone();
         let audit_path = config
@@ -174,8 +172,7 @@ impl Server {
         Ok(Self {
             public_listener,
             public_address,
-            admin_socket,
-            admin_listener,
+            admin,
             state,
             max_body_bytes: config.max_body_bytes,
             body_read_timeout: config.body_read_timeout,
@@ -189,7 +186,7 @@ impl Server {
     }
 
     pub fn admin_socket_path(&self) -> &Path {
-        self.admin_socket.path()
+        self.admin.path()
     }
 
     pub fn web_address(&self) -> io::Result<Option<SocketAddr>> {
@@ -199,7 +196,7 @@ impl Server {
             .transpose()
     }
 
-    pub async fn serve<S>(self, shutdown: S) -> Result<(), ServerError>
+    pub async fn serve<S>(mut self, shutdown: S) -> Result<(), ServerError>
     where
         S: Future<Output = ()> + Send + 'static,
     {
@@ -217,7 +214,7 @@ impl Server {
             shutdown_rx.clone(),
         );
         use std::os::unix::fs::MetadataExt;
-        let admin_owner = std::fs::metadata(self.admin_socket.path())
+        let admin_owner = std::fs::metadata(self.admin.path())
             .map_err(ServerError::ServeAdmin)?
             .uid();
         let admin_router =
@@ -248,9 +245,13 @@ impl Server {
                 .map_err(ServerError::ServePublic)
         });
         let admin_shutdown = shutdown_rx;
+        let admin_listener = self
+            .admin
+            .take_listener()
+            .map_err(ServerError::ServeAdmin)?;
         listeners.spawn(async move {
             axum::serve(
-                self.admin_listener,
+                admin_listener,
                 admin_router.into_make_service_with_connect_info::<crate::http::AdminPeer>(),
             )
             .with_graceful_shutdown(wait_for_shutdown(admin_shutdown))
@@ -407,6 +408,28 @@ struct AdminSocketGuard {
     marker: MarkerFile,
     owner_lock: File,
     identity: ArtifactIdentity,
+}
+
+#[cfg(unix)]
+struct AdminSocket {
+    // Struct fields drop in declaration order. Keep the listener before the
+    // guard so an unserved Server closes the listener before removing the
+    // pathname, clearing the marker, and releasing the owner lock.
+    listener: Option<tokio::net::UnixListener>,
+    guard: AdminSocketGuard,
+}
+
+#[cfg(unix)]
+impl AdminSocket {
+    fn path(&self) -> &Path {
+        self.guard.path()
+    }
+
+    fn take_listener(&mut self) -> io::Result<tokio::net::UnixListener> {
+        self.listener
+            .take()
+            .ok_or_else(|| invalid_data("administrative listener is unavailable"))
+    }
 }
 
 #[cfg(unix)]
@@ -809,9 +832,7 @@ fn next_pending_path(parent: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-async fn bind_admin_listener(
-    path: &Path,
-) -> io::Result<(tokio::net::UnixListener, AdminSocketGuard)> {
+async fn bind_admin_listener(path: &Path) -> io::Result<AdminSocket> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -870,15 +891,15 @@ async fn bind_admin_listener(
         identity,
         pending_name: None,
     })?;
-    Ok((
-        listener,
-        AdminSocketGuard {
+    Ok(AdminSocket {
+        listener: Some(listener),
+        guard: AdminSocketGuard {
             path: path.to_owned(),
             marker,
             owner_lock,
             identity,
         },
-    ))
+    })
 }
 
 #[cfg(unix)]
@@ -891,8 +912,8 @@ impl AdminSocketGuard {
 #[cfg(unix)]
 impl Drop for AdminSocketGuard {
     fn drop(&mut self) {
-        // The listener field is declared after this guard, so it has already
-        // closed. Only an identity-matching socket may be removed. A replaced
+        // The owning AdminSocket closes its listener before dropping this
+        // guard. Only an identity-matching socket may be removed. A replaced
         // path deliberately leaves the published marker behind for fail-closed
         // recovery on the next startup.
         if remove_owned(&self.path, self.identity).unwrap_or(false) {
