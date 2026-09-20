@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use journal_storage_sqlite::{Database, MIGRATION_VERSION, StorageError};
+use journal_storage_sqlite::{Database, StorageError};
 use journald::{
     BlockingError, BlockingExecutor, Config, Server, ServerError, ServiceState, admin_router,
     public_router,
@@ -44,6 +44,41 @@ impl TempDir {
 
     fn path(&self, name: &str) -> PathBuf {
         self.path.join(name)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StartupArtifactState {
+    present: bool,
+    bytes: Option<Vec<u8>>,
+    device: Option<u64>,
+    inode: Option<u64>,
+    modified_seconds: Option<i64>,
+    modified_nanoseconds: Option<i64>,
+}
+
+fn startup_artifact_state(path: &std::path::Path) -> StartupArtifactState {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => StartupArtifactState {
+            present: true,
+            bytes: metadata
+                .file_type()
+                .is_file()
+                .then(|| fs::read(path).unwrap()),
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+            modified_seconds: Some(metadata.mtime()),
+            modified_nanoseconds: Some(metadata.mtime_nsec()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => StartupArtifactState {
+            present: false,
+            bytes: None,
+            device: None,
+            inode: None,
+            modified_seconds: None,
+            modified_nanoseconds: None,
+        },
+        Err(error) => panic!("inspect startup artifact {path:?}: {error}"),
     }
 }
 
@@ -431,6 +466,49 @@ fn config(temporary: &TempDir) -> Config {
     }
 }
 
+#[tokio::test]
+async fn daemon_recovery_refusal_preserves_current_central_before_rw_open() {
+    let temporary = TempDir::new("rec-admit");
+    let settings = config(&temporary);
+    let audit = settings.database_path.with_extension("recovery.db");
+    drop(
+        Database::open_protected(&settings.database_path, &audit)
+            .expect("initialize protected central"),
+    );
+    fs::remove_file(&audit).expect("remove required audit");
+    let artifacts = [
+        settings.database_path.clone(),
+        PathBuf::from(format!("{}-wal", settings.database_path.display())),
+        PathBuf::from(format!("{}-shm", settings.database_path.display())),
+        PathBuf::from(format!("{}-journal", settings.database_path.display())),
+        audit.clone(),
+        audit.with_extension("recovery-lock"),
+    ];
+    let before = artifacts
+        .iter()
+        .map(|path| (path.clone(), startup_artifact_state(path)))
+        .collect::<Vec<_>>();
+
+    let result = Server::bind(settings).await;
+    match result {
+        Err(error) => assert!(
+            matches!(
+                error,
+                ServerError::Database(StorageError::RecoveryClosed(
+                    "required external audit is missing"
+                ))
+            ),
+            "unexpected daemon refusal: {error:?}"
+        ),
+        Ok(_) => panic!("daemon unexpectedly bound without its required audit"),
+    }
+    let after = artifacts
+        .iter()
+        .map(|path| (path.clone(), startup_artifact_state(path)))
+        .collect::<Vec<_>>();
+    assert_eq!(after, before, "daemon startup changed recovery evidence");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
     let temporary = TempDir::new("web-server");
@@ -450,7 +528,7 @@ async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
     .unwrap();
     journal_service::BootstrapService::new(db.clone())
         .create_principal(&journal_protocol::PrincipalCreateRequest {
-            id: "viewer".into(),
+            handle: "viewer".into(),
             display_name: "Viewer".into(),
         })
         .unwrap();
@@ -501,7 +579,7 @@ async fn closed_recovery_prevents_shared_viewer_startup() {
     .unwrap();
     journal_service::BootstrapService::new(db.clone())
         .create_principal(&journal_protocol::PrincipalCreateRequest {
-            id: "viewer".into(),
+            handle: "viewer".into(),
             display_name: "Viewer".into(),
         })
         .unwrap();
@@ -637,6 +715,75 @@ async fn shutdown_cancels_an_incomplete_request_body() {
         "admin socket removed after shutdown"
     );
     drop(stream);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_shutdown_does_not_normalize_hot_database_state() {
+    let temporary = TempDir::new("forced-hot-db");
+    let database = temporary.path("journal.db");
+    let mut settings = config(&temporary);
+    settings.body_read_timeout = Duration::from_secs(10);
+    settings.shutdown_timeout = Duration::from_millis(100);
+    let server = Server::bind(settings).await.expect("bind server");
+    let address = server.public_address();
+    let admin_socket = server.admin_socket_path().to_owned();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(async move {
+        let _ = shutdown_rx.await;
+    }));
+    let created = unix_request(
+        &admin_socket,
+        b"POST /v1/admin/principals HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 50\r\nConnection: close\r\n\r\n{\"handle\":\"forced-writer\",\"display_name\":\"Forced\"}",
+    )
+    .await;
+    assert!(created.starts_with("HTTP/1.1 201 Created"), "{created}");
+    let ready = tcp_request(
+        address,
+        b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(ready.starts_with("HTTP/1.1 200 OK"), "{ready}");
+    let lock = rusqlite::Connection::open(&database).expect("open external lock holder");
+    lock.execute_batch("BEGIN IMMEDIATE;")
+        .expect("hold a central writer lock");
+    let blocked_body = br#"{"handle":"blocked-writer","display_name":"Blocked"}"#;
+    let blocked_request = format!(
+        "POST /v1/admin/principals HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        blocked_body.len(),
+        std::str::from_utf8(blocked_body).unwrap()
+    )
+    .into_bytes();
+    let blocked_socket = admin_socket.clone();
+    let mut blocked =
+        tokio::spawn(async move { unix_request(&blocked_socket, &blocked_request).await });
+    assert!(
+        timeout(Duration::from_millis(50), &mut blocked)
+            .await
+            .is_err(),
+        "the write must still be blocked when shutdown begins"
+    );
+
+    shutdown_tx.send(()).expect("request shutdown");
+    let result = timeout(Duration::from_millis(500), serving)
+        .await
+        .expect("forced shutdown must return without checkpointing through an active writer")
+        .expect("server task");
+    assert!(
+        result.is_err(),
+        "forced shutdown must be reported as a failure"
+    );
+    assert!(
+        ["-wal", "-shm", "-journal"]
+            .into_iter()
+            .map(|suffix| sidecar(&database, suffix))
+            .any(|path| fs::symlink_metadata(path).is_ok()),
+        "forced shutdown must leave hot state for fail-closed cold admission"
+    );
+    lock.execute_batch("ROLLBACK;")
+        .expect("release external writer lock");
+    drop(lock);
+    blocked.abort();
+    let _ = blocked.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1064,25 +1211,19 @@ async fn server_startup_rejects_bad_database_and_admin_socket_paths() {
         Err(ServerError::InsecureAdminDirectory(path)) if path == insecure_parent
     ));
 
-    let newer_path = temporary.path("newer.db");
-    let newer = Database::open(&newer_path).expect("open newer-schema database");
-    newer
+    let incompatible_path = temporary.path("incompatible.db");
+    let incompatible_database = Database::open(&incompatible_path).expect("open current database");
+    incompatible_database
         .connect()
-        .expect("connect newer-schema database")
-        .execute(
-            "UPDATE schema_migrations SET version = ?1 WHERE version = (SELECT max(version) FROM schema_migrations)",
-            [MIGRATION_VERSION + 1],
-        )
-        .expect("advance schema version");
-    drop(newer);
+        .expect("connect current database")
+        .execute_batch("DROP TABLE schema_contract")
+        .expect("corrupt schema contract");
+    drop(incompatible_database);
     let mut incompatible = config(&temporary);
-    incompatible.database_path = newer_path;
+    incompatible.database_path = incompatible_path;
     assert!(matches!(
         Server::bind(incompatible).await,
-        Err(ServerError::Database(StorageError::IncompatibleSchema {
-            found,
-            supported
-        })) if found == MIGRATION_VERSION + 1 && supported == MIGRATION_VERSION
+        Err(ServerError::Database(StorageError::ResetRequired { .. }))
     ));
 }
 
@@ -1256,6 +1397,115 @@ fn binary_starts_serves_and_handles_sigterm() {
     let status = terminate_journald(&mut child);
     assert!(status.success(), "journald exit status: {status}");
     assert!(!admin_socket.exists(), "admin socket removed after SIGTERM");
+}
+
+#[test]
+fn graceful_daemon_shutdown_normalizes_runtime_sqlite_sidecars() {
+    use std::io::{Read, Write};
+
+    let temporary = TempDir::new("s3-clean");
+    let database = temporary.path("journal.db");
+    let (mut child, ready_rx, admin_socket) = start_journald(&temporary);
+    let address = wait_for_process_ready(&mut child, &ready_rx);
+
+    let body = br#"{"handle":"writer","display_name":"Writer"}"#;
+    let mut admin =
+        std::os::unix::net::UnixStream::connect(&admin_socket).expect("connect admin socket");
+    admin
+        .write_all(
+            format!(
+                "POST /v1/admin/principals HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write admin request headers");
+    admin.write_all(body).expect("write admin request body");
+    let mut created = String::new();
+    admin
+        .read_to_string(&mut created)
+        .expect("read principal response");
+    assert!(created.starts_with("HTTP/1.1 201 Created"), "{created}");
+
+    let mut public = std::net::TcpStream::connect(address).expect("connect public listener");
+    public
+        .write_all(b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write readiness request");
+    let mut ready = String::new();
+    public
+        .read_to_string(&mut ready)
+        .expect("read readiness response");
+    assert!(ready.starts_with("HTTP/1.1 200 OK"), "{ready}");
+
+    let status = terminate_journald(&mut child);
+    assert!(status.success(), "journald exit status: {status}");
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = sidecar(&database, suffix);
+        assert!(
+            fs::symlink_metadata(&sidecar).is_err(),
+            "graceful shutdown retained {sidecar:?}"
+        );
+    }
+
+    let (mut restarted, restarted_ready, restarted_socket) = start_journald(&temporary);
+    let _ = wait_for_process_ready(&mut restarted, &restarted_ready);
+    assert_eq!(restarted_socket, admin_socket);
+    let status = terminate_journald(&mut restarted);
+    assert!(status.success(), "cold restart exit status: {status}");
+}
+
+#[test]
+fn abrupt_daemon_termination_leaves_hot_sidecars_fail_closed() {
+    use std::io::{Read, Write};
+
+    let temporary = TempDir::new("s3-crash");
+    let database = temporary.path("journal.db");
+    let (mut child, ready_rx, admin_socket) = start_journald(&temporary);
+    let address = wait_for_process_ready(&mut child, &ready_rx);
+
+    let body = br#"{"handle":"crash-writer","display_name":"Crash writer"}"#;
+    let mut admin =
+        std::os::unix::net::UnixStream::connect(&admin_socket).expect("connect admin socket");
+    admin
+        .write_all(
+            format!(
+                "POST /v1/admin/principals HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write admin request headers");
+    admin.write_all(body).expect("write admin request body");
+    let mut created = String::new();
+    admin
+        .read_to_string(&mut created)
+        .expect("read principal response");
+    assert!(created.starts_with("HTTP/1.1 201 Created"), "{created}");
+    let mut public = std::net::TcpStream::connect(address).expect("connect public listener");
+    public
+        .write_all(b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write readiness request");
+    let mut ready = String::new();
+    public
+        .read_to_string(&mut ready)
+        .expect("read readiness response");
+    assert!(ready.starts_with("HTTP/1.1 200 OK"), "{ready}");
+
+    child.kill().expect("SIGKILL daemon");
+    assert!(!child.wait().expect("reap SIGKILL daemon").success());
+    assert!(
+        ["-wal", "-shm", "-journal"]
+            .into_iter()
+            .map(|suffix| sidecar(&database, suffix))
+            .any(|path| fs::symlink_metadata(path).is_ok()),
+        "abrupt termination must not normalize hot SQLite state"
+    );
+    assert!(matches!(
+        Database::open(&database),
+        Err(StorageError::ResetRequired {
+            kind: "central database"
+        })
+    ));
 }
 
 #[test]

@@ -15,7 +15,7 @@ async fn enrollment_authentication_and_public_admin_isolation() {
     let service = BootstrapService::new(database.clone());
     service
         .create_principal(&PrincipalCreateRequest {
-            id: "agent-example".into(),
+            handle: "agent-example".into(),
             display_name: "Example".into(),
         })
         .unwrap();
@@ -127,6 +127,58 @@ async fn enrollment_authentication_and_public_admin_isolation() {
             .unwrap();
         assert_eq!(response.status(), expected, "{path}");
     }
+    let profile = ProfileUpdateRequest {
+        handle: "018f1f59-6e90-7000-8000-000000000009".into(),
+        display_name: "Renamed example".into(),
+        description: Some("Mutable profile".into()),
+        expected_profile_revision: 1,
+    };
+    let request = || {
+        Request::builder()
+            .method("PATCH")
+            .uri("/v1/me/profile")
+            .header(
+                "authorization",
+                format!("Bearer {}", credentials.principal_client_secret.secret),
+            )
+            .header("content-type", "application/json")
+            .header("idempotency-key", "profile-example")
+            .body(Body::from(serde_json::to_vec(&profile).unwrap()))
+            .unwrap()
+    };
+    let response = router.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: journal_protocol::domain::Principal =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(updated.handle, profile.handle);
+    assert_eq!(updated.display_name, profile.display_name);
+    assert_eq!(updated.description, profile.description);
+    assert_eq!(updated.profile_revision, 2);
+    let response = router.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replayed: journal_protocol::domain::Principal =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(replayed, updated);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/v1/me/profile")
+                .header(
+                    "authorization",
+                    format!("Bearer {}", credentials.principal_client_secret.secret),
+                )
+                .header("content-type", "application/json")
+                .header("idempotency-key", "profile-example")
+                .body(Body::from(
+                    r#"{"handle":"018f1f59-6e90-7000-8000-000000000009","display_name":"Different","expected_profile_revision":1}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let response = admin_router(state, 65536)
         .oneshot(
             Request::builder()

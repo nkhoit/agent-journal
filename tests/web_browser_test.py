@@ -48,7 +48,10 @@ def main():
                 assert not dialogs
                 assert all(urlsplit(url).netloc == urlsplit(fixture["viewer"]).netloc for url in requests)
                 page.goto(fixture["viewer"] + record)
-                assert page.locator("article > header").inner_text().count("Authenticated author: viewer") == 1
+                author = fixture["author"]
+                assert page.locator("article > header").inner_text().count(
+                    f"Authenticated author: {author}"
+                ) == 1
                 assert "forged-envelope" in page.locator("fieldset").inner_text()
                 assert page.locator("fieldset h1,fieldset h2,fieldset form").count() == 0
                 assert page.locator("fieldset strong").filter(has_text="ordinary Markdown").count() == 1
@@ -74,7 +77,7 @@ def main():
                     assert response.status == status
                     if status == 200:
                         assert page.locator("tbody tr").count() == 1
-                        assert page.locator("tbody").inner_text().startswith("recipient")
+                        assert page.locator("tbody").inner_text().startswith(fixture["recipient_id"])
                     else:
                         assert "recipient" not in page.content()
                 for path in [record, record + "/thread", "/web/spaces/space", "/web/spaces/space/search?q=malicioussnippet"]:

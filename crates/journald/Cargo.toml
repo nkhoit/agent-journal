@@ -35,6 +35,7 @@ journal-adapter-muse = { path = "../journal-adapter-muse" }
 journal-adapter-spool = { path = "../journal-adapter-spool" }
 journal-client = { path = "../journal-client" }
 journal-runtime-fake = { path = "../journal-runtime-fake" }
+rusqlite.workspace = true
 
 [lints]
 workspace = true

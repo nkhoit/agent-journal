@@ -10,7 +10,7 @@ Read these before changing code:
 2. [`docs/implementation-plan.md`](docs/implementation-plan.md) — ordered slices and acceptance gates.
 3. [`docs/protocol.md`](docs/protocol.md) — implementation-facing protocol rules.
 4. [`api/openapi.yaml`](api/openapi.yaml) — normative HTTP operations and wire schemas.
-5. [`migrations/0001_initial.sql`](migrations/0001_initial.sql) — persistence invariants.
+5. [`migrations/0001_uuid_native.sql`](migrations/0001_uuid_native.sql) — persistence invariants.
 6. [`docs/security-model.md`](docs/security-model.md) — credential, authorization, and recovery boundaries.
 7. [`docs/adapter-authoring.md`](docs/adapter-authoring.md) — custody and adapter rules.
 8. [`CONTRIBUTING.md`](CONTRIBUTING.md) — change and release expectations.

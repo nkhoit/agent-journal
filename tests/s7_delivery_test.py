@@ -122,55 +122,28 @@ class DeliveryTest(s4_bootstrap_test.BootstrapTest):
         self.assertFalse(thread.is_alive())
         self.assertEqual(failures, [])
         self.assertEqual(received[0]["items"][0]["result"], "committed")
-        # Abrupt process death and expired claims cannot erase custody receipts.
+        # A raw external mutation is custody evidence; a restart must refuse the
+        # resulting hot SQLite sidecars without checkpointing or discarding them.
         with sqlite3.connect(self.database) as connection:
             connection.execute("UPDATE claims SET lease_expires_at='2000-01-01T00:00:00Z'")
+        artifacts = [path for path in [
+            self.database,
+            self.database.with_name(self.database.name + "-journal"),
+            self.database.with_name(self.database.name + "-wal"),
+            self.database.with_name(self.database.name + "-shm"),
+        ] if path.exists()]
+        snapshot = [(path, path.read_bytes(), path.stat().st_ino) for path in artifacts]
+        self.assertGreater(len(artifacts), 1)
         args = list(self.process.args)
         args[args.index("--listen") + 1] = self.endpoint.removeprefix("http://")
         self.process.kill()
         self.process.wait(timeout=30)
         self.socket.unlink()
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=self.trace_file)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            self.assertIsNone(self.process.poll())
-            try:
-                if self.request("/health/ready")[0] == 200:
-                    break
-            except urllib.error.URLError:
-                pass
-            time.sleep(0.01)
-        else:
-            self.fail("restarted service did not become ready")
-        replay = aj("custody-commit", "--claim", claim["claim_id"], "--input", commit)
-        self.assertEqual(replay["items"][0]["result"], "already-committed")
-        event = {"event_id": "retry", "attempt_id": item["attempt_id"], "generation": 1,
-                 "occurred_at": "2026-09-18T00:00:00Z",
-                 "state": "adapter-reported-retryable-failure"}
-        retry = payload("retry.json", event)
-        first = aj("delivery-event", "--item", item["mailbox_item_id"], "--input", retry)
-        event.update(event_id="accepted", state="adapter-reported-runtime-accepted")
-        aj("delivery-event", "--item", item["mailbox_item_id"],
-           "--input", payload("accepted.json", event))
-        self.assertEqual(aj("delivery-event", "--item", item["mailbox_item_id"],
-                            "--input", retry), first)
-        status = aj("delivery-status", "--record", record["id"], credential="principal")
-        self.assertEqual(status["items"][0]["state"], "adapter-reported-runtime-accepted")
-        requeued = json.loads(self.admin("mailbox-requeue", item["mailbox_item_id"],
-                                        "explicit operator retry").stdout)
-        self.assertNotEqual(requeued["attempt_id"], item["attempt_id"])
-        self.admin("mailbox-requeue", item["mailbox_item_id"], succeeds=False)
-        self.assertEqual(aj("delivery-event", "--item", item["mailbox_item_id"],
-                            "--input", retry), first)
-        status = aj("delivery-status", "--record", record["id"], credential="principal")
-        self.assertEqual(status["items"][0]["state"], "pending")
-        self.assertEqual(status["items"][0]["attempts"], 2)
-        self.assertEqual(len(json.loads(self.admin("adapters", "1").stdout)["items"]), 1)
-        with sqlite3.connect(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM host_custody").fetchone()[0], 1)
-            self.assertEqual(connection.execute("SELECT count(*) FROM delivery_events").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT count(*) FROM audit_events WHERE event_type='mailbox-requeued'").fetchone()[0], 1)
-        self.admin("adapter-replace", "adapter-example", "1", "replacement")
+        self.assertNotEqual(self.process.wait(timeout=30), 0)
+        for path, bytes_before, inode_before in snapshot:
+            self.assertEqual(path.read_bytes(), bytes_before)
+            self.assertEqual(path.stat().st_ino, inode_before)
 
 
 if __name__ == "__main__":

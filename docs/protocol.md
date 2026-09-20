@@ -122,13 +122,13 @@ Enrollment samples one clock instant after acquiring the transaction's write loc
 
 When a rotation response is lost together with its replacement identifier, the same enrollment recovery operation revokes the inaccessible replacement using the known adapter and installation binding. It intentionally revokes both classes, after which a fresh ticket supplies both credentials again. No credential secret is retrievable or replayable.
 
-`POST /v1/spaces/{space}/records` requires `Idempotency-Key`. The server derives `author` from the principal credential, validates the body, allocates a per-space sequence, inserts the immutable record, creates each attention mailbox item and its ordinal-1 `pending` attempt in one transaction, and stores the idempotency result. The uniqueness scope is `(principal, method, path, key)`. A repeated key with the same canonical validated payload returns the original result. A different payload returns `409 idempotency-conflict`.
+`POST /v1/spaces/{space}/records` requires `Idempotency-Key`. The server derives `author` from the principal credential, hashes the raw submitted body before mutable handle resolution, validates a genuinely new request, allocates a per-space sequence, inserts the immutable record, creates each attention mailbox item and its ordinal-1 `pending` attempt in one transaction, and stores the idempotency result. The uniqueness scope is `(principal, method, path, key)`. A repeated key with the same raw request returns the original result. A different raw request returns `409 idempotency-conflict`.
 
-Both initial append and replay return `201`; replay preserves the original
-record and mailbox count and sets `replayed: true`. Authorization is rechecked
-before replay, but changes to recipient membership do not rewrite an existing
-result. New appends reject archived spaces, disabled recipients, and recipients
-without read membership. UUIDv7 IDs use server Unix milliseconds and secure
+Both initial append and replay return `201`; an identical replay returns the
+exact stored response, including its original `replayed: false` value. A valid,
+non-revoked credential is still required to scope the key, but replay lookup
+precedes mutable ACL, profile, and disabled-principal checks. New appends reject
+archived spaces, disabled recipients, and recipients without read membership. UUIDv7 IDs use server Unix milliseconds and secure
 random bits; per-space sequence, not UUID ordering, is the ordering authority.
 
 ### Principal CLI
@@ -162,23 +162,18 @@ Private credential-file support remains Unix-only.
 
 ### Persisted compatibility
 
-Migration 7 adds a central recovery anchor bound to protected external audit.
-It adds no HTTP operation or credential class. Offline restore revokes restored
-credentials and tickets, advances and revokes registrations, cancels active
-claims, and preserves historical custody and attempt identities. Old-generation
-spool state is not automatically rebound. See [protected recovery](recovery.md).
-Older binaries require a compatible backup; never remove migration history.
-
-Migration 3 adds relation positions and a private cursor-secret table without
-changing existing record, mailbox, or attempt states. Existing relation rows
-retain their previous insertion order as a tie-breaker; new appends store
-explicit positions. Database backups include the cursor secret and must remain
-protected. Older binaries reject the newer schema; rollback requires restoring
-a compatible pre-upgrade backup, not deleting migration history.
-
-Migration 4 adds only the partial reverse `reply-to` index used by bounded
-thread traversal. No record, credential, mailbox, or cursor state is rewritten.
-Older binaries reject schema 4; rollback requires a compatible backup.
+`migrations/0001_uuid_native.sql` directly creates the only supported central
+contract. It includes the recovery anchor, relation positions, cursor secret,
+reverse reply index, credential-bound claims, immutable custody receipts, and
+telemetry history. It adds no HTTP operation or credential class beyond the
+normative contract here. Every pre-UUID central database and non-current spool
+is archive/reset-required; no in-place upgrade, downgrade, or marker deletion
+is supported. Protected startup may atomically bind only an already-published,
+read-validated matching revision-zero audit after an initializer crash; it never
+creates or substitutes a missing, malformed, foreign, mismatched, or closed
+audit. Current-schema backups and protected recovery preserve historical custody
+and attempt identities; see
+[protected recovery](recovery.md).
 
 The server applies these initial hard limits:
 
@@ -262,11 +257,6 @@ provide durable local custody or runtime delivery. The custody command below is
 an assertion that the caller has already durably spooled the complete attempt,
 not an implementation of that spool.
 
-Migration 5 adds `claims.credential_id` and a binding trigger. Legacy active claims
-are cancelled, with their existing claimed attempts returned to pending. History,
-records, and attempt IDs remain intact. A schema-4 binary rejects schema 5; rollback
-requires a compatible pre-upgrade backup rather than deleting migration history.
-
 ### States
 
 ```text
@@ -338,15 +328,6 @@ aj-admin --socket "$ADMIN_SOCKET" adapters 50
 Commit and event files contain their OpenAPI request objects; `--input -` reads
 stdin. These commands do not spool data or inject into a runtime.
 
-Migration 6 adds immutable exact custody receipts and retained immutable
-telemetry history. It removes the historical event foreign key to a mutable
-registration generation, so replacement can preserve old events. Its new
-telemetry trigger permits retryable recovery and updates the mailbox only for
-the latest attempt. Existing records, claims, attempts, and events are retained.
-Legacy host-accepted rows without provable receipts require explicit requeue;
-the migration does not invent custody. Older binaries reject schema 6. Rollback
-requires restoring a compatible pre-upgrade backup, never deleting migrations.
-
 The ordinary record delivery-status endpoint returns all recipient-scoped entries to an authorized record author, one own recipient entry to an addressed recipient, and no status to other space readers (a non-leaking `404`). Service administrators use only the protected Unix-socket admin interface; the ordinary endpoint never returns a mixed partial view.
 
 ## Custody ordering
@@ -376,8 +357,9 @@ The generic adapter uses single-item claims and a durable outcome/telemetry outb
 An accepted or final local result is never reinjected merely because reporting
 failed. The exact event ID, timestamp, and payload are retried until acknowledged.
 Runtime acceptance before local result persistence remains an ambiguous send and
-can duplicate a turn after restart. Local schema 2 adds outbox indexing and
-transport scheduling; the central schema and HTTP contract are unchanged. See
+can duplicate a turn after restart. Local schema 3 includes outbox indexing and
+transport scheduling; older local schemas are archive/reset-required and the
+central schema and HTTP contract are unchanged. See
 [generic orchestration](adapter-authoring.md#generic-orchestration).
 
 ## Errors

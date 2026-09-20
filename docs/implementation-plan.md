@@ -58,7 +58,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ### Accept when
 
-- CI reports the expected 30 paths and 32 operations plus fixture coverage.
+- CI reports the expected 31 paths, 33 operations, and 75 fixture mappings.
 - Failure mutations fail deterministically.
 - Early slices may keep binaries as honest stubs; later slices replace them only
   when their executable acceptance gates pass.
@@ -97,23 +97,23 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 ### Build
 
 - Add pinned `rusqlite` with only exercised features, including bundled SQLite/FTS5 and online backup support.
-- Implement database open, numbered migration application, schema-version checks, and explicit transaction helpers.
+- Implement database open, direct UUID-native baseline initialization, exact current-schema admission checks, and explicit transaction helpers.
 - Apply and verify `foreign_keys=ON`, WAL, `synchronous=FULL`, and a bounded busy timeout on every connection.
 - Add a connection factory suitable for bounded `spawn_blocking` calls. Do not add a pool until measurements justify one.
 - Implement backup creation and isolated restore/open verification; service-level restore fencing comes later.
 
 ### Test
 
-- Keep the stdlib Python migration contract as an independent implementation.
+- Keep the stdlib Python UUID-native baseline contract as an independent implementation.
 - Add Rust integration tests using temporary on-disk databases.
 - Probe actual pragmas, tables, indexes, triggers, immutable-record guards, and FTS5 search.
-- Test migration rollback/retry, busy timeout, read-only paths, backup failure, truncated backup, and schema mismatch.
+- Test baseline initialization retry, reset-required admission, busy timeout, read-only paths, backup failure, truncated backup, and schema mismatch.
 - Run concurrent reader/writer smoke tests.
 
 ### Accept when
 
-- Rust can create, migrate, query, back up, restore, and FTS-search a real database.
-- A failed migration leaves no partially advanced schema version.
+- Rust can initialize/admit the direct UUID-native baseline, query, back up, restore, and FTS-search a real database.
+- A failed baseline initialization leaves no admitted partial schema.
 - No tested storage path uses `NotImplementedStore` or a fake success.
 
 ## S3 — Runnable `journald` shell and listener isolation
@@ -180,8 +180,8 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 **Implemented:** UUIDv7 records; principal/space discovery; authenticated atomic
 append, get, and filtered sequence listing; typed client methods; and
-`aj me/spaces/post/get/list`. Migration 3 preserves relation order and persists
-the cursor MAC secret. S5 includes same-space backward relation validation and
+`aj me/spaces/post/get/list`. The direct UUID-native baseline includes relation
+positions and the cursor MAC secret. S5 includes same-space backward relation validation and
 bounded route/filter/principal-bound pagination because append and list cannot
 safely defer these invariants to S6. Search and thread projections remain S6.
 
@@ -220,8 +220,8 @@ termination before/after commit, restart pagination, and lost HTTP responses.
 
 Implemented: authorized FTS5 search with document-local matching-span rank,
 sequence pagination, bounded whole-tree `reply-to` projections, typed clients,
-and `aj search/thread`. Rank does not use global BM25 statistics. Migration 4
-adds the reverse reply index. Protocol and OpenAPI specify traversal budgets
+and `aj search/thread`. Rank does not use global BM25 statistics. The direct
+UUID-native baseline includes the reverse reply index. Protocol and OpenAPI specify traversal budgets
 and fail-closed exhaustion behavior. Portable tests exercise authorization,
 query/cursor rejection, concurrent append pagination, Unicode/NUL scoring,
 cycles, and independent depth/node/edge limits. The Unix `records-test` gate
@@ -255,8 +255,8 @@ also exercises search/thread CLI behavior; it must run on a Unix host.
 
 Implemented: installation-bound registration and heartbeat, protected CAS replacement,
 credential-bound bounded claims, lazy same-attempt expiry, current-membership suppression,
-and recipient/admin mailbox status. Migration 5 binds new claims to credentials and
-cancels unbound legacy claims without replacing attempts. Empty selections wait on
+and recipient/admin mailbox status. The direct UUID-native baseline binds claims to
+credentials. Pre-UUID state is archive/reset-required rather than upgraded. Empty selections wait on
 notifications outside SQLite and blocking-worker permits; retries also observe expiry
 and out-of-process mutations. Typed clients and `aj`/`aj-admin` commands accompany
 the endpoints. S8 custody, telemetry, requeue, record delivery-status, and admin adapter
@@ -295,8 +295,8 @@ fresh enrollment, and membership suppression).
 **Goal:** complete and prove the central delivery state machine.
 
 **Implemented:** service transactions, public/protected routes, typed clients,
-and CLI commands. Migration 6 retains exact custody receipts and immutable
-telemetry history. Retryable telemetry can recover to runtime acceptance on the
+and CLI commands. The direct UUID-native baseline retains exact custody receipts and
+immutable telemetry history. Retryable telemetry can recover to runtime acceptance on the
 same attempt; runtime acceptance, route-unavailable, and terminal failure are
 final except for exact replay. Requeue rejects pending/claimed obligations and
 unreadable recipients, creates a fresh ordinal/ID, and retains every prior
@@ -332,8 +332,9 @@ Local spool durability and runtime injection remain S9–S11, not S8 guarantees.
 
 **Goal:** make local custody crash-safe before any vendor runtime is touched.
 
-**Implemented:** `SqliteStore` persists complete attempts in local schema version 1
-using SQLite rollback journals with `synchronous=EXTRA`. A nonblocking `fs2`
+**Implemented:** `SqliteStore` persists complete attempts in exact local schema version 3
+using SQLite rollback journals with `synchronous=EXTRA`. Earlier local schemas are
+archive/reset-required; they are never upgraded in place. A nonblocking `fs2`
 machine-local lock lives for the connection's lifetime. The pinned `fs2` dependency
 also provides cross-platform filesystem free-space checks. Admission checks count
 retained rows/serialized bytes and reserve disk headroom; callers can check the
@@ -389,7 +390,7 @@ replays exact custody requests, reconciles only authenticated lease-expired
 responses, and rechecks registration immediately before sending. Metadata is
 JSON-quoted and rendered separately from the original untrusted body.
 
-Local schema 2 atomically persists runtime outcomes with their telemetry outbox.
+Local schema 3 atomically persists runtime outcomes with their telemetry outbox.
 Terminal rows with unacknowledged events remain reporting work, never injection
 work. Event identity, payload, and timestamp survive response loss and restart.
 Runtime and transport backoff are durable, exponentially bounded at 256 seconds.
@@ -452,7 +453,7 @@ are not publishable evidence. The runner and its regression tests are part of
 for compatible future runtime entrypoints. Both the Hermes Runs API adapter and
 the Muse hook drop-point adapter are executable runtime-acceptance adapters
 without claiming model completion.
-No public API, central or spool migration, or credential-class change is introduced.
+No public API, central or spool schema-admission change, or credential-class change is introduced.
 
 ### Build
 
@@ -492,13 +493,14 @@ isolation have Rust HTTP tests and a real Chromium gate (`make browser-security`
 This does not establish operational restore acceptance or vendor-runtime canaries,
 and does not declare S12 complete.
 
-Recovery implementation adds migration 7, a protected external write-ahead
-security audit, fail-closed daemon startup/service reads and transactions, and
-the offline `journal-recover` tool. Probes cover table counts/hashes, ACL state,
-heads, FTS, and mailbox history. Real-file/process-kill tests exercise uncertain
-intents and recovery restart. Reopening requires exact-state approval and
-explicit complete surviving spool/client reconciliation; the tool does not
-automatically repair those independent stores. See [protected recovery](recovery.md).
+Recovery implementation uses the direct UUID-native baseline with a protected
+external write-ahead security audit, fail-closed daemon startup/service reads and
+transactions, and the offline `journal-recover` tool. Probes cover table
+counts/hashes, ACL state, heads, FTS, and mailbox history. Real-file/process-kill
+tests exercise uncertain intents and recovery restart. Reopening requires
+exact-current-schema approval and explicit complete surviving spool/client
+reconciliation; the tool does not automatically repair independent stores or
+migrate historic state. See [protected recovery](recovery.md).
 Unix daemon/CLI gates and deployment canaries must run on their supported hosts;
 this workstream alone does not complete all S12 acceptance.
 
@@ -560,7 +562,7 @@ Use progressively wider tests; do not replace lower layers with a giant end-to-e
 | Layer | Purpose | Runs |
 | --- | --- | --- |
 | Domain/protocol unit | Validation, serialization, canonicalization, cursors, state enums | Every PR |
-| SQLite integration | Real migrations, transactions, FTS5, ACL predicates, backup | Every PR after S2 |
+| SQLite integration | Direct baseline admission, transactions, FTS5, ACL predicates, backup | Every PR after S2 |
 | Router/service | Authorization and response semantics without process/network noise | Every PR after S3 |
 | Black-box process | Real listeners, Unix socket, CLI, shutdown, file permissions | Every PR after S3/S4 |
 | Security-negative | Wrong credentials, cross-principal access, non-leakage, secret scans | Every PR after S4 |
@@ -593,7 +595,7 @@ python3 scripts/public_hygiene.py
 Add jobs only when their slice lands:
 
 1. `contract`: OpenAPI, Redocly, fixture coverage, Markdown, hygiene.
-2. `sqlite`: Rust integration, FTS5, migration rollback, backup/restore; Linux plus a macOS smoke job.
+2. `sqlite`: Rust integration, FTS5, baseline initialization/admission, backup/restore; Linux plus a macOS smoke job.
 3. `http`: temporary service, public/Unix listener isolation, auth, body limits, readiness.
 4. `security-negative`: credential matrix, revocation, search non-leakage, secret scans.
 5. `cli`: subprocess JSON fixtures, exit classes, file modes, no-secret output.
@@ -613,7 +615,7 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 - Add no production dependencies.
 - Preserve status-2 stubs.
 
-**Exit:** explicit coverage of all 30 paths/32 operations; every mutation fails for the intended reason.
+**Exit:** explicit coverage of all 31 paths/33 operations and 75 fixture mappings; every mutation fails for the intended reason.
 
 ### PR 2 — Domain/protocol kernel
 
@@ -625,10 +627,10 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 
 ### PR 3 — SQLite kernel
 
-- Add pinned `rusqlite` and implement connection policy, migration runner, transaction helpers, FTS5 probe, and backup/restore primitives.
+- Add pinned `rusqlite` and implement connection policy, direct UUID-native baseline initializer, transaction helpers, FTS5 probe, and backup/restore primitives.
 - Keep HTTP handlers, credentials, and adapter behavior out.
 
-**Exit:** a real Rust process creates, migrates, queries, backs up, restores, and validates the existing schema.
+**Exit:** a real Rust process directly initializes or admits the UUID-native baseline, queries, backs up, restores, and validates the current schema.
 
 ## Explicitly deferred
 

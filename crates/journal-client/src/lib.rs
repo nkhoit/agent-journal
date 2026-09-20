@@ -281,6 +281,25 @@ impl Client {
         self.principal(token, Request::new("GET", "/v1/me", vec![]))
     }
 
+    pub fn update_profile(
+        &self,
+        token: &str,
+        key: &str,
+        input: &journal_protocol::ProfileUpdateRequest,
+    ) -> Result<journal_protocol::domain::Principal, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        if !(1..=255).contains(&key.chars().count()) || key.chars().any(char::is_control) {
+            return Err(ClientError::InvalidRequest);
+        }
+        let body = journal_protocol::encode_json(input).map_err(|_| ClientError::Json)?;
+        let mut request = Request::new("PATCH", "/v1/me/profile", body);
+        request
+            .headers
+            .insert("Content-Type".into(), "application/json".into());
+        request.headers.insert("Idempotency-Key".into(), key.into());
+        self.principal(token, request)
+    }
+
     pub fn spaces(
         &self,
         token: &str,

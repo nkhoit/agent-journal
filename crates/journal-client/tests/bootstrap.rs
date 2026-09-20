@@ -8,7 +8,7 @@ impl Transport for Recorder {
         assert_eq!(request.path, "/v1/admin/principals");
         assert!(!request.headers.contains_key("Authorization"));
         let body: PrincipalCreateRequest = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(body.id, "alice");
+        assert_eq!(body.handle, "alice");
         Ok(Response::new(
             403,
             br#"{"error":{"code":"denied","message":"secret must not escape","request_id":"r1"}}"#
@@ -21,12 +21,61 @@ impl Transport for Recorder {
 fn typed_admin_request_and_redacted_failure() {
     let error = Client::new(Recorder)
         .create_principal(&PrincipalCreateRequest {
-            id: "alice".into(),
+            handle: "alice".into(),
             display_name: "Alice".into(),
         })
         .unwrap_err();
     assert!(matches!(error, ClientError::Http { status: 403 }));
     assert!(!error.to_string().contains("secret"));
+}
+
+struct ProfileRecorder;
+
+const PROFILE_TEST_TOKEN: &str = concat!(
+    "aaaaaaaaaaaaaaaa",
+    "aaaaaaaaaaaaaaaa",
+    "aaaaaaaaaaaaaaaa",
+    "aaaaaaaaaaaaaaaa",
+);
+
+impl Transport for ProfileRecorder {
+    fn send(&self, request: Request) -> Result<Response, TransportError> {
+        assert_eq!(request.method, "PATCH");
+        assert_eq!(request.path, "/v1/me/profile");
+        assert_eq!(
+            request.headers.get("Authorization"),
+            Some(&format!("Bearer {PROFILE_TEST_TOKEN}"))
+        );
+        assert_eq!(
+            request.headers.get("Idempotency-Key"),
+            Some(&"profile-key".into())
+        );
+        let body: ProfileUpdateRequest = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body.handle, "renamed");
+        Ok(Response::new(
+            200,
+            br#"{"id":"018f1f59-6e90-7000-8000-000000000001","handle":"renamed","display_name":"Renamed","profile_revision":2,"created_at":"2026-01-01T00:00:00Z","disabled":false}"#
+                .to_vec(),
+        ))
+    }
+}
+
+#[test]
+fn profile_update_is_authenticated_idempotent_and_uuid_native() {
+    let principal = Client::new(ProfileRecorder)
+        .update_profile(
+            PROFILE_TEST_TOKEN,
+            "profile-key",
+            &ProfileUpdateRequest {
+                handle: "renamed".into(),
+                display_name: "Renamed".into(),
+                description: None,
+                expected_profile_revision: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(principal.id, "018f1f59-6e90-7000-8000-000000000001");
+    assert_eq!(principal.profile_revision, 2);
 }
 
 #[test]

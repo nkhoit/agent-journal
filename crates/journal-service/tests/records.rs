@@ -25,7 +25,7 @@ impl Fixture {
         for id in ["writer", "reader", "outsider"] {
             service
                 .create_principal(&PrincipalCreateRequest {
-                    id: id.into(),
+                    handle: id.into(),
                     display_name: id.into(),
                 })
                 .unwrap();
@@ -95,6 +95,60 @@ impl Fixture {
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap()
     }
+    fn principal_id(&self, handle: &str) -> String {
+        self.db
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT principal_id FROM principal_names WHERE name=?",
+                [handle],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn reader_token(&self) -> String {
+        self.service
+            .provision_adapter(&AdapterProvisionRequest {
+                principal_id: "reader".into(),
+                adapter_id: "reader-adapter".into(),
+            })
+            .unwrap();
+        let ticket = self
+            .service
+            .create_ticket(&EnrollmentTicketCreateRequest {
+                principal_id: "reader".into(),
+                adapter_id: "reader-adapter".into(),
+                ttl_seconds: 900,
+            })
+            .unwrap();
+        self.service
+            .exchange(
+                &ticket.enrollment_ticket.ticket,
+                &EnrollmentExchangeRequest {
+                    instance_id: "reader-installation".into(),
+                },
+            )
+            .unwrap()
+            .principal_client_secret
+            .secret
+    }
+
+    fn stored_append(&self, key: &str) -> AppendResult {
+        let response: String = self
+            .db
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT response_json FROM idempotency_keys
+                 WHERE principal_id=? AND method='POST' AND path='/v1/spaces/space/records'
+                 AND idempotency_key=?",
+                rusqlite::params![self.principal_id("writer"), key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        decode_json(response.as_bytes()).unwrap()
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -160,7 +214,7 @@ fn sequence_search_only_renders_the_selected_page() {
     connection.execute(
         "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1000)
          INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-         SELECT printf('record-%05d',n),'space',n,'writer','note',?1,'2026-01-01T00:00:00Z' FROM seq",
+         SELECT printf('record-%05d',n),'space',n,(SELECT principal_id FROM principal_names WHERE name='writer'),'note',?1,'2026-01-01T00:00:00Z' FROM seq",
         ["hello world ".repeat(1000)],
     ).unwrap();
     let mut query = search_query("hello");
@@ -177,7 +231,7 @@ fn sequence_search_only_renders_the_selected_page() {
         )
         .unwrap();
     let filters = serde_json::to_vec(&(
-        "writer",
+        f.principal_id("writer"),
         "space",
         &query.q,
         &query.author,
@@ -226,10 +280,15 @@ fn search_is_authorized_before_scoring_and_cursors_are_scoped() {
     let before = f.service.search_records(&f.token, "space", &query).unwrap();
     assert_eq!(before.items[0].record.id, first.id);
     assert_eq!(before.consistency, Some(SearchConsistency::BestEffort));
-    f.db.connect().unwrap().execute_batch(
-        "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-         VALUES ('hidden','other',1,'outsider','note','secretword hello hello hello hello','2026-01-01T00:00:00Z');"
-    ).unwrap();
+    f.db
+        .connect()
+        .unwrap()
+        .execute(
+            "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
+             VALUES ('hidden','other',1,?,'note','secretword hello hello hello hello','2026-01-01T00:00:00Z')",
+            [f.principal_id("outsider")],
+        )
+        .unwrap();
     assert_eq!(
         before,
         f.service.search_records(&f.token, "space", &query).unwrap()
@@ -507,7 +566,7 @@ fn thread_node_budget_accepts_exact_limit_and_rejects_one_over() {
     connection.execute_batch(
         "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<4096)
          INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-         SELECT printf('record-%05d',n),'space',n,'writer','note','hello','2026-01-01T00:00:00Z' FROM seq;
+         SELECT printf('record-%05d',n),'space',n,(SELECT principal_id FROM principal_names WHERE name='writer'),'note','hello','2026-01-01T00:00:00Z' FROM seq;
          INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at)
          SELECT id,'reply-to','record-00001',created_at FROM records WHERE space_seq>1;"
     ).unwrap();
@@ -526,7 +585,7 @@ fn thread_node_budget_accepts_exact_limit_and_rejects_one_over() {
     connection
         .execute_batch(
             "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-         VALUES ('extra','space',4097,'writer','note','hello','2026-01-01T00:00:00Z');
+         VALUES ('extra','space',4097,(SELECT principal_id FROM principal_names WHERE name='writer'),'note','hello','2026-01-01T00:00:00Z');
          INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at)
          VALUES ('extra','reply-to','record-00001','2026-01-01T00:00:00Z');",
         )
@@ -545,7 +604,7 @@ fn append_replay_read_and_mailbox_are_durable() {
         .service
         .append_record(&f.token, "space", "key", &input)
         .unwrap();
-    assert_eq!(first.record.author, "writer");
+    assert_eq!(first.record.author, f.principal_id("writer"));
     assert_eq!(first.record.seq, 1);
     assert_eq!(&first.record.id[14..15], "7");
     assert!("89ab".contains(&first.record.id[19..20]));
@@ -555,8 +614,7 @@ fn append_replay_read_and_mailbox_are_durable() {
     let replay = restarted
         .append_record(&f.token, "space", "key", &input)
         .unwrap();
-    assert!(replay.replayed);
-    assert_eq!(first.record, replay.record);
+    assert_eq!(replay, first);
     assert_eq!(
         restarted.get_record(&f.token, &first.record.id).unwrap(),
         first.record
@@ -576,6 +634,90 @@ fn append_replay_read_and_mailbox_are_durable() {
         restarted.append_record(&f.token, "space", "key", &changed),
         Err(BootstrapError::IdempotencyConflict)
     ));
+}
+
+#[test]
+fn append_replay_survives_post_commit_acl_and_disable_changes() {
+    for mutation in ["revoke-recipient", "disable-author"] {
+        let f = Fixture::new();
+        let input = f.input();
+        let first = f
+            .service
+            .append_record(&f.token, "space", mutation, &input)
+            .unwrap();
+        let stored = f.stored_append(mutation);
+        assert_eq!(first, stored);
+        f.db
+            .with_transaction(|tx| {
+                match mutation {
+                    "revoke-recipient" => {
+                        tx.execute(
+                            "UPDATE memberships SET can_read=0 WHERE space_id='space' AND principal_id=?",
+                            [f.principal_id("reader")],
+                        )?;
+                    }
+                    "disable-author" => {
+                        tx.execute(
+                            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z' WHERE id=?",
+                            [f.principal_id("writer")],
+                        )?;
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(())
+            })
+            .unwrap();
+        let replay = f
+            .service
+            .append_record(&f.token, "space", mutation, &input)
+            .unwrap();
+        assert_eq!(replay, stored, "{mutation}");
+        assert_eq!(f.count("records"), 1);
+        assert_eq!(f.count("mailbox_items"), 1);
+    }
+}
+
+#[test]
+fn append_replay_uses_raw_handles_after_profile_rename_and_alias() {
+    let f = Fixture::new();
+    let input = f.input();
+    let first = f
+        .service
+        .append_record(&f.token, "space", "rename-replay", &input)
+        .unwrap();
+    let reader_token = f.reader_token();
+    let reader = f
+        .service
+        .authenticate(&reader_token, CredentialClass::PrincipalClient)
+        .unwrap();
+    f.service
+        .update_own_profile(
+            &reader,
+            "rename-reader",
+            &ProfileUpdateRequest {
+                handle: "reader-renamed".into(),
+                display_name: "Reader Renamed".into(),
+                description: None,
+                expected_profile_revision: 1,
+            },
+        )
+        .unwrap();
+    let replay = f
+        .service
+        .append_record(&f.token, "space", "rename-replay", &input)
+        .unwrap();
+    assert_eq!(replay, f.stored_append("rename-replay"));
+    assert_eq!(first, replay);
+
+    let mut renamed_handle = input;
+    renamed_handle.attention = vec!["reader-renamed".into()];
+    assert!(matches!(
+        f.service
+            .append_record(&f.token, "space", "rename-replay", &renamed_handle),
+        Err(BootstrapError::IdempotencyConflict)
+    ));
+    assert_eq!(f.count("records"), 1);
+    assert_eq!(f.count("mailbox_items"), 1);
 }
 
 #[test]
@@ -732,7 +874,7 @@ fn authorization_recipients_relations_and_utf8_limits() {
     assert!(matches!(
         f.service
             .append_record(&f.token, "space", "key", &f.input()),
-        Err(BootstrapError::NotFound)
+        Err(BootstrapError::IdempotencyConflict)
     ));
 }
 
@@ -819,7 +961,7 @@ fn limits_filters_relations_and_attention_set_replay() {
         let id = format!("recipient-{i:02}");
         f.service
             .create_principal(&PrincipalCreateRequest {
-                id: id.clone(),
+                handle: id.clone(),
                 display_name: id.clone(),
             })
             .unwrap();
@@ -852,12 +994,11 @@ fn limits_filters_relations_and_attention_set_replay() {
         result.record
     );
     input.attention.reverse();
-    assert!(
+    assert!(matches!(
         f.service
-            .append_record(&f.token, "space", "boundary", &input)
-            .unwrap()
-            .replayed
-    );
+            .append_record(&f.token, "space", "boundary", &input),
+        Err(BootstrapError::IdempotencyConflict)
+    ));
     input.attention.push("recipient-16".into());
     assert!(
         f.service
@@ -1076,7 +1217,7 @@ fn process_termination_rolls_back_or_replays_complete_append() {
             .service
             .append_record(&f.token, "space", "crash", &input)
             .unwrap();
-        assert_eq!(retry.replayed, mode == "after");
+        assert!(!retry.replayed);
         assert_eq!(retry.record.seq, 1);
     }
 }

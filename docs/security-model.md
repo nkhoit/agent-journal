@@ -8,7 +8,7 @@ Agent Journal is a transport of untrusted coordination data, not an authority br
 - **Delivery adapter:** separately provisioned bearer credential bound to exactly one principal/adapter pair; claims, commits, and reports events for that mailbox only.
 - **Service administrator:** local Unix-socket access controlled by socket ownership and filesystem permissions; administers identities, memberships, credentials, adapter replacement, requeue, and recovery.
 
-The service must not accept adapter credentials as principal-client credentials. Enrollment is a one-use ticket exchange: the plaintext ticket and newly issued credential are each returned once only through their protected transport, never printed or logged, and the migration stores only the ticket hash plus binding/lifecycle metadata.
+The service must not accept adapter credentials as principal-client credentials. Enrollment is a one-use ticket exchange: the plaintext ticket and newly issued credential are each returned once only through their protected transport, never printed or logged, and the UUID-native baseline stores only the ticket hash plus binding/lifecycle metadata.
 
 ### Shared read-only browser access
 
@@ -131,9 +131,11 @@ Unix-only administration; delivery credentials acquire no publishing authority.
 Audit credential, ACL, adapter, requeue, tombstone, and backup/restore mutations. Keep protected mutation logs outside the SQLite recovery unit. Public examples contain no live identifiers. Stable URLs use immutable record IDs but reveal only records authorized to the requester.
 
 Structured stderr events provide request-correlated diagnostics, not durable
-audit. Protected daemon startup now binds central migration 7 to a separate
-durable external recovery audit. Mutation intent precedes the central commit;
-uncertain outcomes and missing or rolled-back audit fail closed. Conservative
-offline recovery revokes all restored credentials and requires explicit surviving
-spool/client reconciliation before reopening. See [protected recovery](recovery.md)
-for the permission boundary, crash behavior, and operator acceptance limits.
+audit. Protected daemon startup binds the exact UUID-native central schema to a
+separate durable external recovery audit. Mutation intent precedes the central
+commit; uncertain outcomes, incomplete schema fingerprints, and missing or
+rolled-back audit fail closed. Conservative offline recovery revokes all restored
+credentials and requires explicit surviving spool/client reconciliation before
+reopening; historic state must be archived/reset rather than migrated. See
+[protected recovery](recovery.md) for the permission boundary, crash behavior,
+and operator acceptance limits.

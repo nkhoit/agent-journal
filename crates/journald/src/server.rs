@@ -24,6 +24,7 @@ use tokio::task::JoinError;
 use tokio::task::JoinSet;
 
 use crate::config::Config;
+use crate::executor::BlockingError;
 #[cfg(unix)]
 use crate::http::{
     ServiceState, admin_router_with_timeout, public_router_with_timeout, web_router_with_timeout,
@@ -37,6 +38,8 @@ pub enum ServerError {
     Database(#[from] StorageError),
     #[error("database initialization task failed: {0}")]
     DatabaseTask(#[from] JoinError),
+    #[error("database clean shutdown failed: {0}")]
+    DatabaseShutdown(#[source] BlockingError),
     #[error("cannot bind public listener at {address}: {source}")]
     BindPublic {
         address: SocketAddr,
@@ -69,6 +72,9 @@ pub enum ServerError {
     ListenerTask(JoinError),
     #[error("a listener stopped before shutdown")]
     ListenerStopped,
+    #[error("graceful shutdown timed out; hot database state was left fail-closed")]
+    ShutdownTimeout,
+
     #[error("administrative Unix sockets are unsupported on this platform")]
     AdminSocketUnsupported,
 }
@@ -204,6 +210,9 @@ impl Server {
         S: Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Retain a database handle only for final normalization. It owns no
+        // connection; axum's graceful joins below close every request first.
+        let shutdown_state = self.state.clone();
         let public_router = public_router_with_timeout(
             self.state.clone(),
             self.max_body_bytes,
@@ -304,9 +313,22 @@ impl Server {
                     );
                     listeners.abort_all();
                     while listeners.join_next().await.is_some() {}
+                    if outcome.is_ok() {
+                        // A task was aborted, so it is not safe to checkpoint
+                        // the authoritative database after it. Cold admission
+                        // must preserve and reject that hot state instead.
+                        outcome = Err(ServerError::ShutdownTimeout);
+                    }
                     break;
                 }
             }
+        }
+        if outcome.is_ok() {
+            outcome = shutdown_state
+                .blocking()
+                .execute(|database| database.normalize_for_clean_shutdown())
+                .await
+                .map_err(ServerError::DatabaseShutdown);
         }
         outcome
     }

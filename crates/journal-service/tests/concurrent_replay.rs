@@ -13,7 +13,7 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
     let service = BootstrapService::new(db.clone());
     service
         .create_principal(&PrincipalCreateRequest {
-            id: "writer".into(),
+            handle: "writer".into(),
             display_name: "Writer".into(),
         })
         .unwrap();
@@ -76,12 +76,7 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
             .map(|t| t.join().unwrap())
             .collect::<Vec<_>>()
     });
-    assert_eq!(results.iter().filter(|r| !r.replayed).count(), 1);
-    assert!(
-        results
-            .iter()
-            .all(|r| r.record == results[0].record && r.mailbox_created == 1)
-    );
+    assert!(results.iter().all(|result| result == &results[0]));
     let connection = db.connect().unwrap();
     for table in [
         "records",

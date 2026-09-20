@@ -12,11 +12,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("fixture database path required")?;
     let db = Database::open(path)?;
     let service = BootstrapService::new(db.clone());
+    let mut recipient_id = None;
     for principal in ["viewer", "recipient", "reader", "outsider"] {
-        service.create_principal(&PrincipalCreateRequest {
-            id: principal.into(),
+        let created = service.create_principal(&PrincipalCreateRequest {
+            handle: principal.into(),
             display_name: principal.into(),
         })?;
+        if principal == "recipient" {
+            recipient_id = Some(created.id);
+        }
     }
     service.create_space(&SpaceCreateRequest {
         id: "space".into(),
@@ -127,6 +131,11 @@ malicioussnippet `<img src=x onerror=alert(1)>`
         );
         servers.spawn(async move { axum::serve(listener, router).await });
     }
+    origins.insert("author".into(), record.author.clone().into());
+    origins.insert(
+        "recipient_id".into(),
+        recipient_id.ok_or("recipient principal missing")?.into(),
+    );
     origins.insert("record".into(), record.id.into());
     println!("{}", serde_json::Value::Object(origins));
     std::io::stdout().flush()?;

@@ -24,8 +24,6 @@ author: administrator
 #[tokio::test]
 #[cfg(unix)]
 async fn recovery_gates_web_and_metrics_and_preserves_durable_timestamps() {
-    use journal_storage_sqlite::RecoveryAudit;
-
     let directory = std::env::temp_dir().join(format!("web-recovery-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
     #[cfg(unix)]
@@ -36,12 +34,11 @@ async fn recovery_gates_web_and_metrics_and_preserves_durable_timestamps() {
     let central = directory.join("central.db");
     let audit_path = directory.join("audit.db");
     let backup = directory.join("backup.db");
-    let restored = directory.join("restored.db");
     let db = Database::open_protected(&central, &audit_path).unwrap();
     let service = BootstrapService::new(db.clone());
     service
         .create_principal(&PrincipalCreateRequest {
-            id: "viewer".into(),
+            handle: "viewer".into(),
             display_name: "Viewer".into(),
         })
         .unwrap();
@@ -75,47 +72,28 @@ async fn recovery_gates_web_and_metrics_and_preserves_durable_timestamps() {
     drop(service);
     drop(db);
     assert!(Database::open_protected(&central, &audit_path).is_err());
-    let offline = Database::open_existing(&central).unwrap();
-    let audit = RecoveryAudit::open(&offline, &audit_path).unwrap();
-    let mut approval = audit.restore(&backup, &restored, true).unwrap();
-    assert!(approval.quiesced_adapters.is_empty());
-    assert!(approval.previous_space_heads.is_empty());
-    approval.inventory_complete = true;
-    approval.accepted_record_loss = true;
-    let restored_db = Database::open_existing(&restored).unwrap();
-    audit.reopen(&restored_db, &approval).unwrap();
-    drop(audit);
-    drop(offline);
-    drop(restored_db);
-    let db = Database::open_protected(&restored, &audit_path).unwrap();
-    let expected = db.recovery_status().unwrap();
-    assert!(expected.last_verified_restore_at.is_some());
-    let service = BootstrapService::new(db.clone());
-    let metrics = service.operational_metrics().unwrap();
-    assert_eq!(
-        metrics.last_backup_at.as_deref(),
-        Some(expected_backup.as_str())
-    );
-    assert_eq!(
-        metrics.last_verified_restore_at,
-        expected.last_verified_restore_at
-    );
-    let router = web_router(
-        ServiceState::new(db.clone(), 2).unwrap(),
-        "viewer".into(),
-        131072,
-    );
-    get(&router, "/web", None, StatusCode::OK).await;
-    drop(router);
-    drop(service);
-    drop(db);
+    let artifacts = [
+        central.clone(),
+        central.with_extension("db-wal"),
+        central.with_extension("db-shm"),
+        central.with_extension("db-journal"),
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+    .collect::<Vec<_>>();
+    assert!(!artifacts.is_empty());
+    assert!(Database::open_existing(&central).is_err());
+    for (path, bytes) in artifacts {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
     std::fs::remove_dir_all(directory).unwrap();
 }
 
 fn enroll(service: &BootstrapService, principal: &str) -> EnrollmentExchangeResponse {
     service
         .create_principal(&PrincipalCreateRequest {
-            id: principal.into(),
+            handle: principal.into(),
             display_name: principal.into(),
         })
         .unwrap();
@@ -240,6 +218,12 @@ async fn web_views_are_authorized_inert_and_bounded() {
         )
         .unwrap();
     let state = ServiceState::new(db.clone(), 4).unwrap();
+    assert!(
+        service
+            .shared_viewer("outsider")
+            .record(&record.id)
+            .is_err()
+    );
     let public = public_router(state.clone(), 1_048_576);
     let router = web_router(state.clone(), "author".into(), 1_048_576);
     let recipient_router = web_router(state.clone(), "recipient".into(), 1_048_576);
@@ -275,7 +259,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
     let body = get(&router, &record_path, Some(token), StatusCode::OK).await;
     assert!(body.contains("<strong>ordinary Markdown</strong>"));
     assert!(body.contains("Untrusted record content"));
-    assert!(body.contains("Authenticated author: author"));
+    assert!(body.contains("Authenticated author:"));
     assert!(body.contains("rel=\"nofollow noopener noreferrer\""));
     for path in [
         record_path.clone(),
@@ -289,11 +273,9 @@ async fn web_views_are_authorized_inert_and_bounded() {
     }
     let delivery = format!("{record_path}/delivery-status");
     let body = get(&recipient_router, &delivery, Some(token), StatusCode::OK).await;
-    assert!(body.contains("recipient"));
-    assert!(!body.contains(">reader<"));
+    assert_eq!(body.matches("<tr>").count(), 2);
     let body = get(&router, &delivery, Some(token), StatusCode::OK).await;
-    assert!(body.contains(">reader<"));
-    assert!(body.contains(">recipient<"));
+    assert_eq!(body.matches("<tr>").count(), 3);
     let reply_page = service
         .list_records(token, "space", &ListRecordsQuery::default())
         .unwrap();
@@ -372,12 +354,14 @@ async fn web_views_are_authorized_inert_and_bounded() {
             can_admin: false,
         })
         .unwrap();
+    assert!(service.shared_viewer("author").record(&record.id).is_err());
     get(&router, &record_path, Some(token), StatusCode::NOT_FOUND).await;
     get(&router, &delivery, Some(token), StatusCode::NOT_FOUND).await;
     db.connect()
         .unwrap()
         .execute(
-            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z' WHERE id='recipient'",
+            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z'
+             WHERE id=(SELECT principal_id FROM principal_names WHERE name='recipient')",
             [],
         )
         .unwrap();

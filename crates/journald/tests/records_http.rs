@@ -6,6 +6,32 @@ use journal_storage_sqlite::Database;
 use journald::{ServiceState, public_router};
 use tower::ServiceExt;
 
+async fn append(
+    router: &axum::Router,
+    token: &str,
+    key: &str,
+    body: &'static str,
+) -> (StatusCode, Vec<u8>) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/spaces/space/records")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("idempotency-key", key)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1_048_576)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body)
+}
+
 #[tokio::test]
 async fn record_routes_enforce_wire_contract() {
     let directory =
@@ -15,7 +41,7 @@ async fn record_routes_enforce_wire_contract() {
     let service = BootstrapService::new(db.clone());
     service
         .create_principal(&PrincipalCreateRequest {
-            id: "writer".into(),
+            handle: "writer".into(),
             display_name: "Writer".into(),
         })
         .unwrap();
@@ -119,7 +145,7 @@ async fn record_routes_enforce_wire_contract() {
         if status == StatusCode::CREATED {
             if let Some(record) = &first {
                 assert_eq!(record, &value["record"]);
-                assert_eq!(value["replayed"], true);
+                assert_eq!(value["replayed"], false);
             } else {
                 first = Some(value["record"].clone());
             }
@@ -243,5 +269,124 @@ async fn record_routes_enforce_wire_contract() {
     }
     drop(router);
     drop(service);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn append_replay_after_disable_is_exact_but_new_or_invalid_requests_are_denied() {
+    let directory = std::path::Path::new("target")
+        .join(format!("http-record-replay-disable-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let db = Database::open(directory.join("journal.db")).unwrap();
+    let service = BootstrapService::new(db.clone());
+    let writer = service
+        .create_principal(&PrincipalCreateRequest {
+            handle: "writer".into(),
+            display_name: "Writer".into(),
+        })
+        .unwrap();
+    service
+        .create_space(&SpaceCreateRequest {
+            id: "space".into(),
+            name: "Space".into(),
+        })
+        .unwrap();
+    service
+        .set_membership(&MembershipRequest {
+            space_id: "space".into(),
+            principal_id: writer.id.clone(),
+            can_read: true,
+            can_append: true,
+            can_admin: false,
+        })
+        .unwrap();
+    service
+        .provision_adapter(&AdapterProvisionRequest {
+            principal_id: writer.id.clone(),
+            adapter_id: "adapter".into(),
+        })
+        .unwrap();
+    let ticket = service
+        .create_ticket(&EnrollmentTicketCreateRequest {
+            principal_id: writer.id.clone(),
+            adapter_id: "adapter".into(),
+            ttl_seconds: 900,
+        })
+        .unwrap();
+    let enrolled = service
+        .exchange(
+            &ticket.enrollment_ticket.ticket,
+            &EnrollmentExchangeRequest {
+                instance_id: "installation".into(),
+            },
+        )
+        .unwrap();
+    let token = enrolled.principal_client_secret.secret;
+    let router = public_router(ServiceState::new(db.clone(), 4).unwrap(), 1_048_576);
+    let body = r#"{"kind":"note","content":"durable"}"#;
+
+    let (status, first) = append(&router, &token, "exact", body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z' WHERE id=?1",
+            [&writer.id],
+        )
+        .unwrap();
+
+    let (status, replay) = append(&router, &token, "exact", body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        replay, first,
+        "replay must return the persisted response bytes"
+    );
+    let (status, conflict) = append(
+        &router,
+        &token,
+        "exact",
+        r#"{"kind":"note","content":"changed"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&conflict).unwrap()["error"]["code"],
+        "idempotency-conflict"
+    );
+    let (status, _) = append(&router, &token, "new-key", body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/me")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE credentials SET revoked_at='2026-01-01T00:00:00Z' WHERE id=?1",
+            [&enrolled.principal_client_secret.credential_id],
+        )
+        .unwrap();
+    let (status, _) = append(&router, &token, "exact", body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let connection = db.connect_read_only().unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    drop(router);
+    drop(service);
+    drop(db);
     std::fs::remove_dir_all(directory).unwrap();
 }

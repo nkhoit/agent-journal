@@ -54,7 +54,7 @@ impl Fixture {
         );
         service
             .create_principal(&PrincipalCreateRequest {
-                id: "reader".into(),
+                handle: "reader".into(),
                 display_name: "Reader".into(),
             })
             .unwrap();
@@ -425,7 +425,7 @@ fn requeue_and_custody_failpoints_roll_back() {
 fn add_identity(f: &Fixture, id: &str) -> EnrollmentExchangeResponse {
     f.service
         .create_principal(&PrincipalCreateRequest {
-            id: id.into(),
+            handle: id.into(),
             display_name: id.into(),
         })
         .unwrap();
@@ -510,7 +510,16 @@ fn status_authorization_pagination_and_current_acl_matrix() {
         )
         .unwrap();
     assert_eq!(own.items.len(), 1);
-    assert_eq!(own.items[0].recipient, "recipient");
+    assert_eq!(
+        own.items[0].recipient,
+        f.service
+            .authenticate(
+                &recipient.principal_client_secret.secret,
+                CredentialClass::PrincipalClient
+            )
+            .unwrap()
+            .principal_id
+    );
     assert!(
         f.service
             .delivery_status(
@@ -1148,6 +1157,11 @@ fn heartbeat_expiry_restart_and_credential_binding() {
         .authenticate(&f.delivery, CredentialClass::DeliveryAdapter)
         .unwrap();
     assert_eq!(bound, actor.credential_id);
+    let checkpoint = rusqlite::Connection::open(&f.path).unwrap();
+    checkpoint
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE")
+        .unwrap();
+    drop(checkpoint);
     let restarted = BootstrapService::with_sources(
         Database::open(&f.path).unwrap(),
         f.clock.clone(),
@@ -1271,7 +1285,13 @@ fn status_counts_only_current_pending_and_rejects_foreign_cursors() {
         .service
         .mailbox_status(&f.delivery, &PageQuery::default())
         .unwrap();
-    assert_eq!(page.items[0].principal_id, "reader");
+    assert_eq!(
+        page.items[0].principal_id,
+        f.service
+            .authenticate(&f.client, CredentialClass::PrincipalClient)
+            .unwrap()
+            .principal_id
+    );
     assert_eq!(page.items[0].pending, 1);
     assert!(page.items[0].oldest_pending_at.is_some());
     assert!(page.next_cursor.is_none());
@@ -1331,7 +1351,7 @@ fn recipient_isolation_and_credential_revocation() {
     let f = Fixture::new();
     f.service
         .create_principal(&PrincipalCreateRequest {
-            id: "other".into(),
+            handle: "other".into(),
             display_name: "Other".into(),
         })
         .unwrap();

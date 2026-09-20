@@ -6,15 +6,23 @@ prevents `journal-recover` from running while the daemon or its database workers
 still own that audit. There is no public recovery endpoint, remote administrator
 bearer, or Windows permission fallback.
 
-## Recovery units and upgrade
+## UUID-native compatibility boundary
 
-Migration 7 adds `recovery_anchor`, containing a random journal identity, a
+Only the UUID-native current schema is supported. Before any protected startup,
+archive/reset every pre-UUID central database (including empty schema-7 files)
+and every non-current local spool. There is no in-place migration, automatic
+audit adoption for legacy state, or schema downgrade. See
+[`uuid-native-clean-break.md`](uuid-native-clean-break.md) before invoking a
+recovery command.
+
+## Recovery units and current-schema operation
+
+The current UUID-native schema includes `recovery_anchor`, containing a random journal identity, a
 monotonic audit revision, and an audit-required marker. First protected startup
-creates a security baseline for an unanchored database. For an existing deployment,
-stop and inspect the deployment before that first upgrade: this baseline cannot
-reconstruct security changes lost before audit adoption. Older binaries reject
-schema 7; rollback requires a compatible backup and protected recovery review,
-not deletion of migration history.
+creates a security baseline only for a fresh, unanchored UUID-native database. For an existing deployment,
+stop and inspect the deployment before that first protected initialization: this baseline cannot
+reconstruct security changes lost before audit adoption. Schema downgrade is unsupported; rollback requires a compatible UUID-native
+backup and protected recovery review, never deletion, replay, or editing of historical state.
 
 `journald --recovery-audit "$AUDIT"` selects the external audit. By default,
 `journal.db` uses sibling `journal.recovery.db`. Its parent must be an existing
@@ -28,8 +36,12 @@ the directory before committing central adoption. Reserve that sibling name and
 its SQLite `-journal` sidecar for initialization. Under the lifetime lock, an
 interrupted staging file can be discarded and rebuilt only when the final audit
 is absent and the central anchor is not audit-required and remains at revision
-zero. A published baseline is reused after a crash before adoption. Required
-audits are never replaced by this retry path.
+zero. If publication was durable but the initializer crashed before that anchor
+update, protected startup read-validates the complete matching revision-zero
+lineage under the audit lock, atomically sets `audit_required`, and reuses the
+same audit bytes. It never creates a replacement or adopts an absent, malformed,
+foreign, mismatched, or closed audit. Required audits are never replaced by this
+retry path.
 
 The audit is a separate SQLite database using rollback journaling and
 `synchronous=EXTRA`. A sibling file is a separate recovery unit, not a separate

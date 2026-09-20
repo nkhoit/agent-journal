@@ -1,0 +1,20 @@
+[package]
+name = "journal-lock-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "journal-lock-fixture"
+path = "src/main.rs"
+
+[dependencies]
+fs2.workspace = true
+journal-adapter-spool = { path = "../journal-adapter-spool" }
+journal-storage-sqlite = { path = "../journal-storage-sqlite" }
+libc = "=0.2.189"
+
+[lints.rust]
+unsafe_code = "allow"

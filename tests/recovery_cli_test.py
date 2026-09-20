@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -54,6 +55,9 @@ class RecoveryCliTest(unittest.TestCase):
                 pass
             if any(field.get("event") == "service_ready" for field in fields):
                 self.stop_service()
+                with sqlite3.connect(self.database) as connection:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    connection.execute("PRAGMA journal_mode=DELETE")
                 return
             time.sleep(0.01)
         self.fail("journald readiness deadline exceeded")
@@ -115,6 +119,8 @@ class RecoveryCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertEqual(result.stdout, b"")
         self.assertTrue(backup.exists())
+        for suffix in ("-journal", "-wal", "-shm"):
+            self.assertFalse(Path(f"{self.database}{suffix}").exists(), suffix)
 
         restore_arguments = (
             "restore",

@@ -15,6 +15,7 @@ members = [
     "crates/aj-admin",
     "crates/journal-adapter-hermes",
     "crates/journal-adapter-muse",
+    "crates/journal-lock-test",
 ]
 resolver = "3"
 

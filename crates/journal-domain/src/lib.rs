@@ -19,12 +19,15 @@ pub const MAX_IDENTIFIER_CHARS: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     pub id: String,
+    pub handle: String,
+    pub display_name: String,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null_string",
         skip_serializing_if = "Option::is_none"
     )]
-    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub profile_revision: i64,
     pub created_at: String,
     pub disabled: bool,
 }

@@ -1,5 +1,7 @@
 use super::*;
 use journal_adapter_core::Envelope;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{process::Command, time::Duration};
 
 struct Fixture(PathBuf);
@@ -162,6 +164,172 @@ fn inherited_lock_descriptor_does_not_keep_closed_spool_locked() {
         child.wait().unwrap();
         assert!(still_alive);
         reopened.unwrap().close().unwrap();
+    }
+}
+
+#[test]
+fn current_spool_sidecars_are_refused_without_mutation() {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        for contents in [b"".as_slice(), b"retained hot evidence".as_slice()] {
+            let fixture = Fixture::new();
+            let store = fixture.open();
+            store.put(&item()).unwrap();
+            drop(store);
+
+            let spool = fixture.0.join("spool.db");
+            let lock = fixture.0.join("spool.db.lock");
+            let sidecar = PathBuf::from(format!("{}{suffix}", spool.display()));
+            let _ = std::fs::remove_file(&sidecar);
+            std::fs::write(&sidecar, contents).unwrap();
+            let before = [spool.clone(), lock.clone(), sidecar.clone()]
+                .into_iter()
+                .map(|path| {
+                    let metadata = std::fs::metadata(&path).unwrap();
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes, metadata)
+                })
+                .collect::<Vec<_>>();
+
+            assert!(SqliteStore::open(&spool, Limits::default()).is_err());
+            for (path, bytes, metadata) in before {
+                assert_eq!(std::fs::read(&path).unwrap(), bytes, "{suffix}: {path:?}");
+                #[cfg(unix)]
+                assert_eq!(std::fs::metadata(&path).unwrap().ino(), metadata.ino());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_spool_sidecar_symlinks_are_refused_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        store.put(&item()).unwrap();
+        drop(store);
+
+        let spool = fixture.0.join("spool.db");
+        let lock = fixture.0.join("spool.db.lock");
+        let sidecar = PathBuf::from(format!("{}{suffix}", spool.display()));
+        let _ = std::fs::remove_file(&sidecar);
+        let dangling_target = fixture.0.join(format!("missing-{suffix}"));
+        symlink(&dangling_target, &sidecar).unwrap();
+        let spool_bytes = std::fs::read(&spool).unwrap();
+        let spool_inode = std::fs::metadata(&spool).unwrap().ino();
+        let lock_inode = std::fs::metadata(&lock).unwrap().ino();
+        let sidecar_inode = std::fs::symlink_metadata(&sidecar).unwrap().ino();
+
+        assert!(matches!(
+            SqliteStore::open(&spool, Limits::default()),
+            Err(CoreError::SpoolUnavailable(message)) if message.contains("reset required")
+        ));
+        assert_eq!(std::fs::read(&spool).unwrap(), spool_bytes);
+        assert_eq!(std::fs::metadata(&spool).unwrap().ino(), spool_inode);
+        assert_eq!(std::fs::metadata(&lock).unwrap().ino(), lock_inode);
+        assert_eq!(std::fs::read_link(&sidecar).unwrap(), dangling_target);
+        assert_eq!(
+            std::fs::symlink_metadata(&sidecar).unwrap().ino(),
+            sidecar_inode
+        );
+        assert!(!dangling_target.exists());
+    }
+}
+
+#[test]
+fn current_spool_rejects_recreated_tables_and_indexes_with_weakened_definitions() {
+    let mutations = [
+        (
+            "attempts-table",
+            "DROP INDEX recovery;
+             DROP INDEX outbox;
+             ALTER TABLE attempts RENAME TO old_attempts;
+             CREATE TABLE attempts (
+                 attempt_id TEXT PRIMARY KEY NOT NULL,
+                 fingerprint BLOB NOT NULL,
+                 item TEXT NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 terminal INTEGER NOT NULL,
+                 retry_at INTEGER,
+                 event_pending INTEGER NOT NULL DEFAULT 0
+             ) STRICT;
+             INSERT INTO attempts SELECT * FROM old_attempts;
+             DROP TABLE old_attempts;
+             CREATE INDEX recovery ON attempts(terminal, attempt_id);
+             CREATE INDEX outbox ON attempts(event_pending, attempt_id);",
+        ),
+        (
+            "recovery-index",
+            "DROP INDEX recovery;
+             CREATE INDEX recovery ON attempts(attempt_id);",
+        ),
+    ];
+    for (label, mutation) in mutations {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        store.close().unwrap();
+        let spool = fixture.0.join("spool.db");
+        let lock = fixture.0.join("spool.db.lock");
+        let connection = Connection::open(&spool).unwrap();
+        connection.execute_batch(mutation).unwrap();
+        drop(connection);
+        let spool_bytes = std::fs::read(&spool).unwrap();
+        #[cfg(unix)]
+        let spool_inode = std::fs::metadata(&spool).unwrap().ino();
+        #[cfg(unix)]
+        let lock_inode = std::fs::metadata(&lock).unwrap().ino();
+
+        assert!(matches!(
+            SqliteStore::open(&spool, Limits::default()),
+            Err(CoreError::SpoolUnavailable(message)) if message.contains("reset required")
+        ));
+        assert_eq!(std::fs::read(&spool).unwrap(), spool_bytes, "{label}");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::metadata(&spool).unwrap().ino(),
+                spool_inode,
+                "{label}"
+            );
+            assert_eq!(
+                std::fs::metadata(&lock).unwrap().ino(),
+                lock_inode,
+                "{label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn existing_spool_substitution_after_read_only_preflight_is_refused() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.put(&item()).unwrap();
+    drop(store);
+
+    let spool = fixture.0.join("spool.db");
+    let lock = fixture.0.join("spool.db.lock");
+    let replacement = fixture.0.join("replacement.db");
+    std::fs::copy(&spool, &replacement).unwrap();
+    let lock_metadata = std::fs::metadata(&lock).unwrap();
+    let replacement_bytes = std::fs::read(&replacement).unwrap();
+    *TEST_PRE_OPEN_SUBSTITUTION.lock().unwrap() = Some((spool.clone(), replacement));
+
+    let result = SqliteStore::open(&spool, Limits::default());
+    match result {
+        Err(CoreError::SpoolUnavailable(message)) => {
+            assert!(message.contains("changed during admission"), "{message}");
+        }
+        Err(error) => panic!("unexpected error: {error:?}"),
+        Ok(_) => panic!("substituted spool opened"),
+    }
+    assert_eq!(std::fs::read(&spool).unwrap(), replacement_bytes);
+    #[cfg(unix)]
+    assert_eq!(std::fs::metadata(&lock).unwrap().ino(), lock_metadata.ino());
+    for suffix in ["-journal", "-wal", "-shm"] {
+        assert!(!PathBuf::from(format!("{}{suffix}", spool.display())).exists());
     }
 }
 
@@ -667,7 +835,7 @@ fn malformed_rows_and_foreign_schema_fail_closed() {
     assert!(store.recoverable(SystemTime::now(), 1).is_err());
     drop(store);
     let connection = Connection::open(fixture.0.join("spool.db")).unwrap();
-    connection.execute_batch("PRAGMA user_version=3").unwrap();
+    connection.execute_batch("PRAGMA user_version=4").unwrap();
     drop(connection);
     assert!(SqliteStore::open(fixture.0.join("spool.db"), Limits::default()).is_err());
 }
@@ -759,32 +927,21 @@ fn outcome(store: &SqliteStore) {
 }
 
 #[test]
-fn schema_one_upgrade_preserves_put_fingerprint_and_tombstones() {
+fn retained_legacy_spool_requires_archive_or_reset_without_lock_replacement() {
     let fixture = Fixture::new();
+    let path = fixture.0.join("spool.db");
     let store = fixture.open();
     store.put(&item()).unwrap();
-    confirm(&store);
-    start(&store);
-    store
-        .mark_injected("attempt-1", "instance-1", 1, "receipt")
-        .unwrap();
     drop(store);
-    let connection = Connection::open(fixture.0.join("spool.db")).unwrap();
-    connection
-        .execute_batch(
-            "DROP INDEX outbox; ALTER TABLE attempts DROP COLUMN event_pending;
-        DROP TABLE scheduler; PRAGMA user_version=1;",
-        )
-        .unwrap();
+    let lock = fixture.0.join("spool.db.lock");
+    let lock_id = std::fs::metadata(&lock).unwrap().ino();
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("PRAGMA user_version=1").unwrap();
     drop(connection);
-    let store = fixture.open();
-    store.put(&item()).unwrap();
-    assert_eq!(
-        store.get("attempt-1").unwrap().injection_state,
-        InjectionState::Accepted
-    );
-    assert!(store.work_after(SystemTime::now(), None).unwrap().is_none());
-    assert_eq!(store.backoff().unwrap(), Backoff::default());
+    let before = std::fs::read(&path).unwrap();
+    assert!(SqliteStore::open(&path, Limits::default()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::metadata(lock).unwrap().ino(), lock_id);
 }
 
 #[test]
@@ -831,7 +988,6 @@ fn kill_before_and_after_every_commit() {
             if operation == "ack-event" {
                 outcome(&store);
             }
-            let before = store.get("attempt-1").ok();
             drop(store);
             let signal = fixture.0.join("checkpoint");
             let mut process = child(&fixture, operation)
@@ -853,49 +1009,69 @@ fn kill_before_and_after_every_commit() {
             }
             process.kill().unwrap();
             process.wait().unwrap();
+            if phase == "before" {
+                let artifacts = [
+                    fixture.0.join("spool.db"),
+                    fixture.0.join("spool.db.lock"),
+                    fixture.0.join("spool.db-journal"),
+                    fixture.0.join("spool.db-wal"),
+                    fixture.0.join("spool.db-shm"),
+                ]
+                .into_iter()
+                .filter(|path| path.exists())
+                .map(|path| {
+                    let metadata = std::fs::metadata(&path).unwrap();
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes, metadata)
+                })
+                .collect::<Vec<_>>();
+                assert!(artifacts.iter().any(|(path, _, _)| {
+                    path.file_name()
+                        .is_some_and(|name| name != "spool.db" && name != "spool.db.lock")
+                }));
+                assert!(SqliteStore::open(fixture.0.join("spool.db"), Limits::default()).is_err());
+                for (path, bytes, metadata) in artifacts {
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes, "{operation}");
+                    #[cfg(unix)]
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), metadata.ino());
+                }
+                continue;
+            }
             let store = fixture.open();
             let after = store.get("attempt-1").ok();
-            if phase == "before" {
-                assert_eq!(after, before, "{operation}");
-                if operation == "reconcile" {
-                    store.put(&item()).unwrap();
-                    assert!(store.put(&reclaimed()).is_err());
+            let saved = after.unwrap();
+            match operation {
+                "reconcile" => {
+                    assert_eq!(saved, reclaimed());
+                    store.put(&reclaimed()).unwrap();
+                    assert!(store.put(&item()).is_err());
                 }
-            } else {
-                let saved = after.unwrap();
-                match operation {
-                    "reconcile" => {
-                        assert_eq!(saved, reclaimed());
-                        store.put(&reclaimed()).unwrap();
-                        assert!(store.put(&item()).is_err());
-                    }
-                    "put" => assert_eq!(saved, item()),
-                    "custody" => assert!(saved.custody_confirmed),
-                    "start" => assert_eq!(saved.injection_state, InjectionState::InFlight),
-                    "accepted" => assert_eq!(saved.runtime_receipt, "receipt"),
-                    "retry" => assert_eq!(
-                        saved.next_runtime_try_at,
-                        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(42))
-                    ),
-                    "route" => assert_eq!(saved.injection_state, InjectionState::RouteUnavailable),
-                    "terminal" => {
-                        assert_eq!(saved.injection_state, InjectionState::TerminalFailure)
-                    }
-                    "compact" => assert!(saved.envelope.body.is_empty()),
-                    "outcome" => {
-                        assert_eq!(saved.injection_state, InjectionState::Accepted);
-                        assert!(saved.pending_event.is_some());
-                        assert_eq!(
-                            store.work_after(SystemTime::now(), None).unwrap(),
-                            Some(saved)
-                        );
-                    }
-                    "ack-event" => {
-                        assert_eq!(saved.injection_state, InjectionState::Accepted);
-                        assert!(saved.pending_event.is_none());
-                    }
-                    _ => unreachable!(),
+                "put" => assert_eq!(saved, item()),
+                "custody" => assert!(saved.custody_confirmed),
+                "start" => assert_eq!(saved.injection_state, InjectionState::InFlight),
+                "accepted" => assert_eq!(saved.runtime_receipt, "receipt"),
+                "retry" => assert_eq!(
+                    saved.next_runtime_try_at,
+                    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(42))
+                ),
+                "route" => assert_eq!(saved.injection_state, InjectionState::RouteUnavailable),
+                "terminal" => {
+                    assert_eq!(saved.injection_state, InjectionState::TerminalFailure)
                 }
+                "compact" => assert!(saved.envelope.body.is_empty()),
+                "outcome" => {
+                    assert_eq!(saved.injection_state, InjectionState::Accepted);
+                    assert!(saved.pending_event.is_some());
+                    assert_eq!(
+                        store.work_after(SystemTime::now(), None).unwrap(),
+                        Some(saved)
+                    );
+                }
+                "ack-event" => {
+                    assert_eq!(saved.injection_state, InjectionState::Accepted);
+                    assert!(saved.pending_event.is_none());
+                }
+                _ => unreachable!(),
             }
         }
     }

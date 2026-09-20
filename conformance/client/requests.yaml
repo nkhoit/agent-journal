@@ -12,6 +12,9 @@ operations:
   - operation_id: getMe
     method: GET
     path: /v1/me
+  - operation_id: updateProfile
+    method: PATCH
+    path: /v1/me/profile
   - operation_id: listPrincipals
     method: GET
     path: /v1/principals

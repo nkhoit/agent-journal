@@ -20,6 +20,7 @@ EXPECTED_OPERATIONS = {
     "healthLive": ("GET", "/health/live"),
     "healthReady": ("GET", "/health/ready"),
     "getMe": ("GET", "/v1/me"),
+    "updateProfile": ("PATCH", "/v1/me/profile"),
     "listPrincipals": ("GET", "/v1/principals"),
     "listSpaces": ("GET", "/v1/spaces"),
     "getSpace": ("GET", "/v1/spaces/{space}"),
@@ -82,7 +83,14 @@ REQUIRED_RESPONSE_FIELDS = {
     "Error": {"code", "message", "request_id"},
     "ErrorResponse": {"error"},
     "Health": {"status", "version"},
-    "Principal": {"id", "created_at", "disabled"},
+    "Principal": {
+        "id",
+        "handle",
+        "display_name",
+        "profile_revision",
+        "created_at",
+        "disabled",
+    },
     "PrincipalPage": {"items", "next_cursor"},
     "Membership": {"space_id", "principal_id", "can_read", "can_append", "can_admin"},
     "Space": {"id", "name", "created_at", "limits"},
@@ -139,6 +147,10 @@ REQUEST_SCHEMA_FIELDS = {
     "CredentialRotateRequest": ({"credential_id", "reason"}, {"credential_id"}),
     "CredentialRevokeRequest": ({"credential_id", "reason"}, {"credential_id"}),
     "EnrollmentRecoveryRequest": ({"adapter_id", "instance_id"}, {"adapter_id", "instance_id"}),
+    "ProfileUpdateRequest": (
+        {"handle", "display_name", "description", "expected_profile_revision"},
+        {"handle", "display_name", "expected_profile_revision"},
+    ),
     "AppendRecordRequest": (
         {"kind", "content", "run_id", "attention", "routing_key", "relations"},
         {"kind", "content"},
@@ -170,6 +182,7 @@ REQUEST_SCHEMA_FIELDS = {
 
 EXPECTED_REQUESTS = {
     "appendRecord": ("AppendRecordRequest", True),
+    "updateProfile": ("ProfileUpdateRequest", True),
     "createEnrollmentTicket": ("EnrollmentTicketCreateRequest", True),
     "exchangeEnrollmentTicket": ("EnrollmentExchangeRequest", True),
     "provisionAdapter": ("AdapterProvisionRequest", True),
@@ -192,6 +205,7 @@ EXPECTED_SUCCESS_RESPONSES = {
     "healthLive": ("200", "Health"),
     "healthReady": ("200", "Health"),
     "getMe": ("200", "Me"),
+    "updateProfile": ("200", "Principal"),
     "listPrincipals": ("200", "PrincipalPage"),
     "listSpaces": ("200", "SpacePage"),
     "getSpace": ("200", "Space"),
