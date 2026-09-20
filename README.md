@@ -151,6 +151,10 @@ journal-adapter-hermes \
 
 The runtime preflights `/health` and authenticated `/v1/capabilities`, creates the explicit local session, and submits `POST /v1/runs` with `Authorization: Bearer`, `Idempotency-Key: agent-journal:<attempt_id>`, and `{input,session_id}`. Only HTTP `202` with a bounded visible-ASCII `run_id` is accepted. `429`, `5xx`, connection failures, and timeouts are unavailable and safely retryable; authentication, validation, not-found, and idempotency conflicts are rejected. A receipt records runtime admission, not model observation or task completion.
 
+Pass `--wait-seconds N` (0–30, default 0) to long-poll the mailbox claim instead of returning immediately when the mailbox is empty; the central holds the claim until mail arrives or the bound elapses. This replaces busy-polling with one blocking request per poll cycle — `--poll-seconds` still applies between cycles.
+
+Operator notes: the shutdown signal is only observed between ticks, so stopping a supervised loop can take up to `--wait-seconds` after SIGTERM. The HTTP client also has a 35s total-request timeout, leaving only ~5s of margin over a full 30s hold; if a claim times out after the server already committed a lease, the adapter treats it as unavailable and backs off while the item sits leased until expiry — delayed delivery, never loss.
+
 ## Muse adapter
 
 `journal-adapter-muse` is a synchronous delivery worker with a bounded `--once` mode for canaries and a signal-aware loop for supervision. The Muse runtime exposes no authenticated injection API to local processes, so the adapter performs a private hook drop-point handoff: it durably writes one JSON drop file per delivery attempt into a watched directory, and the operator's hook worker picks the file up and calls `chat.send_message` from inside the platform. It accepts only file paths for credentials; secret values are never command-line arguments. There is deliberately no runtime key file — the drop directory's private filesystem permissions are the access control for the handoff.
@@ -169,6 +173,10 @@ journal-adapter-muse \
 The drop directory must be an existing private regular non-symlink directory. Each drop file is named `muse-<sha256(attempt_id)>.drop.json` and carries `version`, a stable `dedupe_key` (the attempt ID), the private `target_chat`, envelope correlation IDs, the rendered body, and a SHA-256 content hash. Exact replay returns the same receipt without rewriting; conflicting or unreadable files fail closed; a vanished directory is retryable.
 
 `runtime_target` in the local routes JSON is the Muse `chat_id` and is never sent to the central journal. The platform offers no idempotency key, so the deployment's hook worker must keep a durable seen-set on `dedupe_key` to avoid duplicate chat turns. A drop receipt records durable local handoff, not hook execution, queued-turn durability, model observation, or task completion.
+
+Pass `--wait-seconds N` (0–30, default 0) to long-poll the mailbox claim instead of returning immediately when the mailbox is empty; the central holds the claim until mail arrives or the bound elapses. This replaces busy-polling with one blocking request per poll cycle — `--poll-seconds` still applies between cycles.
+
+Operator notes: the shutdown signal is only observed between ticks, so stopping a supervised loop can take up to `--wait-seconds` after SIGTERM. The HTTP client also has a 35s total-request timeout, leaving only ~5s of margin over a full 30s hold; if a claim times out after the server already committed a lease, the adapter treats it as unavailable and backs off while the item sits leased until expiry — delayed delivery, never loss.
 
 ## Implementation sequence
 

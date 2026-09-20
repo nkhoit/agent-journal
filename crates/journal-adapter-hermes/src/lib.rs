@@ -1,5 +1,7 @@
 use journal_adapter_core::DeliveryJournal;
-use journal_adapter_core::{Adapter, CoreError, Progress, StaticRoutes, SystemClock};
+use journal_adapter_core::{
+    Adapter, CoreError, MAX_LONG_POLL_SECONDS, Progress, StaticRoutes, SystemClock,
+};
 use journal_adapter_spool::{Limits, SqliteStore};
 use journal_client::{Client, HttpTransport, private_file};
 use journal_runtime_hermes::HermesRuntime;
@@ -42,6 +44,7 @@ pub struct Config {
     hermes_key_file: PathBuf,
     once: bool,
     poll_seconds: u64,
+    wait_seconds: u64,
 }
 
 impl Config {
@@ -58,6 +61,7 @@ impl Config {
         let mut hermes_key_file = None;
         let mut once = false;
         let mut poll_seconds = DEFAULT_POLL_SECONDS;
+        let mut wait_seconds = 0u64;
         let mut args = args.into_iter();
 
         while let Some(raw) = args.next() {
@@ -97,6 +101,19 @@ impl Config {
                         ));
                     }
                 }
+                "--wait-seconds" => {
+                    let value = required_value(&mut args, flag)?;
+                    wait_seconds = value.parse().map_err(|_| {
+                        ConfigError::Invalid(format!(
+                            "--wait-seconds must be an integer from 0 to {MAX_LONG_POLL_SECONDS}"
+                        ))
+                    })?;
+                    if wait_seconds > MAX_LONG_POLL_SECONDS {
+                        return Err(ConfigError::Invalid(format!(
+                            "--wait-seconds must be an integer from 0 to {MAX_LONG_POLL_SECONDS}"
+                        )));
+                    }
+                }
                 _ => return Err(ConfigError::Invalid(format!("unknown argument: {flag}"))),
             }
         }
@@ -114,11 +131,12 @@ impl Config {
             hermes_key_file: required_option(hermes_key_file, "--hermes-key-file")?,
             once,
             poll_seconds,
+            wait_seconds,
         })
     }
 
     pub fn usage() -> &'static str {
-        "Usage: journal-adapter-hermes --central-endpoint URL --delivery-credential-file PATH --spool-db PATH --instance-id ID --routes-file PATH --hermes-base-url URL --hermes-key-file PATH [--once] [--poll-seconds N]"
+        "Usage: journal-adapter-hermes --central-endpoint URL --delivery-credential-file PATH --spool-db PATH --instance-id ID --routes-file PATH --hermes-base-url URL --hermes-key-file PATH [--once] [--poll-seconds N] [--wait-seconds N]"
     }
 }
 
@@ -180,13 +198,14 @@ pub fn run(config: Config) -> Result<(), RunError> {
     let spool = SqliteStore::open(&config.spool_db, Limits::default())?;
     let runtime = HermesRuntime::new(&config.hermes_base_url, hermes_key)?;
     let clock = SystemClock;
-    let mut adapter = Adapter::new(
+    let mut adapter = build_adapter(
         &journal,
         &spool,
         &routes,
         &runtime,
         &clock,
         config.instance_id.clone(),
+        config.wait_seconds,
     )?;
 
     if config.once {
@@ -196,6 +215,35 @@ pub fn run(config: Config) -> Result<(), RunError> {
     }
 }
 
+/// Construct the adapter from its parts, applying the configured long-poll
+/// wait. Kept as a separate generic helper so tests exercise the exact
+/// construction `run` uses, including the `wait_seconds` wiring.
+fn build_adapter<'a, J, S, R, T, C>(
+    journal: &'a J,
+    spool: &'a S,
+    routes: &'a R,
+    runtime: &'a T,
+    clock: &'a C,
+    instance_id: String,
+    wait_seconds: u64,
+) -> Result<Adapter<'a, J, S, R, T, C>, CoreError>
+where
+    J: journal_adapter_core::Journal,
+    S: journal_adapter_core::AdapterSpool,
+    R: journal_adapter_core::RouteResolver,
+    T: journal_adapter_core::Runtime,
+    C: journal_adapter_core::Clock,
+{
+    Adapter::new(journal, spool, routes, runtime, clock, instance_id)?
+        .with_wait_seconds(wait_seconds)
+}
+
+/// Signal-aware poll loop. The shutdown signal is only observed between
+/// ticks: a tick whose claim long-polls blocks synchronously, so shutdown can
+/// take up to `--wait-seconds` after SIGTERM before the loop exits. No
+/// delivery is lost — an interrupted run leaves a server-side lease that
+/// expires, and at-least-once redelivery plus the attempt dedupe key keep a
+/// repeated claim safe.
 fn run_loop<J, S, R, T, C>(
     adapter: &mut Adapter<'_, J, S, R, T, C>,
     poll_seconds: u64,
@@ -367,6 +415,95 @@ mod tests {
         .unwrap();
         assert!(config.once);
         assert_eq!(config.poll_seconds, DEFAULT_POLL_SECONDS);
+        assert_eq!(config.wait_seconds, 0);
+    }
+
+    #[test]
+    fn parser_accepts_bounded_wait_seconds() {
+        let config = Config::parse(
+            [
+                "--central-endpoint",
+                "http://127.0.0.1:1",
+                "--delivery-credential-file",
+                "delivery",
+                "--spool-db",
+                "spool.db",
+                "--instance-id",
+                "installation",
+                "--routes-file",
+                "routes.json",
+                "--hermes-base-url",
+                "http://127.0.0.1:2",
+                "--hermes-key-file",
+                "hermes-key",
+                "--wait-seconds",
+                "25",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .unwrap();
+        assert_eq!(config.wait_seconds, 25);
+        // The server bound is accepted exactly.
+        let config = Config::parse(
+            [
+                "--central-endpoint",
+                "http://127.0.0.1:1",
+                "--delivery-credential-file",
+                "delivery",
+                "--spool-db",
+                "spool.db",
+                "--instance-id",
+                "installation",
+                "--routes-file",
+                "routes.json",
+                "--hermes-base-url",
+                "http://127.0.0.1:2",
+                "--hermes-key-file",
+                "hermes-key",
+                "--wait-seconds",
+                &MAX_LONG_POLL_SECONDS.to_string(),
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .unwrap();
+        assert_eq!(config.wait_seconds, MAX_LONG_POLL_SECONDS);
+    }
+
+    #[test]
+    fn parser_rejects_out_of_range_wait_seconds() {
+        let base = [
+            "--central-endpoint",
+            "http://127.0.0.1:1",
+            "--delivery-credential-file",
+            "delivery",
+            "--spool-db",
+            "spool.db",
+            "--instance-id",
+            "installation",
+            "--routes-file",
+            "routes.json",
+            "--hermes-base-url",
+            "http://127.0.0.1:2",
+            "--hermes-key-file",
+            "hermes-key",
+            "--wait-seconds",
+        ];
+        for value in [
+            (MAX_LONG_POLL_SECONDS + 1).to_string(),
+            "3600".to_string(),
+            "-1".to_string(),
+            "abc".to_string(),
+            String::new(),
+        ] {
+            let mut args: Vec<OsString> = base.iter().map(OsString::from).collect();
+            args.push(OsString::from(value.clone()));
+            assert!(
+                Config::parse(args.into_iter()).is_err(),
+                "wait-seconds value {value:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -393,5 +530,202 @@ mod tests {
             Err(RunError::Config(message)) if message == "routes file is too large"
         ));
         fs::remove_file(path).expect("remove sparse routes file");
+    }
+
+    // Trivial fakes exercising the `build_adapter` glue `run` uses, asserting
+    // the configured wait lands on the outgoing `ClaimRequest`.
+    use journal_adapter_core::{
+        AdapterSpool, Backoff, ClaimBatch, ClaimRequest, ClaimState, CoreResult, CustodyRequest,
+        CustodyResult, Envelope, EventRequest, HeartbeatRequest, InjectionState, Journal,
+        RegisterRequest, Registration, RegistrationStatus, Route, RouteResolver, Runtime, Spool,
+        SpoolItem,
+    };
+    use std::cell::RefCell;
+    use std::time::SystemTime;
+
+    struct RecordingJournal {
+        claims: RefCell<Vec<ClaimRequest>>,
+    }
+
+    impl RecordingJournal {
+        fn registration() -> Registration {
+            Registration {
+                adapter_id: "adapter".into(),
+                principal_id: "principal".into(),
+                instance_id: "instance-1".into(),
+                generation: 1,
+                status: RegistrationStatus::Active,
+                lease_expires_at: "2030-01-01T00:00:00Z".into(),
+                heartbeat_after_seconds: 20,
+            }
+        }
+    }
+
+    impl Journal for RecordingJournal {
+        fn register(&self, _: RegisterRequest) -> CoreResult<Registration> {
+            Ok(Self::registration())
+        }
+        fn heartbeat(&self, _: HeartbeatRequest) -> CoreResult<Registration> {
+            Ok(Self::registration())
+        }
+        fn claim(&self, request: ClaimRequest) -> CoreResult<ClaimBatch> {
+            self.claims.borrow_mut().push(request);
+            Ok(ClaimBatch {
+                claim_id: "claim-1".into(),
+                state: ClaimState::Active,
+                lease_expires_at: "2030-01-01T00:00:00Z".into(),
+                items: Vec::new(),
+            })
+        }
+        fn commit_host_custody(&self, _: CustodyRequest) -> CoreResult<CustodyResult> {
+            panic!("unexpected custody commit")
+        }
+        fn record_event(&self, _: &str, _: EventRequest) -> CoreResult<()> {
+            panic!("unexpected event")
+        }
+    }
+
+    struct IdleSpool;
+
+    impl Spool for IdleSpool {
+        fn put(&self, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected put")
+        }
+        fn get(&self, _: &str) -> CoreResult<SpoolItem> {
+            panic!("unexpected get")
+        }
+        fn reconcile_expired_claim(&self, _: &CustodyResult, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected reconcile")
+        }
+        fn confirm_custody(&self, _: &str, _: &str, _: &str, _: i64) -> CoreResult<()> {
+            panic!("unexpected confirm")
+        }
+        fn mark_injection_started(&self, _: &str, _: &str, _: i64) -> CoreResult<()> {
+            panic!("unexpected mark")
+        }
+        fn mark_injected(&self, _: &str, _: &str, _: i64, _: &str) -> CoreResult<()> {
+            panic!("unexpected mark")
+        }
+        fn mark_injection_failed(
+            &self,
+            _: &str,
+            _: &str,
+            _: i64,
+            _: InjectionState,
+            _: &str,
+        ) -> CoreResult<()> {
+            panic!("unexpected mark")
+        }
+        fn recoverable(&self, _: SystemTime, _: usize) -> CoreResult<Vec<SpoolItem>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl AdapterSpool for IdleSpool {
+        fn check_capacity(&self, _: u64, _: u64) -> CoreResult<()> {
+            Ok(())
+        }
+        fn find(&self, _: &str) -> CoreResult<Option<SpoolItem>> {
+            Ok(None)
+        }
+        fn work_after(&self, _: SystemTime, _: Option<&str>) -> CoreResult<Option<SpoolItem>> {
+            Ok(None)
+        }
+        fn finish(&self, _: &SpoolItem, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected finish")
+        }
+        fn acknowledge_event(&self, _: &str, _: &EventRequest) -> CoreResult<()> {
+            panic!("unexpected event")
+        }
+        fn suppress(&self, _: &SpoolItem) -> CoreResult<()> {
+            panic!("unexpected suppression")
+        }
+        fn backoff(&self) -> CoreResult<Backoff> {
+            Ok(Backoff::default())
+        }
+        fn set_backoff(&self, _: &Backoff) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    struct PanicResolver;
+
+    impl RouteResolver for PanicResolver {
+        fn resolve(&self, _: &str, _: &str) -> CoreResult<Route> {
+            panic!("unexpected resolve")
+        }
+    }
+
+    struct PanicRuntime;
+
+    impl Runtime for PanicRuntime {
+        fn inject(&self, _: &Route, _: &Envelope, _: &str) -> CoreResult<String> {
+            panic!("unexpected inject")
+        }
+    }
+
+    #[test]
+    fn build_adapter_applies_configured_wait_seconds() {
+        let journal = RecordingJournal {
+            claims: RefCell::new(Vec::new()),
+        };
+        let spool = IdleSpool;
+        let clock = SystemClock;
+        let mut adapter = build_adapter(
+            &journal,
+            &spool,
+            &PanicResolver,
+            &PanicRuntime,
+            &clock,
+            "instance-1".into(),
+            25,
+        )
+        .unwrap();
+        assert!(matches!(adapter.tick(), Ok(Progress::Idle)));
+        let claims = journal.claims.borrow();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].wait_seconds, 25);
+    }
+
+    #[test]
+    fn build_adapter_defaults_to_immediate_claim() {
+        let journal = RecordingJournal {
+            claims: RefCell::new(Vec::new()),
+        };
+        let spool = IdleSpool;
+        let clock = SystemClock;
+        let mut adapter = build_adapter(
+            &journal,
+            &spool,
+            &PanicResolver,
+            &PanicRuntime,
+            &clock,
+            "instance-1".into(),
+            0,
+        )
+        .unwrap();
+        assert!(matches!(adapter.tick(), Ok(Progress::Idle)));
+        assert_eq!(journal.claims.borrow()[0].wait_seconds, 0);
+    }
+
+    #[test]
+    fn build_adapter_rejects_wait_above_server_bound() {
+        let journal = RecordingJournal {
+            claims: RefCell::new(Vec::new()),
+        };
+        let spool = IdleSpool;
+        let clock = SystemClock;
+        assert!(
+            build_adapter(
+                &journal,
+                &spool,
+                &PanicResolver,
+                &PanicRuntime,
+                &clock,
+                "instance-1".into(),
+                MAX_LONG_POLL_SECONDS + 1,
+            )
+            .is_err()
+        );
     }
 }
