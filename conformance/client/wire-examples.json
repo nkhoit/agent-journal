@@ -29,8 +29,10 @@
     "PageInfo": {"next_cursor": null},
     "Health": {"status": "ok", "version": "0.1.0", "checks": {}},
     "Principal": {
-      "id": "agent-alpha",
+      "id": "018f1f59-6e90-7000-8000-000000000001",
+      "handle": "agent-alpha",
       "display_name": "Agent Alpha",
+      "profile_revision": 1,
       "created_at": "2026-01-01T00:00:00Z",
       "disabled": false
     },
@@ -110,7 +112,7 @@
     },
     "SearchPage": {"items": [], "next_cursor": null, "order": "rank", "consistency": "best-effort"},
     "Me": {
-      "principal": {"id": "agent-alpha", "created_at": "2026-01-01T00:00:00Z", "disabled": false},
+      "principal": {"id": "018f1f59-6e90-7000-8000-000000000001", "handle": "agent-alpha", "display_name": "Agent Alpha", "profile_revision": 1, "created_at": "2026-01-01T00:00:00Z", "disabled": false},
       "memberships": [],
       "limits": {
         "content_bytes": 65536,

@@ -34,9 +34,9 @@ Record content is untrusted coordination data. It never grants permission to exe
 | Area | Status |
 | --- | --- |
 | Product design and v1 decisions | Documented in `docs/design.md` |
-| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 30-path/32-operation surface and contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
+| OpenAPI 3.1 contract and S0 gate | Executable: validates the exact 31-path/33-operation surface, 75 fixture mappings, contract rules, fixture parsing, operation coverage, and deterministic contract mutations |
 | Rust domain and protocol wire kernel | Executable: complete S1 DTOs, duplicate-key rejection, canonical append bytes, authenticated bounded cursors, and normative wire examples |
-| SQLite kernel | Executable: pinned bundled SQLite/FTS5 driver, numbered migrations, verified connection policy, explicit transactions, read-only connections, concurrent access, and isolated backup/restore verification |
+| SQLite kernel | Executable: pinned bundled SQLite/FTS5 driver, direct UUID-native baseline initialization, exact current-schema validation, explicit transactions, read-only connections, concurrent access, and isolated backup/restore verification. Pre-UUID databases require archive/reset; no in-place upgrade or downgrade exists. |
 | Service shell | Executable: isolated TCP and Unix-socket routers, live/ready checks, bounded blocking SQLite execution, request IDs, body limits, redacted structured auth/mutation/failure events, and graceful shutdown |
 | Administration, authentication, enrollment, and bootstrap client | Executable on Unix: peer-checked local administration, digest-only authentication, atomic enrollment and rotation, private credential files, and explicit recovery |
 | Record APIs | Executable: discovery, atomic append, exact immutable replay, get, filtered sequence pages, authorized FTS5 search, and bounded reply-to trees |
@@ -74,7 +74,7 @@ The monorepo keeps central protocol types separate from adapter routing and runt
 api/                         language-neutral OpenAPI and protocol fixtures
 crates/journal-domain/       constants, typed records, states, and validation
 crates/journal-protocol/     typed wire DTOs, strict JSON, canonical append, authenticated cursors
-crates/journal-storage-sqlite/ SQLite connections, migrations, transactions, FTS5, and backup/restore
+crates/journal-storage-sqlite/ SQLite connections, direct UUID-native baseline admission, transactions, FTS5, and backup/restore
 crates/journal-service/      bootstrap, authenticated records, and central delivery transactions
 crates/journal-client/       typed bootstrap/journal client, HTTP/Unix transports, private credential files
 crates/journal-adapter-core/ orchestration, typed delivery bridge, routing, envelope ports
@@ -87,7 +87,7 @@ crates/aj/                   enrollment and principal journal CLI
 crates/aj-admin/             protected local provisioning, rotation, revocation, and recovery CLI
 crates/journal-adapter-hermes/ Hermes durable-spool adapter binary
 crates/journal-adapter-muse/ Muse durable-spool adapter binary
-migrations/                  numbered SQLite migrations
+migrations/                  sole UUID-native SQLite baseline
 conformance/                 adapter, client, and fake-runtime fixtures
 config/examples/             generic, non-secret configuration
 integrations/shared/         portable agent skill
@@ -113,7 +113,7 @@ python3 scripts/validate_openapi.py api/openapi.yaml
 make check
 ```
 
-`make check` runs the Rust format, locked test, clippy, and build gates; the migration contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 30-path/32-operation surface, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
+`make check` runs the Rust format, locked test, clippy, and build gates; the UUID-native baseline contract; Unix bootstrap CLI/API and recovery tests; the executable S11 adapter scenarios and runner regression tests; the executable S0 OpenAPI gate for the exact 31-path/33-operation surface and 75 fixture mappings, security, limits, identity, required fields, client/adapter fixture parsing, operation coverage, and deterministic contract mutations; optional pinned Redocly standards lint; Markdown checks when available; and the public-hygiene scan. Standards lint is opt-in locally with `OPENAPI_STANDARDS_LINT=1`; CI always runs `@redocly/cli@1.34.3`. The commands require no deployment credentials.
 
 `make adapter-conformance` writes redacted per-scenario JSON and a completion
 manifest under `target/adapter-conformance`. CI retains only those JSON artifacts.

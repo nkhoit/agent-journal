@@ -7,11 +7,11 @@ use axum::extract::{Extension, FromRequest, FromRequestParts, State};
 use axum::http::{HeaderValue, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use journal_protocol::decode_json;
 use journal_service::{BootstrapError, BootstrapService};
-use journal_storage_sqlite::{Database, MIGRATION_VERSION};
+use journal_storage_sqlite::{CURRENT_SCHEMA_VERSION, Database};
 use serde::Serialize;
 use tokio::sync::watch;
 
@@ -250,7 +250,7 @@ fn log_bootstrap_outcome(
             let sqlite_code = match error {
                 BootstrapError::Sqlite(source)
                 | BootstrapError::Storage(journal_storage_sqlite::StorageError::Sqlite(source))
-                | BootstrapError::Storage(journal_storage_sqlite::StorageError::Migration {
+                | BootstrapError::Storage(journal_storage_sqlite::StorageError::Baseline {
                     source,
                     ..
                 }) => source.sqlite_error().map(|error| error.extended_code),
@@ -264,7 +264,7 @@ fn log_bootstrap_outcome(
                 BootstrapError::Conflict => "conflict",
                 BootstrapError::Storage(
                     journal_storage_sqlite::StorageError::Sqlite(_)
-                    | journal_storage_sqlite::StorageError::Migration { .. },
+                    | journal_storage_sqlite::StorageError::Baseline { .. },
                 )
                 | BootstrapError::Sqlite(_) => "sqlite",
                 BootstrapError::Storage(_) => "storage",
@@ -473,6 +473,61 @@ async fn me(
     .await
 }
 
+async fn update_profile(
+    State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: axum::http::HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let Some(token) = bearer(&headers) else {
+        malformed_bearer(&request_id);
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "invalid or expired credential",
+            request_id,
+        );
+    };
+    let keys = headers.get_all("idempotency-key");
+    let key = if keys.iter().count() == 1 {
+        keys.iter()
+            .next()
+            .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    let Some(key) = key else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "Idempotency-Key is required",
+            request_id,
+        );
+    };
+    let Ok(input) = strict_request::<journal_protocol::ProfileUpdateRequest>(request).await else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "invalid request",
+            request_id,
+        );
+    };
+    bootstrap(
+        state,
+        request_id,
+        StatusCode::OK,
+        "update_profile",
+        true,
+        move |service| {
+            let actor =
+                service.authenticate(&token, journal_protocol::CredentialClass::PrincipalClient)?;
+            service.update_own_profile(&actor, &key, &input)
+        },
+    )
+    .await
+}
+
 async fn journal_operation(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
@@ -487,6 +542,15 @@ async fn journal_operation(
             request_id,
         );
     };
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|p| p.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let replayable_append =
+        method == axum::http::Method::POST && route == "/v1/spaces/{space}/records";
     let authentication_token = token.clone();
     let authentication = bootstrap(
         state.clone(),
@@ -495,25 +559,23 @@ async fn journal_operation(
         "principal_authentication",
         false,
         move |s| {
-            s.authenticate(
-                &authentication_token,
-                journal_protocol::CredentialClass::PrincipalClient,
-            )
-            .map(|_| ())
+            if replayable_append {
+                s.authenticate_append_replay(&authentication_token)
+                    .map(|_| ())
+            } else {
+                s.authenticate(
+                    &authentication_token,
+                    journal_protocol::CredentialClass::PrincipalClient,
+                )
+                .map(|_| ())
+            }
         },
     )
     .await;
     if authentication.status() != StatusCode::NO_CONTENT {
         return authentication;
     }
-    let method = request.method().clone();
     let query = request.uri().query().unwrap_or("").to_owned();
-    let route = request
-        .extensions()
-        .get::<axum::extract::MatchedPath>()
-        .map(|p| p.as_str())
-        .unwrap_or("")
-        .to_owned();
     let (mut parts, body) = request.into_parts();
     let path =
         match axum::extract::Path::<BTreeMap<String, String>>::from_request_parts(&mut parts, &())
@@ -670,6 +732,7 @@ pub(crate) fn public_router_with_timeout(
         .route("/health/ready", get(ready))
         .route("/v1/enrollment/exchange", post(exchange))
         .route("/v1/me", get(me))
+        .route("/v1/me/profile", patch(update_profile))
         .route("/v1/principals", get(journal_operation))
         .route("/v1/spaces", get(journal_operation))
         .route("/v1/spaces/{space}", get(journal_operation))
@@ -793,7 +856,7 @@ async fn ready(
         .execute(|database| database.schema_version())
         .await
     {
-        Ok(MIGRATION_VERSION) => {
+        Ok(CURRENT_SCHEMA_VERSION) => {
             let checks = BTreeMap::from([("database", "ok")]);
             Json(HealthResponse {
                 status: "ok",
@@ -1133,7 +1196,7 @@ mod peer_tests {
                         "application/problem+json; charset=utf-8",
                     )
                     .body(Body::from(
-                        r#"{"id":"valid-principal","display_name":"Valid"}"#,
+                        r#"{"handle":"valid-principal","display_name":"Valid"}"#,
                     ))
                     .unwrap(),
             )

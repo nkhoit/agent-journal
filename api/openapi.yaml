@@ -80,6 +80,31 @@ paths:
               schema: { $ref: '#/components/schemas/Me' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /v1/me/profile:
+    patch:
+      tags: [principal]
+      operationId: updateProfile
+      summary: Update the authenticated principal's mutable profile
+      security: [{ principalClient: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileUpdateRequest' }
+      responses:
+        '200':
+          description: Updated descriptor. A handle change permanently retains the old handle as an alias.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Principal' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/principals:
     get:
       tags: [principal]
@@ -155,7 +180,7 @@ paths:
             schema: { $ref: '#/components/schemas/AppendRecordRequest' }
       responses:
         '201':
-          description: Record published and obligations created. Replays return the original record and mailbox count with replayed true.
+          description: Record published and obligations created. An identical idempotency replay returns the exact stored response, including its original replayed value.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestID' }
           content:
@@ -1011,12 +1036,31 @@ components:
         next_cursor: { type: [string, 'null'], maxLength: 2048 }
     Principal:
       type: object
-      required: [id, created_at, disabled]
+      required: [id, handle, display_name, profile_revision, created_at, disabled]
       properties:
-        id: { type: string, minLength: 1, maxLength: 128 }
-        display_name: { type: string, maxLength: 128 }
+        id:
+          type: string
+          format: uuid
+          description: Immutable server-generated UUIDv7 principal identity.
+        handle:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Mutable active handle. Historical handles remain aliases.
+        display_name: { type: string, minLength: 1, maxLength: 128 }
+        description: { type: string, maxLength: 512 }
+        profile_revision: { type: integer, minimum: 1 }
         created_at: { type: string, format: date-time }
         disabled: { type: boolean }
+    ProfileUpdateRequest:
+      type: object
+      required: [handle, display_name, expected_profile_revision]
+      additionalProperties: false
+      properties:
+        handle: { type: string, minLength: 1, maxLength: 128 }
+        display_name: { type: string, minLength: 1, maxLength: 128 }
+        description: { type: string, maxLength: 512 }
+        expected_profile_revision: { type: integer, minimum: 1 }
     PrincipalPage:
       type: object
       required: [items, next_cursor]
@@ -1374,10 +1418,14 @@ components:
         next_cursor: { type: [string, 'null'], maxLength: 2048 }
     PrincipalCreateRequest:
       type: object
-      required: [id, display_name]
+      required: [handle, display_name]
       additionalProperties: false
       properties:
-        id: { type: string, minLength: 1, maxLength: 128 }
+        handle:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Requested active handle. The server generates the immutable UUIDv7 id.
         display_name: { type: string, minLength: 1, maxLength: 128 }
     SpaceCreateRequest:
       type: object

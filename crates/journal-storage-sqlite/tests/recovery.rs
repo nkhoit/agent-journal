@@ -1,4 +1,9 @@
-use std::path::PathBuf;
+use std::fs;
+#[cfg(unix)]
+use std::hash::{DefaultHasher, Hash, Hasher};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use journal_storage_sqlite::{ConnectionFactory, Database, StorageError};
@@ -26,13 +31,16 @@ impl Fixture {
     fn database(&self) -> Database {
         let database = Database::open(self.0.join("journal.db")).unwrap();
         database.connect().unwrap().execute_batch(
-            "INSERT INTO principals VALUES ('p','Principal','2026-01-01T00:00:00Z',NULL);
+            "INSERT INTO principals(id,display_name,description,profile_revision,created_at,disabled_at)
+             VALUES ('018f1f59-6e90-7000-8000-000000000001','Principal',NULL,1,'2026-01-01T00:00:00Z',NULL);
+             INSERT INTO principal_names(name,principal_id,kind,created_at)
+             VALUES ('principal','018f1f59-6e90-7000-8000-000000000001','current','2026-01-01T00:00:00Z');
              INSERT INTO spaces VALUES ('s','Space','2026-01-01T00:00:00Z',NULL);
-             INSERT INTO memberships VALUES ('s','p',1,1,0,'2026-01-01T00:00:00Z');
+             INSERT INTO memberships VALUES ('s','018f1f59-6e90-7000-8000-000000000001',1,1,0,'2026-01-01T00:00:00Z');
              INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-             VALUES ('r','s',1,'p','note','recovery probe','2026-01-01T00:00:00Z');
-             INSERT INTO attention VALUES ('r','p','2026-01-01T00:00:00Z');
-             INSERT INTO mailbox_items VALUES ('m','r','p','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');"
+             VALUES ('r','s',1,'018f1f59-6e90-7000-8000-000000000001','note','recovery probe','2026-01-01T00:00:00Z');
+             INSERT INTO attention VALUES ('r','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
+             INSERT INTO mailbox_items VALUES ('m','r','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');"
         ).unwrap();
         database
     }
@@ -41,6 +49,132 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct ArtifactState {
+    present: bool,
+    bytes: Option<Vec<u8>>,
+    hash: Option<u64>,
+    device: Option<u64>,
+    inode: Option<u64>,
+    links: Option<u64>,
+    modified_seconds: Option<i64>,
+    modified_nanoseconds: Option<i64>,
+}
+
+#[cfg(unix)]
+fn artifact_state(path: &Path) -> ArtifactState {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let bytes = metadata
+                .file_type()
+                .is_file()
+                .then(|| fs::read(path).unwrap());
+            let hash = bytes.as_ref().map(|bytes| {
+                let mut hasher = DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                hasher.finish()
+            });
+            ArtifactState {
+                present: true,
+                bytes,
+                hash,
+                device: Some(metadata.dev()),
+                inode: Some(metadata.ino()),
+                links: Some(metadata.nlink()),
+                modified_seconds: Some(metadata.mtime()),
+                modified_nanoseconds: Some(metadata.mtime_nsec()),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ArtifactState {
+            present: false,
+            bytes: None,
+            hash: None,
+            device: None,
+            inode: None,
+            links: None,
+            modified_seconds: None,
+            modified_nanoseconds: None,
+        },
+        Err(error) => panic!("inspect {path:?}: {error}"),
+    }
+}
+
+#[cfg(unix)]
+fn protected_artifacts(central: &Path, audit: &Path) -> Vec<(PathBuf, ArtifactState)> {
+    [
+        central.to_owned(),
+        PathBuf::from(format!("{}-wal", central.display())),
+        PathBuf::from(format!("{}-shm", central.display())),
+        PathBuf::from(format!("{}-journal", central.display())),
+        audit.to_owned(),
+        PathBuf::from(format!("{}-wal", audit.display())),
+        PathBuf::from(format!("{}-shm", audit.display())),
+        PathBuf::from(format!("{}-journal", audit.display())),
+        audit.with_extension("recovery-lock"),
+    ]
+    .into_iter()
+    .map(|path| {
+        let state = artifact_state(&path);
+        (path, state)
+    })
+    .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn protected_recovery_admission_refusals_preserve_every_artifact_before_rw_open() {
+    for case in ["missing", "malformed", "foreign", "closed"] {
+        let fixture = Fixture::new();
+        let central = fixture.0.join("journal.db");
+        let audit = fixture.0.join("audit.db");
+        let database =
+            Database::open_protected(&central, &audit).expect("initialize protected database");
+        if case == "closed" {
+            database
+                .recovery_audit()
+                .expect("recovery audit")
+                .close()
+                .expect("close recovery audit");
+        }
+        drop(database);
+
+        match case {
+            "missing" => fs::remove_file(&audit).expect("remove required audit"),
+            "malformed" => {
+                fs::write(&audit, b"not a SQLite recovery audit").expect("corrupt audit");
+                fs::set_permissions(&audit, fs::Permissions::from_mode(0o600))
+                    .expect("protect malformed audit");
+            }
+            "foreign" => {
+                let donor = Fixture::new();
+                let donor_central = donor.0.join("journal.db");
+                let donor_audit = donor.0.join("audit.db");
+                drop(
+                    Database::open_protected(&donor_central, &donor_audit)
+                        .expect("initialize foreign audit"),
+                );
+                fs::copy(&donor_audit, &audit).expect("replace with foreign audit");
+                fs::set_permissions(&audit, fs::Permissions::from_mode(0o600))
+                    .expect("protect foreign audit");
+            }
+            "closed" => {}
+            _ => unreachable!(),
+        }
+
+        let before = protected_artifacts(&central, &audit);
+        assert!(
+            Database::open_protected(&central, &audit).is_err(),
+            "{case} audit must refuse protected startup"
+        );
+        assert_eq!(
+            protected_artifacts(&central, &audit),
+            before,
+            "{case} recovery refusal changed protected evidence"
+        );
     }
 }
 
@@ -57,7 +191,7 @@ fn restore_probes_cover_hashes_acls_heads_and_mailbox_history() {
         .connect()
         .unwrap()
         .execute(
-            "UPDATE memberships SET can_read=0 WHERE space_id='s' AND principal_id='p'",
+            "UPDATE memberships SET can_read=0 WHERE space_id='s' AND principal_id='018f1f59-6e90-7000-8000-000000000001'",
             [],
         )
         .unwrap();
@@ -143,7 +277,7 @@ fn backup_under_writes_has_consistent_heads_and_hashes() {
             let transaction = connection.transaction().unwrap();
             transaction.execute(
                 "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-                 VALUES (?,'s',?,'p','note','concurrent recovery token','2026-01-01T00:00:00Z')",
+                 VALUES (?,'s',?,'018f1f59-6e90-7000-8000-000000000001','note','concurrent recovery token','2026-01-01T00:00:00Z')",
                 rusqlite::params![format!("r{sequence}"), sequence],
             ).unwrap();
             if sequence == 100 {
@@ -183,14 +317,13 @@ fn closed_recovery_rejects_every_exported_writer_route_without_mutation() {
         database
             .with_transaction(|transaction| {
                 transaction.execute(
-                    "INSERT INTO principals(id,display_name,created_at) VALUES ('before','Before','2026-01-01T00:00:00Z')",
+                    "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000002','Before','2026-01-01T00:00:00Z')",
                     [],
                 )?;
                 Ok::<(), StorageError>(())
             })
             .unwrap();
-        let before = Database::open(&central)
-            .unwrap()
+        let before = database
             .connect_read_only()
             .unwrap()
             .query_row("SELECT count(*) FROM principals", [], |row| {
@@ -204,8 +337,7 @@ fn closed_recovery_rejects_every_exported_writer_route_without_mutation() {
             "{label} must fail closed"
         );
 
-        let after = Database::open(&central)
-            .unwrap()
+        let after = ConnectionFactory::new(&central)
             .connect_read_only()
             .unwrap()
             .query_row("SELECT count(*) FROM principals", [], |row| {
@@ -282,7 +414,7 @@ fn protected_recovery_rejects_unguarded_writer_routes_while_open() {
         database
             .with_transaction(|transaction| {
                 transaction.execute(
-                    "INSERT INTO principals(id,display_name,created_at) VALUES ('before','Before','2026-01-01T00:00:00Z')",
+                    "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000002','Before','2026-01-01T00:00:00Z')",
                     [],
                 )?;
                 Ok::<(), StorageError>(())
@@ -293,8 +425,7 @@ fn protected_recovery_rejects_unguarded_writer_routes_while_open() {
             attempt(&database, &central).is_err(),
             "{label} must require the audited transaction wrapper"
         );
-        let count: i64 = Database::open(&central)
-            .unwrap()
+        let count: i64 = database
             .connect_read_only()
             .unwrap()
             .query_row("SELECT count(*) FROM principals", [], |row| row.get(0))

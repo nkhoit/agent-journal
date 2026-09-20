@@ -1,9 +1,9 @@
 //! Single-owner, synchronous SQLite custody spool. Runtime orchestration is separate.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::SystemTime,
 };
 
@@ -12,12 +12,101 @@ use journal_adapter_core::{
     AdapterSpool, Backoff, CoreError, CoreResult, CustodyResult, CustodyResultState, EventRequest,
     InjectionState, Spool, SpoolItem,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 pub const MAX_RECOVERY_BATCH: usize = 100;
 const MAX_DETAIL_BYTES: usize = 4096;
 const APPLICATION_ID: i64 = 0x414A5350;
+const SPOOL_SCHEMA_VERSION: i64 = 3;
+const SPOOL_SCHEMA: &str = r#"
+    BEGIN IMMEDIATE;
+    CREATE TABLE attempts (
+        attempt_id TEXT PRIMARY KEY NOT NULL,
+        fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
+        item TEXT NOT NULL,
+        bytes INTEGER NOT NULL CHECK(bytes>=0),
+        terminal INTEGER NOT NULL CHECK(terminal IN (0,1)),
+        retry_at INTEGER,
+        event_pending INTEGER NOT NULL DEFAULT 0 CHECK(event_pending IN (0,1))
+    ) STRICT;
+    CREATE INDEX recovery ON attempts(terminal, attempt_id);
+    CREATE INDEX outbox ON attempts(event_pending, attempt_id);
+    CREATE TABLE scheduler (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL) STRICT;
+    INSERT INTO scheduler VALUES(1, '{"failures":0,"until":null}');
+    PRAGMA application_id=0x414A5350;
+    PRAGMA user_version=3;
+    COMMIT;
+"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchemaObject {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+static EXPECTED_SPOOL_SCHEMA_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+
+#[cfg(test)]
+static TEST_PRE_OPEN_SUBSTITUTION: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
+
+// Rust 1.85 exposes stable file identity/link-count metadata only on Unix.
+// Keep non-Unix admission portable rather than depending on unstable std APIs.
+#[cfg(unix)]
+type SpoolIdentity = (u64, u64);
+#[cfg(not(unix))]
+type SpoolIdentity = ();
+
+fn current_spool_identity(path: &Path) -> CoreResult<SpoolIdentity> {
+    let metadata = fs::metadata(path).map_err(unavailable)?;
+    if !metadata.is_file() {
+        return Err(unavailable("spool database path is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(unavailable(
+                "multiply-linked spool databases are not supported",
+            ));
+        }
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Ok(())
+    }
+}
+
+fn verify_current_spool_identity(path: &Path, expected: SpoolIdentity) -> CoreResult<()> {
+    if current_spool_identity(path)? != expected {
+        return Err(unavailable("spool database path changed during admission"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn replace_spool_after_preflight_for_test(path: &Path) {
+    let replacement = {
+        let mut substitution = TEST_PRE_OPEN_SUBSTITUTION
+            .lock()
+            .expect("test substitution lock");
+        if substitution
+            .as_ref()
+            .is_some_and(|(target, _)| target == path)
+        {
+            substitution.take().map(|(_, replacement)| replacement)
+        } else {
+            None
+        }
+    };
+    if let Some(replacement) = replacement {
+        fs::rename(replacement, path).expect("test spool substitution");
+    }
+}
 
 pub const RECOVERABLE_INJECTION_STATES: [InjectionState; 3] = [
     InjectionState::Pending,
@@ -98,13 +187,19 @@ struct Inner {
 
 struct OwnerLock {
     file: File,
+    owner_pid: u32,
     released: bool,
 }
 
 impl OwnerLock {
     fn release(&mut self) -> std::io::Result<()> {
         if !self.released {
-            FileExt::unlock(&self.file)?;
+            // flock is attached to the open file description. A fork child
+            // inherits that description, so it must only close its copy; an
+            // unlock from the child would release the live parent's lock.
+            if std::process::id() == self.owner_pid {
+                FileExt::unlock(&self.file)?;
+            }
             self.released = true;
         }
         Ok(())
@@ -126,6 +221,12 @@ pub struct SqliteStore {
 
 fn unavailable(error: impl std::fmt::Display) -> CoreError {
     CoreError::SpoolUnavailable(error.to_string())
+}
+
+fn reset_required() -> CoreError {
+    unavailable(
+        "reset required: existing spool is not the current UUID-native spool; archive it and initialize a fresh path",
+    )
 }
 
 fn terminal(state: InjectionState) -> bool {
@@ -151,6 +252,94 @@ pub fn is_recoverable(item: &SpoolItem, now: SystemTime) -> bool {
         && item.next_runtime_try_at.is_none_or(|retry| retry <= now)
 }
 
+fn verify_existing_spool(path: &Path) -> CoreResult<()> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| reset_required())?;
+    let integrity: String = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|_| reset_required())?;
+    let application: i64 = connection
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .map_err(|_| reset_required())?;
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|_| reset_required())?;
+    if integrity != "ok" || application != APPLICATION_ID || version != SPOOL_SCHEMA_VERSION {
+        return Err(reset_required());
+    }
+    if spool_schema_objects(&connection).map_err(|_| reset_required())?
+        != *expected_spool_schema_objects()
+    {
+        return Err(reset_required());
+    }
+    Ok(())
+}
+
+fn expected_spool_schema_objects() -> &'static Vec<SchemaObject> {
+    EXPECTED_SPOOL_SCHEMA_OBJECTS.get_or_init(|| {
+        let connection = Connection::open_in_memory()
+            .expect("the compiled spool baseline must initialize in memory");
+        connection
+            .execute_batch(SPOOL_SCHEMA)
+            .expect("the compiled spool baseline must be valid SQLite");
+        spool_schema_objects(&connection)
+            .expect("the compiled spool baseline must be introspectable")
+    })
+}
+
+fn spool_schema_objects(connection: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
+    let mut statement = connection.prepare(
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema
+         WHERE type IN ('table','index','trigger','view') AND name NOT LIKE 'sqlite_%'
+         ORDER BY type,name",
+    )?;
+    statement
+        .query_map([], |row| {
+            Ok(SchemaObject {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row
+                    .get::<_, Option<String>>(3)?
+                    .map(|sql| normalize_schema_sql(&sql)),
+            })
+        })?
+        .collect()
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    let mut normalized = String::with_capacity(sql.len());
+    let mut whitespace = false;
+    for character in sql.chars() {
+        if character.is_whitespace() {
+            whitespace = true;
+        } else {
+            if whitespace && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            normalized.push(character.to_ascii_lowercase());
+            whitespace = false;
+        }
+    }
+    normalized
+}
+
+fn sqlite_sidecar_entries_exist(path: &Path) -> CoreResult<bool> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match fs::symlink_metadata(Path::new(&sidecar)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(reset_required()),
+        }
+    }
+    Ok(false)
+}
+
 impl SqliteStore {
     /// The parent directory must already exist and be private to the adapter.
     /// A sidecar lock is deliberately never unlinked, avoiding lock-inode races.
@@ -169,6 +358,18 @@ impl SqliteStore {
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(unavailable("symlink database paths are not supported"));
         }
+        let exists = path.exists();
+        if sqlite_sidecar_entries_exist(&path)? {
+            return Err(reset_required());
+        }
+        let identity = if exists {
+            let identity = current_spool_identity(&path)?;
+            verify_existing_spool(&path)?;
+            verify_current_spool_identity(&path, identity)?;
+            Some(identity)
+        } else {
+            None
+        };
         let mut lock_name = name.to_os_string();
         lock_name.push(".lock");
         let lock_path = directory.join(lock_name);
@@ -183,74 +384,38 @@ impl SqliteStore {
             options.mode(0o600);
         }
         let lock = options.open(lock_path).map_err(unavailable)?;
+        let owner_pid = std::process::id();
         lock.try_lock_exclusive().map_err(unavailable)?;
         let lock = OwnerLock {
             file: lock,
+            owner_pid,
             released: false,
         };
+        if sqlite_sidecar_entries_exist(&path)? {
+            return Err(reset_required());
+        }
+        if let Some(identity) = identity {
+            verify_current_spool_identity(&path, identity)?;
+        }
+        #[cfg(test)]
+        replace_spool_after_preflight_for_test(&path);
         let connection = Connection::open(&path).map_err(unavailable)?;
+        if let Some(identity) = identity {
+            verify_current_spool_identity(&path, identity)?;
+        }
         connection
             .busy_timeout(std::time::Duration::ZERO)
             .map_err(unavailable)?;
-        let integrity: String = connection
-            .query_row("PRAGMA quick_check", [], |r| r.get(0))
-            .map_err(unavailable)?;
-        if integrity != "ok" {
-            return Err(unavailable("spool integrity check failed"));
-        }
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .map_err(unavailable)?;
-        let application: i64 = connection
-            .query_row("PRAGMA application_id", [], |r| r.get(0))
-            .map_err(unavailable)?;
-        let tables: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(unavailable)?;
-        if !((version == 0 && application == 0 && tables == 0)
-            || ((1..=2).contains(&version) && application == APPLICATION_ID))
-        {
-            return Err(unavailable("unsupported spool database"));
-        }
         // DELETE + EXTRA syncs the rollback journal and its directory removal.
         connection
             .execute_batch(
                 "PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA foreign_keys=ON;",
             )
             .map_err(unavailable)?;
-        if version == 0 {
+        if !exists {
             connection
-                .execute_batch(
-                    "BEGIN IMMEDIATE;
-                 CREATE TABLE attempts (
-                    attempt_id TEXT PRIMARY KEY NOT NULL,
-                    fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
-                    item TEXT NOT NULL,
-                    bytes INTEGER NOT NULL CHECK(bytes>=0),
-                    terminal INTEGER NOT NULL CHECK(terminal IN (0,1)),
-                    retry_at INTEGER
-                 ) STRICT;
-                 CREATE INDEX recovery ON attempts(terminal, attempt_id);
-                 PRAGMA application_id=0x414A5350;
-                 PRAGMA user_version=1;
-                 COMMIT;",
-                )
+                .execute_batch(SPOOL_SCHEMA)
                 .map_err(unavailable)?;
-        }
-        if version < 2 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE attempts ADD COLUMN event_pending INTEGER NOT NULL DEFAULT 0 CHECK(event_pending IN (0,1));
-                 CREATE INDEX outbox ON attempts(event_pending, attempt_id);
-                 CREATE TABLE scheduler (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL) STRICT;
-                 INSERT INTO scheduler VALUES(1, '{\"failures\":0,\"until\":null}');
-                 PRAGMA user_version=2;
-                 COMMIT;"
-            ).map_err(unavailable)?;
         }
         Ok(Self {
             inner: Mutex::new(Some(Inner { connection, lock })),

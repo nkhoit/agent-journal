@@ -173,11 +173,13 @@ aj enroll --endpoint "$JOURNAL_URL" --ticket-file secrets/ticket \
 
 Ticket and credential output files must not already exist. Publication is no-clobber and durable: write and sync a private staging file, link it into place, remove staging, and sync the containing directory. Credential files contain the non-secret credential identifier and its secret; ticket files contain only the ticket. Neither command prints secrets. A failure may leave a private output file, but never makes a committed transaction replayable. Delete unusable outputs only after revocation/recovery, and use fresh output paths when reenrolling.
 
-Migration 0002 adds durable installation ownership, enrollment lineage,
-replacement links, ticket invalidation, and credential audit rows. Migration 0007
-binds central state to the protected external recovery audit. These upgrades are
-forward-only; older daemons reject the newer schema. Restore a verified compatible
-backup through the recovery runbook rather than removing migration markers.
+The only supported persistence creation path is direct initialization from
+`migrations/0001_uuid_native.sql`. It is a UUID-native clean break, not a
+sequence of historical upgrades. Archive/reset every pre-UUID central store and
+every non-current local spool, then reprovision and reenroll; do not attempt an
+in-place migration, remove version markers, or edit old files into admission.
+Current-schema backups and protected recovery remain supported, but restore only
+verified UUID-native backups through the recovery runbook.
 
 For privileged Linux acceptance, build the binaries, then run `python3 tests/s4_foreign_uid_test.py` as root in an isolated test checkout (`AJ_BIN_DIR` can select the built binaries). This dedicated harness fails rather than skips without privilege. It starts a test daemon with a mode-`0700` directory and mode-`0600` socket, drops only a child process to numeric UID/GID 65534 with no supplementary groups, and requires an actual `EACCES` from connecting to the socket. It checks that same-owner administration still works. No host accounts or global permissions are changed. This is separate from the ordinary unprivileged `make check` gate.
 

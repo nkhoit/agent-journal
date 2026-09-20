@@ -26,6 +26,7 @@ data/
 *.sock
 
 # Generated or private material
+__pycache__/
 *.log
 *.trace
 *.dump

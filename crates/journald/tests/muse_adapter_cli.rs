@@ -42,7 +42,7 @@ impl Fixture {
         let service = BootstrapService::new(database);
         service
             .create_principal(&wire::PrincipalCreateRequest {
-                id: "destination".into(),
+                handle: "destination".into(),
                 display_name: "Destination".into(),
             })
             .expect("principal");

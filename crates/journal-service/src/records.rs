@@ -70,7 +70,7 @@ impl BootstrapService {
         query.validate()?;
         let mut connection = self.database.connect_read_only()?;
         // Existing databases initialize this key lazily. Only that one-time
-        // initialization needs a short writer transaction, never the FTS query.
+        // initialization needs a short write transaction, never the FTS query.
         let secret: Option<Vec<u8>> = connection
             .query_row(
                 "SELECT secret FROM journal_secrets WHERE name='cursor'",
@@ -113,15 +113,11 @@ impl BootstrapService {
                 SearchOrder::Rank => CursorOrder::Rank,
                 SearchOrder::Seq => CursorOrder::Sequence,
             };
-            let filters = serde_json::to_vec(&(
-                &actor,
-                space,
-                &query.q,
-                &query.author,
-                &query.attention,
-                &query.since,
-            ))
-            .map_err(|_| BootstrapError::InvalidJournal)?;
+            let author = resolve_space_principal(tx, space, query.author.as_deref())?;
+            let attention = resolve_space_principal(tx, space, query.attention.as_deref())?;
+            let filters =
+                serde_json::to_vec(&(&actor, space, &query.q, &author, &attention, &query.since))
+                    .map_err(|_| BootstrapError::InvalidJournal)?;
             let scope = CursorScope::new(CursorRoute::Search, &filters, order);
             let position = query
                 .page
@@ -159,8 +155,8 @@ impl BootstrapService {
                         actor,
                         query.q,
                         space,
-                        query.author,
-                        query.attention,
+                        author,
+                        attention,
                         since,
                         key,
                         id,
@@ -301,6 +297,29 @@ impl BootstrapService {
         ).optional()?.ok_or(BootstrapError::Unauthorized)
     }
 
+    /// Resolve a still-valid client credential without loading mutable principal
+    /// state. Append idempotency is bound to this durable credential principal so
+    /// a committed response can be replayed after a later ACL, profile, or
+    /// disable change.
+    fn append_replay_actor(
+        &self,
+        tx: &Transaction<'_>,
+        token: &str,
+    ) -> Result<String, BootstrapError> {
+        if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(BootstrapError::Unauthorized);
+        }
+        tx.query_row(
+            "SELECT principal_id FROM credentials
+             WHERE token_hash=? AND class='principal-client' AND revoked_at IS NULL
+             AND (expires_at IS NULL OR julianday(expires_at)>julianday(?))",
+            params![digest(token), self.now()?],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(BootstrapError::Unauthorized)
+    }
+
     pub(super) fn cursor_codec(&self, tx: &Transaction<'_>) -> Result<CursorCodec, BootstrapError> {
         let secret: Option<Vec<u8>> = tx
             .query_row(
@@ -358,23 +377,40 @@ impl BootstrapService {
         key: &str,
         input: &RecordInput,
     ) -> Result<AppendResult, BootstrapError> {
+        if !(1..=255).contains(&key.chars().count()) {
+            return Err(BootstrapError::InvalidJournal);
+        }
+        // The durable idempotency hash preserves submitted handle spelling and
+        // ordering. Resolve names only after deciding this is genuinely new.
+        let hash = hex(&Sha256::digest(
+            serde_json::to_vec(input).map_err(|_| BootstrapError::InvalidJournal)?,
+        ));
+        let path = format!("/v1/spaces/{space}/records");
         self.transaction(|tx| {
+            let replay_actor = self.append_replay_actor(tx, token)?;
+            let previous: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT payload_hash,response_json FROM idempotency_keys
+                     WHERE principal_id=? AND method='POST' AND path=? AND idempotency_key=?",
+                    params![replay_actor, path, key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((previous_hash, response)) = previous {
+                if previous_hash != hash {
+                    return Err(BootstrapError::IdempotencyConflict);
+                }
+                return decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal);
+            }
             let actor = self.journal_actor(tx, token)?;
             permitted(tx, &actor, space, true)?;
-            let canonical = canonical_append(input).map_err(|_| BootstrapError::InvalidJournal)?;
-            if !(1..=255).contains(&key.chars().count()) { return Err(BootstrapError::InvalidJournal); }
-            let path = format!("/v1/spaces/{space}/records");
-            let hash = hex(&Sha256::digest(&canonical));
-            let previous: Option<(String,String)> = tx.query_row(
-                "SELECT payload_hash,response_json FROM idempotency_keys WHERE principal_id=? AND method='POST' AND path=? AND idempotency_key=?",
-                params![actor,path,key], |r| Ok((r.get(0)?, r.get(1)?)),
-            ).optional()?;
-            if let Some((previous_hash, response)) = previous {
-                if previous_hash != hash { return Err(BootstrapError::IdempotencyConflict); }
-                let mut result: AppendResult = decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal)?;
-                result.replayed = true;
-                return Ok(result);
+            let mut input = input.clone();
+            for recipient in &mut input.attention {
+                let principal_id = active_principal(tx, recipient)?;
+                permitted(tx, &principal_id, space, false)?;
+                *recipient = principal_id;
             }
+            canonical_append(&input).map_err(|_| BootstrapError::InvalidJournal)?;
             let seq: i64 = tx.query_row("SELECT coalesce(max(space_seq),0)+1 FROM records WHERE space_id=?", [space], |r| r.get(0))?;
             self.checkpoint("append-sequence")?;
             for relation in &input.relations {
@@ -383,7 +419,6 @@ impl BootstrapService {
                     params![relation.record_id,space,seq], |r|r.get(0))?;
                 if !exists { return Err(BootstrapError::NotFound); }
             }
-            for recipient in &input.attention { permitted(tx, recipient, space, false)?; }
             let instant = self.clock.now();
             let now = timestamp(instant)?;
             let id = self.record_id(instant)?;
@@ -481,8 +516,8 @@ impl BootstrapService {
             let codec = self.cursor_codec(tx)?;
             let scope = scope(CursorRoute::Principals, &(&actor,&query.space))?;
             let after = identifier_position(&codec, &scope, &query.page)?;
-            let mut stmt = tx.prepare("SELECT p.id,p.display_name,p.created_at FROM principals p JOIN memberships m ON m.principal_id=p.id WHERE m.space_id=? AND m.can_read=1 AND p.disabled_at IS NULL AND p.id>? ORDER BY p.id LIMIT ?")?;
-            let items = stmt.query_map(params![query.space,after,(query.page.effective_limit()+1) as i64], |r|Ok(Principal { id:r.get(0)?,display_name:Some(r.get(1)?),created_at:r.get(2)?,disabled:false }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut stmt = tx.prepare("SELECT p.id,n.name,p.display_name,p.description,p.profile_revision,p.created_at FROM principals p JOIN principal_names n ON n.principal_id=p.id AND n.kind='current' JOIN memberships m ON m.principal_id=p.id WHERE m.space_id=? AND m.can_read=1 AND p.disabled_at IS NULL AND p.id>? ORDER BY p.id LIMIT ?")?;
+            let items = stmt.query_map(params![query.space,after,(query.page.effective_limit()+1) as i64], |r|Ok(Principal { id:r.get(0)?,handle:r.get(1)?,display_name:r.get(2)?,description:r.get(3)?,profile_revision:r.get(4)?,created_at:r.get(5)?,disabled:false }))?.collect::<rusqlite::Result<Vec<_>>>()?;
             finish_page(items, &query.page, &codec, &scope, |p|CursorPosition::Identifier { id:p.id.clone() })
         })
     }
@@ -507,12 +542,14 @@ impl BootstrapService {
             let actor = self.read_actor(tx, identity)?;
             permitted(tx, &actor, space, false)?;
             let codec = self.cursor_codec(tx)?;
+            let author = resolve_space_principal(tx, space, query.author.as_deref())?;
+            let attention = resolve_space_principal(tx, space, query.attention.as_deref())?;
             let filters = serde_json::to_vec(&(
                 &actor,
                 space,
                 query.after_seq.unwrap_or(0),
-                &query.author,
-                &query.attention,
+                &author,
+                &attention,
                 &query.kind,
                 &query.relation,
             ))
@@ -539,12 +576,12 @@ impl BootstrapService {
                         lower,
                         sequence,
                         id,
-                        query.author,
-                        query.author,
+                        author,
+                        author,
                         query.kind,
                         query.kind,
-                        query.attention,
-                        query.attention,
+                        attention,
+                        attention,
                         relation,
                         relation,
                         (query.page.effective_limit() + 1) as i64
@@ -564,6 +601,35 @@ impl BootstrapService {
             })
         })
     }
+}
+
+fn resolve_space_principal(
+    tx: &Transaction<'_>,
+    space: &str,
+    selector: Option<&str>,
+) -> Result<Option<String>, BootstrapError> {
+    let Some(selector) = selector else {
+        return Ok(None);
+    };
+    // Names win over UUID-shaped selectors. A handle resolves only when the
+    // persisted name and active, readable space membership both authorize it.
+    let principal = tx
+        .query_row(
+            "SELECT p.id FROM principal_names n
+               JOIN principals p ON p.id=n.principal_id AND p.disabled_at IS NULL
+               JOIN memberships m ON m.principal_id=p.id AND m.space_id=?2 AND m.can_read=1
+             WHERE n.name=?1
+             UNION ALL
+             SELECT p.id FROM principals p
+               JOIN memberships m ON m.principal_id=p.id AND m.space_id=?2 AND m.can_read=1
+             WHERE p.id=?1 AND p.disabled_at IS NULL
+               AND NOT EXISTS(SELECT 1 FROM principal_names WHERE name=?1)
+             LIMIT 1",
+            params![selector, space],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(Some(principal.unwrap_or_default()))
 }
 
 fn search_error(error: rusqlite::Error) -> BootstrapError {
@@ -755,7 +821,7 @@ mod tests {
     fn search_selection_never_renders_snippets_or_sequence_scores() {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
+            .execute_batch(include_str!("../../../migrations/0001_uuid_native.sql"))
             .unwrap();
         for order in [SearchOrder::Seq, SearchOrder::Rank] {
             let mut statement = connection
@@ -764,7 +830,7 @@ mod tests {
             let functions = statement
                 .query_map(
                     params![
-                        "writer",
+                        "018f1f59-6e90-7000-8000-000000000001",
                         "hello",
                         "space",
                         None::<String>,
@@ -795,19 +861,16 @@ mod tests {
     fn thread_budgets_are_independent_and_cycles_fail_closed() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
-            .unwrap();
-        connection
-            .execute_batch(include_str!("../../../migrations/0004_thread_index.sql"))
+            .execute_batch(include_str!("../../../migrations/0001_uuid_native.sql"))
             .unwrap();
         connection.execute_batch(
-            "INSERT INTO principals(id,display_name,created_at) VALUES ('writer','Writer','2026-01-01T00:00:00Z');
+            "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000001','Writer','2026-01-01T00:00:00Z');
              INSERT INTO spaces(id,name,created_at) VALUES ('space','Space','2026-01-01T00:00:00Z');
              INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES
-             ('root','space',1,'writer','note','hello','2026-01-01T00:00:00Z'),
-             ('child','space',2,'writer','note','hello','2026-01-01T00:00:00Z'),
-             ('leaf','space',3,'writer','note','hello','2026-01-01T00:00:00Z');
-             INSERT INTO record_relations VALUES ('child','reply-to','root','2026-01-01T00:00:00Z'),('leaf','reply-to','child','2026-01-01T00:00:00Z');"
+             ('root','space',1,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z'),
+             ('child','space',2,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z'),
+             ('leaf','space',3,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z');
+             INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at) VALUES ('child','reply-to','root','2026-01-01T00:00:00Z'),('leaf','reply-to','child','2026-01-01T00:00:00Z');"
         ).unwrap();
         let tx = connection.transaction().unwrap();
         assert_eq!(thread_ids(&tx, "leaf", "space", 2, 3, 4).unwrap().len(), 3);
@@ -819,7 +882,7 @@ mod tests {
         }
         tx.execute_batch(
             "DROP TRIGGER relation_target_must_be_older_same_space;
-            INSERT INTO record_relations VALUES ('root','reply-to','leaf','2026-01-01T00:00:00Z');",
+            INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at) VALUES ('root','reply-to','leaf','2026-01-01T00:00:00Z');",
         )
         .unwrap();
         assert!(matches!(
@@ -832,15 +895,15 @@ mod tests {
     fn late_record_page_seeks_past_cursor() {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
+            .execute_batch(include_str!("../../../migrations/0001_uuid_native.sql"))
             .unwrap();
         connection
             .execute_batch(
-                "INSERT INTO principals(id,display_name,created_at) VALUES ('writer','Writer','2026-01-01T00:00:00Z');
+                "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000001','Writer','2026-01-01T00:00:00Z');
                  INSERT INTO spaces(id,name,created_at) VALUES ('space','Space','2026-01-01T00:00:00Z');
                  WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<100000)
                  INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-                 SELECT printf('record-%06d',n),'space',n,'writer','note','hello','2026-01-01T00:00:00Z' FROM seq;",
+                 SELECT printf('record-%06d',n),'space',n,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z' FROM seq;",
             )
             .unwrap();
         let mut stmt = connection.prepare(LIST_RECORD_IDS).unwrap();

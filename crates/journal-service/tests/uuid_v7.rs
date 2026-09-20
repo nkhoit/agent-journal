@@ -28,9 +28,9 @@ fn record_id_encodes_uuid_v7_timestamp_version_variant_and_random_bits() {
     std::fs::create_dir_all(&directory).unwrap();
     let db = Database::open(directory.join("journal.db")).unwrap();
     let bootstrap = BootstrapService::new(db.clone());
-    bootstrap
+    let writer = bootstrap
         .create_principal(&PrincipalCreateRequest {
-            id: "writer".into(),
+            handle: "writer".into(),
             display_name: "Writer".into(),
         })
         .unwrap();
@@ -81,7 +81,7 @@ fn record_id_encodes_uuid_v7_timestamp_version_variant_and_random_bits() {
         )
         .unwrap();
     assert_eq!(result.record.id, "01020304-0506-7fff-bfff-ffffffffffff");
-    assert_eq!(result.record.author, "writer");
+    assert_eq!(result.record.author, writer.id);
     assert_eq!(
         result.record.created_at,
         jiff::Timestamp::from_second(0x010203040506 / 1000)

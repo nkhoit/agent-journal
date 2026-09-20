@@ -32,7 +32,7 @@ impl Fixture {
         let db = Database::open(directory.join("journal.db")).unwrap();
         let s = BootstrapService::new(db.clone());
         s.create_principal(&PrincipalCreateRequest {
-            id: "reader".into(),
+            handle: "reader".into(),
             display_name: "Reader".into(),
         })
         .unwrap();

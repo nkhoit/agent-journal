@@ -1,15 +1,18 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use journal_storage_sqlite::{
-    BUSY_TIMEOUT, ConnectionFactory, Database, MIGRATION_VERSION, StorageError,
+    BUSY_TIMEOUT, CURRENT_SCHEMA_VERSION, ConnectionFactory, Database, StorageError,
 };
 use rusqlite::{Connection, ErrorCode, params};
 
 const NOW: &str = "2026-01-01T00:00:00Z";
+const PRINCIPAL_ID: &str = "018f1f59-6e90-7000-8000-000000000001";
 static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
 struct TempDir {
@@ -53,10 +56,16 @@ fn pragma_string(connection: &Connection, name: &str) -> String {
 fn seed_space(connection: &Connection) {
     connection
         .execute(
-            "INSERT OR IGNORE INTO principals(id, display_name, created_at) VALUES ('p1', 'P1', ?1)",
-            [NOW],
+            "INSERT OR IGNORE INTO principals(id, display_name, created_at) VALUES (?1, 'P1', ?2)",
+            [PRINCIPAL_ID, NOW],
         )
         .expect("insert principal");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO principal_names(name, principal_id, kind, created_at) VALUES ('p1', ?1, 'current', ?2)",
+            [PRINCIPAL_ID, NOW],
+        )
+        .expect("insert principal name");
     connection
         .execute(
             "INSERT OR IGNORE INTO spaces(id, name, created_at) VALUES ('s1', 'Space 1', ?1)",
@@ -70,8 +79,8 @@ fn insert_record(connection: &Connection, id: &str, sequence: i64, content: &str
         .execute(
             "INSERT INTO records(
                 id, space_id, space_seq, author_principal_id, kind, content, created_at
-             ) VALUES (?1, 's1', ?2, 'p1', 'message', ?3, ?4)",
-            params![id, sequence, content, NOW],
+             ) VALUES (?1, 's1', ?2, ?3, 'message', ?4, ?5)",
+            params![id, sequence, PRINCIPAL_ID, content, NOW],
         )
         .expect("insert record");
 }
@@ -109,7 +118,7 @@ fn operational_snapshot_tracks_pending_rows_and_wal_without_checkpointing() {
             &"x".repeat(4096),
         );
     }
-    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at) VALUES ('m1','r1','p1','pending',?1,?1)", [NOW]).unwrap();
+    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at) VALUES ('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending',?1,?1)", [NOW]).unwrap();
     let after = database.operational_snapshot(NOW).unwrap();
     assert_eq!(after.pending_mailbox_count, 1);
     assert_eq!(after.oldest_pending_at.as_deref(), Some(NOW));
@@ -135,7 +144,7 @@ fn page_capacity_exhaustion_rolls_back_without_losing_committed_records() {
     connection
         .execute_batch(&format!("PRAGMA max_page_count={pages}; BEGIN IMMEDIATE;"))
         .unwrap();
-    let result = connection.execute("INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES ('full','s1',2,'p1','message',?1,?2)", params!["x".repeat(65536), NOW]);
+    let result = connection.execute("INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES ('full','s1',2,'018f1f59-6e90-7000-8000-000000000001','message',?1,?2)", params!["x".repeat(65536), NOW]);
     assert!(
         matches!(result, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::DiskFull)
     );
@@ -152,14 +161,14 @@ fn page_capacity_exhaustion_rolls_back_without_losing_committed_records() {
 }
 
 #[test]
-fn open_applies_migrations_and_connection_policy() {
+fn empty_path_initializes_directly_to_the_uuid_native_baseline() {
     let temporary = TempDir::new("open");
     let database = Database::open(temporary.database("journal.db")).expect("open database");
     let connection = database.connect().expect("connect");
 
     assert_eq!(
         database.schema_version().expect("schema version"),
-        MIGRATION_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_string(&connection, "journal_mode"), "wal");
@@ -180,7 +189,7 @@ fn open_applies_migrations_and_connection_policy() {
     );
 
     let tables = schema_object_names(&connection, "table");
-    for expected in ["principals", "records", "records_fts", "schema_migrations"] {
+    for expected in ["principals", "records", "records_fts", "schema_contract"] {
         assert!(
             tables.iter().any(|table| table == expected),
             "missing {expected}"
@@ -208,7 +217,7 @@ fn open_applies_migrations_and_connection_policy() {
     let reopened = Database::open(temporary.database("journal.db")).expect("reopen database");
     assert_eq!(
         reopened.schema_version().expect("schema version"),
-        MIGRATION_VERSION
+        CURRENT_SCHEMA_VERSION
     );
 }
 
@@ -220,7 +229,7 @@ fn transaction_helper_commits_or_rolls_back_atomically() {
     let error = database
         .with_transaction(|transaction| {
             transaction.execute(
-                "INSERT INTO principals(id, display_name, created_at) VALUES ('rolled-back', 'P', ?1)",
+                "INSERT INTO principals(id, display_name, created_at) VALUES ('018f1f59-6e90-7000-8000-000000000002', 'P', ?1)",
                 [NOW],
             )?;
             Err::<(), _>(rusqlite::Error::InvalidQuery.into())
@@ -231,7 +240,7 @@ fn transaction_helper_commits_or_rolls_back_atomically() {
     database
         .with_transaction(|transaction| {
             transaction.execute(
-                "INSERT INTO principals(id, display_name, created_at) VALUES ('committed', 'P', ?1)",
+                "INSERT INTO principals(id, display_name, created_at) VALUES ('018f1f59-6e90-7000-8000-000000000003', 'P', ?1)",
                 [NOW],
             )?;
             Ok(())
@@ -242,7 +251,7 @@ fn transaction_helper_commits_or_rolls_back_atomically() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM principals WHERE id IN ('rolled-back', 'committed')",
+                "SELECT count(*) FROM principals WHERE id IN ('018f1f59-6e90-7000-8000-000000000002', '018f1f59-6e90-7000-8000-000000000003')",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -252,7 +261,7 @@ fn transaction_helper_commits_or_rolls_back_atomically() {
 }
 
 #[test]
-fn failed_migration_rolls_back_and_can_be_retried() {
+fn pre_uuid_database_is_rejected_without_mutation() {
     let temporary = TempDir::new("migration-rollback");
     let path = temporary.database("journal.db");
     let connection = Connection::open(&path).expect("open conflicting database");
@@ -261,33 +270,70 @@ fn failed_migration_rolls_back_and_can_be_retried() {
         .expect("create conflicting table");
     drop(connection);
 
+    let before = fs::read(&path).expect("read legacy database");
     assert!(matches!(
         Database::open(&path),
-        Err(StorageError::Migration { version: 1, .. })
+        Err(StorageError::ResetRequired {
+            kind: "central database"
+        })
     ));
+    assert_eq!(fs::read(&path).expect("read refused database"), before);
 
     let connection = Connection::open(&path).expect("reopen failed migration");
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'",
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'schema_contract'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("probe migration table"),
+            .expect("probe contract table"),
         0,
-        "failed migration must not leave its version table"
+        "refusal must not create the current contract"
     );
-    connection
-        .execute("DROP TABLE principals", [])
-        .expect("remove injected conflict");
     drop(connection);
+    fs::remove_file(&path).expect("archive incompatible database before reset");
 
-    let database = Database::open(&path).expect("retry migration");
+    let database = Database::open(&path).expect("operator reset creates current database");
     assert_eq!(
         database.schema_version().expect("schema version"),
-        MIGRATION_VERSION
+        CURRENT_SCHEMA_VERSION
     );
+}
+
+#[test]
+fn protected_legacy_refusal_does_not_touch_recovery_or_sidecar_evidence() {
+    let temporary = TempDir::new("protected-legacy-refusal");
+    let path = temporary.database("journal.db");
+    Connection::open(&path)
+        .expect("create legacy database")
+        .execute_batch("CREATE TABLE legacy(value TEXT)")
+        .expect("create legacy schema");
+    let audit = temporary.database("journal.recovery.db");
+    let lock = audit.with_extension("recovery-lock");
+    let artifacts = [
+        path.clone(),
+        PathBuf::from(format!("{}-journal", path.display())),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+        audit.clone(),
+        lock,
+    ];
+    for artifact in artifacts.iter().skip(1) {
+        fs::write(artifact, b"preserve").expect("write evidence");
+    }
+    let before: Vec<_> = artifacts
+        .iter()
+        .map(|artifact| (artifact.clone(), fs::read(artifact).expect("read evidence")))
+        .collect();
+
+    assert!(matches!(
+        Database::open_protected(&path, &audit),
+        Err(StorageError::ResetRequired { .. })
+    ));
+    for (artifact, bytes) in before {
+        assert_eq!(fs::read(artifact).expect("read preserved evidence"), bytes);
+    }
 }
 
 #[test]
@@ -317,94 +363,368 @@ fn concurrent_database_open_serializes_initial_migration() {
     }
 }
 #[test]
-fn version_one_upgrade_preserves_installation_and_credential_recovery_scope() {
-    let temporary = TempDir::new("enrollment-upgrade");
-    let path = temporary.database("journal.db");
-    let connection = Connection::open(&path).unwrap();
-    connection
-        .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
-        .unwrap();
-    connection.execute_batch("
-                INSERT INTO principals VALUES ('principal-test','Test','now',NULL);
-                INSERT INTO adapter_identities VALUES ('adapter-test','principal-test','now');
-                INSERT INTO adapter_registrations VALUES ('adapter-test','principal-test','installation-test',1,'active','now','later','now');
-                INSERT INTO credentials VALUES ('client-test','principal-test','principal-client','client-digest',NULL,'now',NULL,NULL);
-                INSERT INTO credentials VALUES ('delivery-test','principal-test','delivery-adapter','delivery-digest','adapter-test','now',NULL,NULL);
-            ").unwrap();
-    drop(connection);
-    let database = Database::open(&path).unwrap();
-    let connection = database.connect().unwrap();
-    let bound:i64=connection.query_row("SELECT count(*) FROM credentials WHERE enrollment_adapter_id='adapter-test' AND instance_id='installation-test'",[],|r|r.get(0)).unwrap();
-    assert_eq!(bound, 2);
-    let authorized:bool=connection.query_row("SELECT recovery_authorized FROM enrollment_installations WHERE adapter_id='adapter-test'",[],|r|r.get(0)).unwrap();
-    assert!(!authorized);
-    drop(connection);
-    assert_eq!(
-        Database::open(&path).unwrap().schema_version().unwrap(),
-        MIGRATION_VERSION
-    );
-}
-
-#[test]
-fn version_two_failure_rolls_back_columns_and_retains_version_one() {
-    let temporary = TempDir::new("enrollment-upgrade-rollback");
-    let path = temporary.database("journal.db");
-    let connection = Connection::open(&path).unwrap();
-    connection
-        .execute_batch(include_str!("../../../migrations/0001_initial.sql"))
-        .unwrap();
-    connection
-        .execute_batch("CREATE TABLE enrollment_installations(conflict TEXT)")
-        .unwrap();
-    drop(connection);
-    assert!(matches!(
-        Database::open(&path),
-        Err(StorageError::Migration { version: 2, .. })
-    ));
-    let connection = Connection::open(&path).unwrap();
-    let version: i64 = connection
-        .query_row("SELECT max(version) FROM schema_migrations", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(version, 1);
-    assert!(
-        connection
-            .prepare("SELECT enrollment_adapter_id FROM credentials")
-            .is_err()
-    );
-    connection
-        .execute_batch("DROP TABLE enrollment_installations")
-        .unwrap();
-    drop(connection);
-    assert_eq!(
-        Database::open(&path).unwrap().schema_version().unwrap(),
-        MIGRATION_VERSION
-    );
-}
-
-#[test]
-fn newer_schema_is_rejected_without_mutation() {
+fn malformed_current_schema_is_rejected_without_mutation() {
     let temporary = TempDir::new("schema-mismatch");
     let path = temporary.database("journal.db");
     let database = Database::open(&path).expect("open database");
     let connection = database.connect().expect("connect");
     connection
-        .execute(
-            "INSERT INTO schema_migrations(version,applied_at) VALUES (?, 'future')",
-            [MIGRATION_VERSION + 1],
-        )
-        .expect("advance schema artificially");
+        .execute_batch("DROP TABLE schema_contract")
+        .expect("corrupt schema contract");
     drop(connection);
     drop(database);
+    let before = fs::read(&path).expect("read malformed database");
 
     assert!(matches!(
         Database::open(&path),
-        Err(StorageError::IncompatibleSchema {
-            found,
-            supported
-        }) if found == MIGRATION_VERSION + 1 && supported == MIGRATION_VERSION
+        Err(StorageError::ResetRequired {
+            kind: "central database"
+        })
     ));
+    assert_eq!(fs::read(&path).expect("read refused database"), before);
+}
+
+#[test]
+fn current_schema_rejects_missing_or_recreated_load_bearing_objects() {
+    let mutations = [
+        (
+            "principal_ids_are_immutable",
+            "DROP TRIGGER principal_ids_are_immutable",
+        ),
+        (
+            "principal_names_cannot_be_deleted",
+            "DROP TRIGGER principal_names_cannot_be_deleted",
+        ),
+        (
+            "principal_alias_is_immutable",
+            "DROP TRIGGER principal_alias_is_immutable",
+        ),
+        (
+            "principal_current_name_transition",
+            "DROP TRIGGER principal_current_name_transition",
+        ),
+        (
+            "principal_names_do_not_shadow_ids",
+            "DROP TRIGGER principal_names_do_not_shadow_ids",
+        ),
+        (
+            "principal_ids_do_not_shadow_names",
+            "DROP TRIGGER principal_ids_do_not_shadow_names",
+        ),
+        (
+            "principal_names_one_current_per_principal",
+            "DROP INDEX principal_names_one_current_per_principal",
+        ),
+        (
+            "profile_idempotency_keys",
+            "DROP TABLE profile_idempotency_keys;
+             CREATE TABLE profile_idempotency_keys(principal_id TEXT, idempotency_key TEXT)",
+        ),
+    ];
+    for (label, mutation) in mutations {
+        let temporary = TempDir::new(label);
+        let path = temporary.database("journal.db");
+        let database = Database::open(&path).expect("open database");
+        database
+            .connect()
+            .expect("connect")
+            .execute_batch(mutation)
+            .expect("corrupt exact schema");
+        drop(database);
+        let before = fs::read(&path).expect("read corrupted current database");
+
+        assert!(matches!(
+            Database::open(&path),
+            Err(StorageError::ResetRequired {
+                kind: "central database"
+            })
+        ));
+        assert_eq!(
+            fs::read(&path).expect("read refused database"),
+            before,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn current_central_sidecars_are_reset_required_without_mutation() {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let temporary = TempDir::new(&format!("central-sidecar-{suffix}"));
+        let path = temporary.database("journal.db");
+        let database = Database::open(&path).expect("open current database");
+        drop(database);
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        let _ = fs::remove_file(&sidecar);
+        fs::write(&sidecar, format!("retained current central {suffix}")).unwrap();
+        let audit = temporary.database("recovery.db");
+        let lock = audit.with_extension("recovery-lock");
+        let before = [path.clone(), sidecar.clone()]
+            .into_iter()
+            .map(|artifact| {
+                let metadata = fs::metadata(&artifact).unwrap();
+                let bytes = fs::read(&artifact).unwrap();
+                (artifact, bytes, metadata)
+            })
+            .collect::<Vec<_>>();
+
+        for result in [
+            Database::open(&path).map(|_| ()),
+            Database::open_protected(&path, &audit).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(StorageError::ResetRequired {
+                    kind: "central database"
+                })
+            ));
+        }
+        assert!(!audit.exists());
+        assert!(!lock.exists());
+        for (artifact, bytes, metadata) in before {
+            assert_eq!(
+                fs::read(&artifact).unwrap(),
+                bytes,
+                "{suffix}: {artifact:?}"
+            );
+            #[cfg(unix)]
+            assert_eq!(fs::metadata(&artifact).unwrap().ino(), metadata.ino());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_central_sidecar_symlinks_are_reset_required_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let temporary = TempDir::new(&format!("central-dangling-sidecar-{suffix}"));
+        let path = temporary.database("journal.db");
+        let database = Database::open(&path).expect("open current database");
+        drop(database);
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        let _ = fs::remove_file(&sidecar);
+        let dangling_target = temporary.database(&format!("missing-{suffix}"));
+        symlink(&dangling_target, &sidecar).expect("create dangling sidecar symlink");
+        let main_before = fs::read(&path).expect("read central database");
+        let main_inode = fs::metadata(&path).expect("stat central database").ino();
+        let sidecar_inode = fs::symlink_metadata(&sidecar)
+            .expect("lstat dangling sidecar")
+            .ino();
+
+        assert!(matches!(
+            Database::open(&path),
+            Err(StorageError::ResetRequired {
+                kind: "central database"
+            })
+        ));
+        assert_eq!(fs::read(&path).expect("read refused central"), main_before);
+        assert_eq!(
+            fs::metadata(&path).expect("stat refused central").ino(),
+            main_inode
+        );
+        assert_eq!(
+            fs::read_link(&sidecar).expect("read sidecar link"),
+            dangling_target
+        );
+        assert_eq!(
+            fs::symlink_metadata(&sidecar)
+                .expect("lstat refused sidecar")
+                .ino(),
+            sidecar_inode
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn protected_central_hardlink_alias_is_reset_required_without_mutation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = TempDir::new("central-hardlink-alias");
+    fs::set_permissions(&temporary.path, fs::Permissions::from_mode(0o700))
+        .expect("protect central hardlink fixture directory");
+    let central = temporary.database("journal.db");
+    let audit = temporary.database("audit.db");
+    drop(Database::open_protected(&central, &audit).expect("initialize protected central"));
+
+    let alias = temporary.database("alias.db");
+    let alias_audit = temporary.database("alias-audit.db");
+    fs::hard_link(&central, &alias).expect("create central hardlink alias");
+    fs::copy(&audit, &alias_audit).expect("copy audit for alias fixture");
+    fs::set_permissions(&alias_audit, fs::Permissions::from_mode(0o600))
+        .expect("protect copied audit");
+
+    let artifacts = [
+        central.clone(),
+        alias.clone(),
+        audit.clone(),
+        alias_audit.clone(),
+    ];
+    let before = artifacts
+        .iter()
+        .map(|path| {
+            let metadata = fs::metadata(path).expect("stat fixture artifact");
+            (
+                path.clone(),
+                fs::read(path).expect("read fixture artifact"),
+                metadata,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(matches!(
+        Database::open_protected(&alias, &alias_audit),
+        Err(StorageError::ResetRequired {
+            kind: "central database"
+        })
+    ));
+    for (path, bytes, metadata) in before {
+        assert_eq!(fs::read(&path).expect("read refused artifact"), bytes);
+        let after = fs::metadata(&path).expect("stat refused artifact");
+        assert_eq!(after.dev(), metadata.dev(), "device changed for {path:?}");
+        assert_eq!(after.ino(), metadata.ino(), "inode changed for {path:?}");
+        assert_eq!(
+            after.mtime(),
+            metadata.mtime(),
+            "mtime changed for {path:?}"
+        );
+        assert_eq!(
+            after.mtime_nsec(),
+            metadata.mtime_nsec(),
+            "mtime nanos changed for {path:?}"
+        );
+    }
+    assert_eq!(fs::metadata(&central).unwrap().nlink(), 2);
+    assert_eq!(fs::metadata(&alias).unwrap().nlink(), 2);
+    assert!(
+        !alias_audit.with_extension("recovery-lock").exists(),
+        "hardlink refusal must not create an alias audit lock"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn admitted_central_rejects_post_admission_hardlink_and_path_replacement_before_writes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ArtifactState {
+        bytes: Vec<u8>,
+        device: u64,
+        inode: u64,
+        links: u64,
+        modified_seconds: i64,
+        modified_nanoseconds: i64,
+    }
+
+    fn artifact_state(path: &Path) -> ArtifactState {
+        let metadata = fs::metadata(path).expect("stat custody artifact");
+        ArtifactState {
+            bytes: fs::read(path).expect("read custody artifact"),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            links: metadata.nlink(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+        }
+    }
+
+    fn assert_refused(database: &Database, raw_factory_must_refuse: bool) {
+        // `connect` reaches the lowest writable-factory seam directly. The
+        // transaction wrapper must independently refuse too, even though a
+        // protected audit may reject during its preceding read validation.
+        assert!(matches!(
+            database.connect(),
+            Err(StorageError::ResetRequired {
+                kind: "central database"
+            })
+        ));
+        if raw_factory_must_refuse {
+            assert!(matches!(
+                ConnectionFactory::new(database.path()).connect(),
+                Err(StorageError::ResetRequired {
+                    kind: "central database"
+                })
+            ));
+        }
+        assert!(matches!(
+            database.with_transaction(|transaction| {
+                transaction.execute(
+                    "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000004','Custody','2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            }),
+            Err(StorageError::ResetRequired {
+                kind: "central database"
+            })
+        ));
+    }
+
+    let temporary = TempDir::new("admitted-central-custody");
+    fs::set_permissions(&temporary.path, fs::Permissions::from_mode(0o700))
+        .expect("protect custody fixture directory");
+
+    let central = temporary.database("hardlink.db");
+    let audit = temporary.database("hardlink-audit.db");
+    let database = Database::open_protected(&central, &audit).expect("open protected central");
+    let alias = temporary.database("post-admission-alias.db");
+    fs::hard_link(&central, &alias).expect("add post-admission hardlink");
+    let before = [&central, &audit, &alias].map(|path| artifact_state(path));
+    assert_refused(&database, true);
+    for (path, expected) in [&central, &audit, &alias].into_iter().zip(before) {
+        assert_eq!(
+            artifact_state(path),
+            expected,
+            "post-hardlink write changed {path:?}"
+        );
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", central.display())).exists(),
+            "post-hardlink refusal created {suffix}"
+        );
+    }
+
+    let central = temporary.database("replacement.db");
+    let audit = temporary.database("replacement-audit.db");
+    let database = Database::open_protected(&central, &audit).expect("open replacement fixture");
+    let staged = temporary.database("replacement-staged.db");
+    fs::copy(&central, &staged).expect("copy replacement central");
+    fs::rename(&staged, &central).expect("replace admitted central path");
+    let before = [&central, &audit].map(|path| artifact_state(path));
+    assert_refused(&database, false);
+    for (path, expected) in [&central, &audit].into_iter().zip(before) {
+        assert_eq!(
+            artifact_state(path),
+            expected,
+            "post-replacement write changed {path:?}"
+        );
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", central.display())).exists(),
+            "post-replacement refusal created {suffix}"
+        );
+    }
+}
+
+#[test]
+fn supported_backup_destination_has_no_sidecars_before_current_admission() {
+    let temporary = TempDir::new("backup-sidecars");
+    let source = temporary.database("source.db");
+    let destination = temporary.database("backup.db");
+    let database = Database::open(&source).expect("open source");
+    database.backup_to(&destination).expect("backup source");
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", destination.display())).exists(),
+            "backup left {suffix}"
+        );
+    }
+    Database::open(&destination).expect("open standalone backup");
 }
 
 #[test]
@@ -493,7 +813,7 @@ fn backup_is_consistent_and_verified_in_isolation() {
 
     let backup_path = temporary.database("backup.db");
     let verification = database.backup_to(&backup_path).expect("create backup");
-    assert_eq!(verification.schema_version, MIGRATION_VERSION);
+    assert_eq!(verification.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(verification.record_count, 1);
     assert_eq!(verification.mailbox_item_count, 0);
 
@@ -517,7 +837,7 @@ fn backup_is_consistent_and_verified_in_isolation() {
     let restored_database = Database::open(&restored_path).expect("open restored database");
     assert_eq!(
         restored_database.schema_version().expect("restored schema"),
-        MIGRATION_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert!(matches!(
         database.backup_to(&backup_path),
@@ -547,10 +867,10 @@ fn backup_destination_is_literal_and_cannot_overwrite_a_file_uri_target() {
         .connect()
         .expect("connect target")
         .execute(
-            "INSERT INTO principals(id, display_name, created_at) VALUES ('sentinel', 'Sentinel', ?1)",
+            "INSERT INTO principals(id, display_name, created_at) VALUES ('018f1f59-6e90-7000-8000-000000000004', 'Sentinel', ?1)",
             [NOW],
         )
-        .expect("insert target sentinel");
+        .expect("insert target 018f1f59-6e90-7000-8000-000000000004");
     drop(target);
 
     let uri = PathBuf::from(format!("file:{}", target_path.display()));
@@ -562,11 +882,11 @@ fn backup_destination_is_literal_and_cannot_overwrite_a_file_uri_target() {
             .connect_read_only()
             .expect("read target")
             .query_row(
-                "SELECT count(*) FROM principals WHERE id = 'sentinel'",
+                "SELECT count(*) FROM principals WHERE id = '018f1f59-6e90-7000-8000-000000000004'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("query target sentinel"),
+            .expect("query target 018f1f59-6e90-7000-8000-000000000004"),
         1,
         "URI-shaped destinations must not address another database"
     );
@@ -683,7 +1003,7 @@ fn connection_factory_supports_concurrent_readers_and_writers() {
                         transaction.execute(
                             "INSERT INTO records(
                                 id, space_id, space_seq, author_principal_id, kind, content, created_at
-                             ) VALUES (?1, 's1', ?2, 'p1', 'message', 'concurrent', ?3)",
+                             ) VALUES (?1, 's1', ?2, '018f1f59-6e90-7000-8000-000000000001', 'message', 'concurrent', ?3)",
                             params![id, sequence, NOW],
                         )?;
                         Ok(())

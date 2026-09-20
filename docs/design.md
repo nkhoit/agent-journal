@@ -981,7 +981,9 @@ adapter_identities
 adapter_registrations
 delivery_events
 audit_events
-schema_migrations
+schema_contract
+principal_names
+profile_idempotency_keys
 enrollment_tickets
 ```
 
@@ -1000,6 +1002,10 @@ Important constraints:
 - Delivery-event triggers reject principal/recipient mismatches and any event whose exact attempt is not `host-accepted`; accepted telemetry advances the attempt state transactionally.
 - Relation targets are existing older records in the same space.
 - Foreign keys enabled.
+- The schema is a direct UUID-native baseline. Admission compares the complete
+  load-bearing SQLite schema object set (tables, indexes, triggers, and SQL
+  definitions) to that baseline; historical migrations and near-current shapes
+  are unsupported.
 - Record bodies immutable after insert and records cannot be deleted.
 - Claim, claim-item, attempt, and event foreign keys preserve exact mailbox/attempt identity.
 - Claims and commits transactionally validated.
@@ -1032,14 +1038,14 @@ Reasons:
 - one static or nearly static service binary;
 - strong concurrency and HTTP support with explicit dependencies;
 - straightforward bounded long polling;
-- embedded migrations and assets;
+- embedded UUID-native baseline and assets;
 - low memory footprint;
 - easy cross-compilation and containerization;
 - small dependency and supply-chain surface.
 
 The scaffold intentionally starts with only pinned `serde`, `serde_json`, and `thiserror`. The implementation may add a maintained SQLite driver, HTTP stack, UUID generation, structured logging, or metrics only when exercised by a concrete milestone and documented in `Cargo.toml` and the implementation plan.
 
-Do not add Redis, NATS, RabbitMQ, a search service, or an ORM. Use explicit SQL and embedded numbered migrations.
+Do not add Redis, NATS, RabbitMQ, a search service, or an ORM. Use explicit SQL and the embedded direct UUID-native baseline.
 
 ### 12.2 Deployment
 

@@ -325,18 +325,46 @@ fn append_and_query_limits_use_utf8_bytes_and_exact_boundaries() {
 #[test]
 fn wire_identifiers_use_openapi_character_limits() {
     let exact = PrincipalCreateRequest {
-        id: "界".repeat(128),
+        handle: "界".repeat(128),
         display_name: "Agent".into(),
     };
     assert!(exact.validate().is_ok());
     assert!(
         PrincipalCreateRequest {
-            id: "界".repeat(129),
+            handle: "界".repeat(129),
             ..exact
         }
         .validate()
         .is_err()
     );
+
+    let profile = ProfileUpdateRequest {
+        handle: "018f1f59-6e90-7000-8000-000000000009".into(),
+        display_name: "Agent".into(),
+        description: Some("x".repeat(512)),
+        expected_profile_revision: 1,
+    };
+    assert!(profile.validate().is_ok());
+    assert!(
+        ProfileUpdateRequest {
+            description: Some("x".repeat(513)),
+            ..profile.clone()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        ProfileUpdateRequest {
+            expected_profile_revision: 0,
+            ..profile
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(decode_json::<ProfileUpdateRequest>(
+        br#"{"handle":"agent","display_name":"Agent","expected_profile_revision":1,"id":"caller-provided"}"#
+    )
+    .is_err());
 
     assert!(
         ListRecordsQuery {
@@ -408,8 +436,15 @@ fn response_dtos_require_every_normative_field() {
         &["type", "record_id"],
     );
     assert_required_fields::<domain::Principal>(
-        json!({"id":"agent-alpha","created_at":"2026-01-01T00:00:00Z","disabled":false}),
-        &["id", "created_at", "disabled"],
+        json!({"id":"018f1f59-6e90-7000-8000-000000000001","handle":"agent-alpha","display_name":"Agent Alpha","profile_revision":1,"created_at":"2026-01-01T00:00:00Z","disabled":false}),
+        &[
+            "id",
+            "handle",
+            "display_name",
+            "profile_revision",
+            "created_at",
+            "disabled",
+        ],
     );
     assert_required_fields::<Membership>(
         json!({
@@ -516,7 +551,7 @@ fn response_dtos_require_every_normative_field() {
     );
     assert_required_fields::<Me>(
         json!({
-            "principal":{"id":"agent-alpha","created_at":"2026-01-01T00:00:00Z","disabled":false},
+            "principal":{"id":"018f1f59-6e90-7000-8000-000000000001","handle":"agent-alpha","display_name":"Agent Alpha","profile_revision":1,"created_at":"2026-01-01T00:00:00Z","disabled":false},
             "memberships":[],
             "limits":{
                 "content_bytes":65536,"relations":32,"attention_recipients":16,

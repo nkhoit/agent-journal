@@ -1,5 +1,6 @@
 //! Host-local provisioning and atomic, one-use enrollment.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use journal_domain::{Principal, Space, default_limits};
@@ -147,6 +148,7 @@ pub struct BootstrapService {
     database: Database,
     clock: Arc<dyn Clock + Send + Sync>,
     random: Arc<dyn SecretSource>,
+    principal_sequence: Arc<AtomicU64>,
     failpoint: Option<&'static str>,
 }
 
@@ -191,13 +193,7 @@ impl BootstrapService {
             ReadIdentity::ConfiguredViewer(principal) => {
                 journal_domain::validate_identifier("viewer", principal)
                     .map_err(|_| BootstrapError::InvalidJournal)?;
-                tx.query_row(
-                    "SELECT id FROM principals WHERE id=? AND disabled_at IS NULL",
-                    [principal],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or(BootstrapError::NotFound)
+                active_principal(tx, principal)
             }
         }
     }
@@ -215,6 +211,7 @@ impl BootstrapService {
             database,
             clock,
             random,
+            principal_sequence: Arc::new(AtomicU64::new(0)),
             failpoint: None,
         }
     }
@@ -243,6 +240,37 @@ impl BootstrapService {
         Ok(hex(&bytes))
     }
 
+    fn principal_id(&self) -> Result<String, BootstrapError> {
+        let millis = self
+            .clock
+            .now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| BootstrapError::Clock)?
+            .as_millis();
+        if millis >= (1_u128 << 48) {
+            return Err(BootstrapError::Clock);
+        }
+        let mut random = [0; 32];
+        self.random.fill(&mut random)?;
+        let mut bytes: [u8; 16] = random[..16].try_into().expect("fixed size");
+        let sequence = self.principal_sequence.fetch_add(1, Ordering::Relaxed);
+        bytes[..6].copy_from_slice(&(millis as u64).to_be_bytes()[2..]);
+        for (byte, sequence_byte) in bytes[8..].iter_mut().zip(sequence.to_be_bytes()) {
+            *byte ^= sequence_byte;
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let value = hex(&bytes);
+        Ok(format!(
+            "{}-{}-{}-{}-{}",
+            &value[..8],
+            &value[8..12],
+            &value[12..16],
+            &value[16..20],
+            &value[20..]
+        ))
+    }
+
     fn transaction<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, BootstrapError>,
@@ -256,18 +284,138 @@ impl BootstrapService {
     ) -> Result<Principal, BootstrapError> {
         request.validate()?;
         let now = self.now()?;
+        let id = self.principal_id()?;
         self.transaction(|tx| {
             tx.execute(
                 "INSERT INTO principals(id,display_name,created_at) VALUES (?,?,?)",
-                params![request.id, request.display_name, now],
+                params![id, request.display_name, now],
+            )?;
+            tx.execute(
+                "INSERT INTO principal_names(name,principal_id,kind,created_at) VALUES (?,?,'current',?)",
+                params![request.handle, id, now],
             )?;
             Ok(())
         })?;
         Ok(Principal {
-            id: request.id.clone(),
-            display_name: Some(request.display_name.clone()),
+            id,
+            handle: request.handle.clone(),
+            display_name: request.display_name.clone(),
+            description: None,
+            profile_revision: 1,
             created_at: now,
             disabled: false,
+        })
+    }
+
+    /// Only a principal-client credential can edit its own mutable profile.
+    /// A rename atomically retires the current handle into the permanent alias
+    /// namespace before publishing the next current handle.
+    pub fn update_own_profile(
+        &self,
+        actor: &AuthenticatedCredential,
+        idempotency_key: &str,
+        request: &ProfileUpdateRequest,
+    ) -> Result<Principal, BootstrapError> {
+        request.validate()?;
+        if actor.class != CredentialClass::PrincipalClient
+            || !(1..=255).contains(&idempotency_key.chars().count())
+            || idempotency_key.chars().any(char::is_control)
+        {
+            return Err(BootstrapError::Unauthorized);
+        }
+        let payload_hash =
+            digest(&serde_json::to_string(request).map_err(|_| BootstrapError::InvalidJournal)?);
+        self.transaction(|tx| {
+            let now = self.now()?;
+            active_principal(tx, &actor.principal_id)?;
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE id=? AND principal_id=?
+                 AND class='principal-client' AND revoked_at IS NULL
+                 AND (expires_at IS NULL OR julianday(expires_at)>julianday(?)))",
+                params![actor.credential_id, actor.principal_id, now],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Err(BootstrapError::Unauthorized);
+            }
+            let replay: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT payload_hash,response_json FROM profile_idempotency_keys
+                     WHERE principal_id=? AND idempotency_key=?",
+                    params![actor.principal_id, idempotency_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((previous_hash, response)) = replay {
+                if previous_hash != payload_hash {
+                    return Err(BootstrapError::IdempotencyConflict);
+                }
+                return journal_protocol::decode_json(response.as_bytes())
+                    .map_err(|_| BootstrapError::CorruptJournal);
+            }
+            let (current_handle, revision): (String, i64) = tx.query_row(
+                "SELECT n.name,p.profile_revision FROM principal_names n
+                 JOIN principals p ON p.id=n.principal_id
+                 WHERE n.principal_id=? AND n.kind='current'",
+                [&actor.principal_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if revision != request.expected_profile_revision {
+                return Err(BootstrapError::Conflict);
+            }
+            if current_handle != request.handle {
+                tx.execute(
+                    "UPDATE principal_names SET kind='alias'
+                     WHERE name=? AND principal_id=? AND kind='current'",
+                    params![current_handle, actor.principal_id],
+                )?;
+                tx.execute(
+                    "INSERT INTO principal_names(name,principal_id,kind,created_at)
+                     VALUES (?,?,'current',?)",
+                    params![request.handle, actor.principal_id, now],
+                )?;
+            }
+            let changed = tx.execute(
+                "UPDATE principals SET display_name=?,description=?,profile_revision=profile_revision+1
+                 WHERE id=? AND disabled_at IS NULL AND profile_revision=?",
+                params![
+                    request.display_name,
+                    request.description,
+                    actor.principal_id,
+                    request.expected_profile_revision
+                ],
+            )?;
+            if changed != 1 {
+                return Err(BootstrapError::Conflict);
+            }
+            let principal = principal_descriptor(tx, &actor.principal_id)?;
+            tx.execute(
+                "INSERT INTO audit_events(id,event_type,actor_principal_id,subject_type,subject_id,detail_json,created_at)
+                 VALUES (?,?,?,?,?,?,?)",
+                params![
+                    format!("profile-{}", self.secret()?),
+                    "principal-profile-updated",
+                    actor.principal_id,
+                    "principal",
+                    actor.principal_id,
+                    serde_json::json!({
+                        "old_handle": current_handle,
+                        "new_handle": principal.handle,
+                        "previous_profile_revision": revision,
+                        "new_profile_revision": principal.profile_revision,
+                    })
+                    .to_string(),
+                    now,
+                ],
+            )?;
+            let response = serde_json::to_string(&principal)
+                .map_err(|_| BootstrapError::CorruptJournal)?;
+            tx.execute(
+                "INSERT INTO profile_idempotency_keys(principal_id,idempotency_key,payload_hash,response_json,created_at)
+                 VALUES (?,?,?,?,?)",
+                params![actor.principal_id, idempotency_key, payload_hash, response, now],
+            )?;
+            Ok(principal)
         })
     }
 
@@ -295,19 +443,19 @@ impl BootstrapService {
         request: &MembershipRequest,
     ) -> Result<Membership, BootstrapError> {
         request.validate()?;
+        let principal_id = self.transaction(|tx| active_principal(tx, &request.principal_id))?;
         self.transaction(|tx| {
-            active_principal(tx, &request.principal_id)?;
             let space_exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE id=?)",
                 [&request.space_id], |row| row.get(0))?;
             if !space_exists { return Err(BootstrapError::NotFound); }
             tx.execute("INSERT INTO memberships(space_id,principal_id,can_read,can_append,can_admin,created_at)
                 VALUES (?,?,?,?,?,?) ON CONFLICT(space_id,principal_id) DO UPDATE SET can_read=excluded.can_read,can_append=excluded.can_append,can_admin=excluded.can_admin",
-                params![request.space_id, request.principal_id, request.can_read, request.can_append, request.can_admin, self.now()?])?;
+                params![request.space_id, principal_id, request.can_read, request.can_append, request.can_admin, self.now()?])?;
             Ok(())
         })?;
         Ok(Membership {
             space_id: request.space_id.clone(),
-            principal_id: request.principal_id.clone(),
+            principal_id,
             can_read: request.can_read,
             can_append: request.can_append,
             can_admin: request.can_admin,
@@ -319,17 +467,17 @@ impl BootstrapService {
         request: &AdapterProvisionRequest,
     ) -> Result<AdapterProvisionResponse, BootstrapError> {
         request.validate()?;
+        let principal_id = self.transaction(|tx| active_principal(tx, &request.principal_id))?;
         self.transaction(|tx| {
-            active_principal(tx, &request.principal_id)?;
             tx.execute(
                 "INSERT INTO adapter_identities(adapter_id,principal_id,created_at) VALUES (?,?,?)",
-                params![request.adapter_id, request.principal_id, self.now()?],
+                params![request.adapter_id, principal_id, self.now()?],
             )?;
             Ok(())
         })?;
         Ok(AdapterProvisionResponse {
             adapter_id: request.adapter_id.clone(),
-            principal_id: request.principal_id.clone(),
+            principal_id,
         })
     }
 
@@ -344,18 +492,18 @@ impl BootstrapService {
             now.checked_add(Duration::from_secs(request.ttl_seconds))
                 .ok_or(BootstrapError::Clock)?,
         )?;
-        self.transaction(|tx| {
-            active_principal(tx, &request.principal_id)?;
-            let matches: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM adapter_identities WHERE adapter_id=? AND principal_id=?)", params![request.adapter_id, request.principal_id], |r| r.get(0))?;
+        let principal_id = self.transaction(|tx| {
+            let principal_id = active_principal(tx, &request.principal_id)?;
+            let matches: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM adapter_identities WHERE adapter_id=? AND principal_id=?)", params![request.adapter_id, principal_id], |r| r.get(0))?;
             if !matches { return Err(BootstrapError::NotFound); }
             let installation: Option<(String, bool)> = tx.query_row("SELECT instance_id,recovery_authorized FROM enrollment_installations WHERE adapter_id=?", [&request.adapter_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
             if matches!(&installation, Some((_, false))) { return Err(BootstrapError::Conflict); }
             tx.execute("INSERT INTO enrollment_tickets(ticket_hash,principal_id,adapter_id,expires_at,instance_id) VALUES (?,?,?,?,?)",
-                params![digest(&ticket), request.principal_id, request.adapter_id, expires_at, installation.map(|i|i.0)])?;
-            Ok(())
+                params![digest(&ticket), principal_id, request.adapter_id, expires_at, installation.map(|i|i.0)])?;
+            Ok(principal_id)
         })?;
         Ok(EnrollmentTicketCreateResponse {
-            principal_id: request.principal_id.clone(),
+            principal_id,
             adapter_id: request.adapter_id.clone(),
             expires_at,
             enrollment_ticket: OneTimeEnrollmentTicket { ticket },
@@ -448,6 +596,37 @@ impl BootstrapService {
             .optional()?.ok_or(BootstrapError::Unauthorized)
     }
 
+    /// Verify a principal-client credential for append idempotency without
+    /// authorizing a new append. The append transaction performs active-principal
+    /// authorization only after checking a durable replay/conflict entry.
+    pub fn authenticate_append_replay(
+        &self,
+        secret: &str,
+    ) -> Result<AuthenticatedCredential, BootstrapError> {
+        if secret.len() != 64 {
+            return Err(BootstrapError::Unauthorized);
+        }
+        let connection = self.database.connect_read_only()?;
+        connection
+            .query_row(
+                "SELECT id,principal_id,adapter_id,instance_id FROM credentials
+                 WHERE token_hash=? AND class='principal-client' AND revoked_at IS NULL
+                 AND (expires_at IS NULL OR julianday(expires_at)>julianday(?))",
+                params![digest(secret), self.now()?],
+                |row| {
+                    Ok(AuthenticatedCredential {
+                        credential_id: row.get(0)?,
+                        principal_id: row.get(1)?,
+                        class: CredentialClass::PrincipalClient,
+                        adapter_id: row.get(2)?,
+                        instance_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(BootstrapError::Unauthorized)
+    }
+
     pub fn rotate(
         &self,
         request: &CredentialRotateRequest,
@@ -534,7 +713,7 @@ impl BootstrapService {
                 params![actor.credential_id,actor.principal_id,self.now()?],|r|r.get(0))?;
             if !valid {return Err(BootstrapError::Unauthorized);}
             active_principal(tx,&actor.principal_id)?;
-            let principal=tx.query_row("SELECT id,display_name,created_at FROM principals WHERE id=?",[&actor.principal_id],|r|Ok(Principal{id:r.get(0)?,display_name:Some(r.get(1)?),created_at:r.get(2)?,disabled:false}))?;
+            let principal=principal_descriptor(tx,&actor.principal_id)?;
             let mut statement=tx.prepare("SELECT space_id,principal_id,can_read,can_append,can_admin FROM memberships WHERE principal_id=? ORDER BY space_id")?;
             let memberships=statement.query_map([&actor.principal_id],|r|Ok(Membership{space_id:r.get(0)?,principal_id:r.get(1)?,can_read:r.get(2)?,can_append:r.get(3)?,can_admin:r.get(4)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(Me {principal,memberships,limits:default_limits()})
@@ -542,18 +721,49 @@ impl BootstrapService {
     }
 }
 
-fn active_principal(tx: &Transaction<'_>, principal: &str) -> Result<(), BootstrapError> {
-    let active: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM principals WHERE id=? AND disabled_at IS NULL)",
-        [principal],
-        |r| r.get(0),
-    )?;
-    if active {
-        Ok(())
-    } else {
-        Err(BootstrapError::NotFound)
-    }
+fn active_principal(tx: &Transaction<'_>, selector: &str) -> Result<String, BootstrapError> {
+    // Names take precedence over IDs. This is intentionally a provenance lookup,
+    // not a UUID-shaped-string heuristic: a UUID-looking handle remains a handle.
+    tx.query_row(
+        "SELECT p.id FROM principal_names n JOIN principals p ON p.id=n.principal_id
+         WHERE n.name=? AND p.disabled_at IS NULL
+         UNION ALL
+         SELECT p.id FROM principals p
+         WHERE p.id=? AND p.disabled_at IS NULL
+           AND NOT EXISTS(SELECT 1 FROM principal_names WHERE name=?)
+         LIMIT 1",
+        params![selector, selector, selector],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or(BootstrapError::NotFound)
 }
+
+fn principal_descriptor(
+    tx: &Transaction<'_>,
+    principal_id: &str,
+) -> Result<Principal, BootstrapError> {
+    tx.query_row(
+        "SELECT p.id,n.name,p.display_name,p.description,p.profile_revision,p.created_at,
+                p.disabled_at IS NOT NULL
+         FROM principals p JOIN principal_names n ON n.principal_id=p.id AND n.kind='current'
+         WHERE p.id=?",
+        [principal_id],
+        |row| {
+            Ok(Principal {
+                id: row.get(0)?,
+                handle: row.get(1)?,
+                display_name: row.get(2)?,
+                description: row.get(3)?,
+                profile_revision: row.get(4)?,
+                created_at: row.get(5)?,
+                disabled: row.get(6)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
 fn class_name(class: CredentialClass) -> &'static str {
     match class {
         CredentialClass::PrincipalClient => "principal-client",

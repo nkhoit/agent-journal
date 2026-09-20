@@ -34,13 +34,17 @@ Enrollment credentials are separate principal-client and delivery-adapter secret
 A durable spool persists `claim_id`, `instance_id`, `generation`, the complete envelope, a custody-confirmed flag, an injection lifecycle state, and any runtime receipt or safe failure detail. `put`, custody confirmation, injection-start, acceptance, and failure transitions are idempotent for the same attempt and reject conflicting claim/generation data. `recoverable` returns unfinished rows after restart; accepted, route-unavailable, and terminal rows remain as compact tombstones after payload retention so an old attempt cannot be accidentally reinjected. Store runtime targets only locally. Keep secrets in the host secret mechanism, not in the spool.
 
 `journal-adapter-spool::SqliteStore::open(path, limits)` implements local schema
-version 2 with SQLite `journal_mode=DELETE` and `synchronous=EXTRA`. Use one fixed
+version 3 with SQLite `journal_mode=DELETE` and `synchronous=EXTRA`. Use one fixed
 database path in an existing private directory on a machine-local filesystem;
 network filesystems and hard-link aliases are unsupported. Symlink database and
 lock paths are rejected. The persistent `.lock` sidecar is exclusively locked
 until close/drop, including across process termination. Never unlink it while
 an adapter may be running. Directory ownership/permissions (or Windows ACLs)
-must prevent other users from replacing database or lock files.
+must prevent other users from replacing database or lock files. Any preexisting
+SQLite `-wal`, `-shm`, or rollback-journal directory entry, including a dangling
+symlink, is reset-required evidence and is never opened or cleaned up by the
+adapter. Current spools are admitted only when their complete load-bearing
+SQLite schema definitions match the compiled version-3 contract.
 
 Before claiming, call `check_capacity` with the proposed batch's maximum item
 count and serialized byte size. This is an admission check, not a reservation;
@@ -82,12 +86,11 @@ Call `compact` only after reporting a final outcome and deciding its body retent
 period is over. It drops the body but retains IDs, claim/installation/generation,
 metadata, custody, outcome and receipt/detail. A tombstone returned by `get` is not
 a complete injectable envelope. Unknown schema versions and malformed databases
-fail closed; never delete or recreate a spool to recover accepted custody. This
-schema upgrades version 1 atomically, retaining its rows and original put fingerprints.
-Legacy rows retain their original envelopes; no missing full record or already-reported
-terminal event is invented. Version 1 binaries reject version 2. There is no downgrade:
-back up while the owner is stopped and restore only with compatible software and
-central fencing reconciliation. Route configuration and credential persistence remain
+fail closed; never delete or recreate a spool to recover accepted custody. The exact
+version-3 SQLite schema is a clean-break contract: existing older or malformed spools
+are archive/reset-required rather than upgraded in place. There is no downgrade: back
+up while the owner is stopped and restore only with compatible software and central
+fencing reconciliation. Route configuration and credential persistence remain
 outside this store's schema.
 
 ## Generic orchestration

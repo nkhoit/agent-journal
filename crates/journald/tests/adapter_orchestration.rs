@@ -41,7 +41,7 @@ impl Fixture {
         let service = BootstrapService::new(database.clone());
         service
             .create_principal(&wire::PrincipalCreateRequest {
-                id: "destination".into(),
+                handle: "destination".into(),
                 display_name: "Destination".into(),
             })
             .unwrap();
@@ -495,13 +495,18 @@ fn temporary_journald_process_with_real_spool() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let socket = f.directory.join("admin.sock");
+    use std::os::unix::fs::PermissionsExt;
+    let socket_directory = std::env::temp_dir().join(format!("aj-admin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&socket_directory);
+    std::fs::create_dir(&socket_directory).unwrap();
+    std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = socket_directory.join("admin.sock");
     let mut child = Command::new(env!("CARGO_BIN_EXE_journald"))
         .current_dir(&f.directory)
         .arg("--database")
         .arg("journal.db")
         .arg("--admin-socket")
-        .arg("admin.sock")
+        .arg(&socket)
         .arg("--listen")
         .arg(address.to_string())
         .stdout(Stdio::null())
@@ -533,6 +538,7 @@ fn temporary_journald_process_with_real_spool() {
     }));
     child.kill().unwrap();
     child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&socket_directory);
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }

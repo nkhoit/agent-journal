@@ -22,7 +22,7 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
             result = self.cli("aj", command, *common, *args, succeeds=succeeds)
             return json.loads(result.stdout) if succeeds else None
 
-        self.assertEqual(aj("me")["principal"]["id"], "principal-example")
+        self.assertEqual(aj("me")["principal"]["handle"], "principal-example")
         self.assertEqual(len(aj("spaces")["items"]), 1)
         payload = self.directory / "record.json"
         payload.write_text(json.dumps({"kind": "note", "content": "hello 界",
@@ -55,7 +55,7 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
         self.assertEqual(failures, [])
         replay = aj("post", "--space", "space-example", "--idempotency-key",
                     "lost-key", "--input", str(payload))
-        self.assertTrue(replay["replayed"])
+        self.assertFalse(replay["replayed"])
         self.assertEqual(replay["record"]["seq"], 2)
 
         page = aj("list", "--space", "space-example", "--limit", "1")

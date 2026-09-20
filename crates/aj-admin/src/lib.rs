@@ -36,7 +36,7 @@ fn execute(
         "mailbox-status" if a.len() == 1 => serde_json::to_value(client.admin_mailbox_status(
             &a[0], &PageQuery { cursor:None,limit:None }).map_err(|_|"mailbox status failed")?),
         "principal-create" if a.len() == 2 => serde_json::to_value(client.create_principal(
-            &PrincipalCreateRequest { id: a[0].clone(), display_name: a[1].clone() })
+            &PrincipalCreateRequest { handle: a[0].clone(), display_name: a[1].clone() })
             .map_err(|_| "principal creation failed")?),
         "space-create" if a.len() == 2 => serde_json::to_value(client.create_space(
             &SpaceCreateRequest { id: a[0].clone(), name: a[1].clone() })
@@ -94,7 +94,7 @@ fn execute(
             }).map_err(|_| "enrollment recovery failed; do not reuse the ticket or change installation identity")?;
             return Ok(());
         },
-        _ => return Err("commands: metrics; principal-create ID NAME; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; adapter-provision PRINCIPAL ADAPTER; adapter-replace ADAPTER GENERATION NEW_INSTANCE [REASON]; adapters [LIMIT [CURSOR]]; mailbox-status PRINCIPAL; mailbox-requeue ITEM [REASON]; ticket-create PRINCIPAL ADAPTER TTL OUTPUT; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]; enrollment-recover ADAPTER INSTANCE"),
+        _ => return Err("commands: metrics; principal-create HANDLE DISPLAY_NAME; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; adapter-provision PRINCIPAL ADAPTER; adapter-replace ADAPTER GENERATION NEW_INSTANCE [REASON]; adapters [LIMIT [CURSOR]]; mailbox-status PRINCIPAL; mailbox-requeue ITEM [REASON]; ticket-create PRINCIPAL ADAPTER TTL OUTPUT; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]; enrollment-recover ADAPTER INSTANCE"),
     }.map_err(|_| "cannot encode response")?;
     serde_json::to_writer(&mut *output, &value).map_err(|_| "cannot write response")?;
     writeln!(output).map_err(|_| "cannot write response")
@@ -116,5 +116,22 @@ mod tests {
         assert_eq!(run(&["private-input".into()], &mut output, &mut errors), 1);
         assert!(output.is_empty());
         assert!(!String::from_utf8(errors).unwrap().contains("private-input"));
+    }
+
+    #[test]
+    fn principal_create_usage_describes_a_server_generated_id() {
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        assert_eq!(
+            run(
+                &["--socket".into(), "/ignored".into(), "unknown".into()],
+                &mut output,
+                &mut errors
+            ),
+            1
+        );
+        let usage = String::from_utf8(errors).unwrap();
+        assert!(usage.contains("principal-create HANDLE DISPLAY_NAME"));
+        assert!(!usage.contains("principal-create ID NAME"));
     }
 }

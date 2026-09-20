@@ -44,7 +44,7 @@ impl Fixture {
         );
         service
             .create_principal(&PrincipalCreateRequest {
-                id: "principal-test".into(),
+                handle: "principal-test".into(),
                 display_name: "Test".into(),
             })
             .unwrap();
@@ -115,7 +115,7 @@ fn exchange_is_one_use_and_authentication_is_class_separated() {
             )
             .is_err()
     );
-    let connection = Database::open(&f.path).unwrap().connect().unwrap();
+    let connection = rusqlite::Connection::open(&f.path).unwrap();
     let stored: String = connection
         .query_row(
             "SELECT token_hash FROM credentials WHERE id=?",
@@ -127,7 +127,7 @@ fn exchange_is_one_use_and_authentication_is_class_separated() {
     assert_eq!(stored.len(), 64);
     f.service
         .create_principal(&PrincipalCreateRequest {
-            id: "other-principal".into(),
+            handle: "other-principal".into(),
             display_name: "Other".into(),
         })
         .unwrap();
@@ -146,9 +146,102 @@ fn exchange_is_one_use_and_authentication_is_class_separated() {
             CredentialClass::DeliveryAdapter,
         )
         .unwrap();
-    assert_eq!(actor.principal_id, "principal-test");
+    assert_eq!(actor.principal_id, "01a3185c-5000-7000-8000-000000000000");
     assert_eq!(actor.adapter_id.as_deref(), Some("adapter-test"));
     assert_eq!(actor.instance_id.as_deref(), Some("installation-test"));
+}
+
+#[test]
+fn profile_rename_preserves_aliases_and_idempotent_uuid_looking_handles() {
+    let f = Fixture::new();
+    let issued = f.exchange(&f.ticket()).unwrap();
+    let actor = f
+        .service
+        .authenticate(
+            &issued.principal_client_secret.secret,
+            CredentialClass::PrincipalClient,
+        )
+        .unwrap();
+    let before = f.service.me(&actor).unwrap().principal;
+    let update = ProfileUpdateRequest {
+        handle: "018f1f59-6e90-7000-8000-000000000009".into(),
+        display_name: "Renamed".into(),
+        description: Some("Mutable profile".into()),
+        expected_profile_revision: before.profile_revision,
+    };
+    let updated = f
+        .service
+        .update_own_profile(&actor, "profile-rename", &update)
+        .unwrap();
+    assert_eq!(updated.id, before.id);
+    assert_eq!(updated.handle, update.handle);
+    assert_eq!(updated.display_name, update.display_name);
+    assert_eq!(updated.description, update.description);
+    assert_eq!(updated.profile_revision, before.profile_revision + 1);
+    assert_eq!(
+        f.service
+            .update_own_profile(&actor, "profile-rename", &update)
+            .unwrap(),
+        updated
+    );
+    assert!(matches!(
+        f.service.update_own_profile(
+            &actor,
+            "profile-rename",
+            &ProfileUpdateRequest {
+                display_name: "Different".into(),
+                ..update.clone()
+            }
+        ),
+        Err(BootstrapError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        f.service.update_own_profile(
+            &actor,
+            "stale-profile",
+            &ProfileUpdateRequest {
+                expected_profile_revision: before.profile_revision,
+                ..update.clone()
+            }
+        ),
+        Err(BootstrapError::Conflict)
+    ));
+    f.service
+        .create_space(&SpaceCreateRequest {
+            id: "profile-space".into(),
+            name: "Profile space".into(),
+        })
+        .unwrap();
+    let through_uuid_looking_handle = f
+        .service
+        .set_membership(&MembershipRequest {
+            space_id: "profile-space".into(),
+            principal_id: update.handle.clone(),
+            can_read: true,
+            can_append: false,
+            can_admin: false,
+        })
+        .unwrap();
+    assert_eq!(through_uuid_looking_handle.principal_id, updated.id);
+    let through_retired_alias = f
+        .service
+        .set_membership(&MembershipRequest {
+            space_id: "profile-space".into(),
+            principal_id: "principal-test".into(),
+            can_read: true,
+            can_append: false,
+            can_admin: false,
+        })
+        .unwrap();
+    assert_eq!(through_retired_alias.principal_id, updated.id);
+    assert!(
+        f.service
+            .create_principal(&PrincipalCreateRequest {
+                handle: "principal-test".into(),
+                display_name: "Reused".into(),
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -316,7 +409,7 @@ fn provisioning_validation_membership_and_revocation_are_persistent() {
     assert!(
         f.service
             .create_principal(&PrincipalCreateRequest {
-                id: "bad".into(),
+                handle: "bad".into(),
                 display_name: "".into()
             })
             .is_err()
@@ -638,7 +731,7 @@ fn enrollment_crash_child() {
         Arc::new(FixedClock),
         Arc::new(TerminatingSource(AtomicU64::new(1))),
     );
-    let ticket = format!("01{}", "00".repeat(31));
+    let ticket = std::env::var("AJ_ENROLLMENT_CRASH_TICKET").unwrap();
     let _ = service.exchange(
         &ticket,
         &EnrollmentExchangeRequest {
@@ -649,21 +742,43 @@ fn enrollment_crash_child() {
 }
 
 #[test]
-fn process_termination_during_exchange_preserves_replayable_unconsumed_ticket() {
+fn process_termination_leaves_hot_central_for_operator_reset() {
     let f = Fixture::new();
     let ticket = f.ticket();
+    let connection = rusqlite::Connection::open(&f.path).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE")
+        .unwrap();
+    drop(connection);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "enrollment_crash_child", "--nocapture"])
         .env("AJ_ENROLLMENT_CRASH_DB", &f.path)
+        .env("AJ_ENROLLMENT_CRASH_TICKET", &ticket)
         .output()
         .unwrap();
-    assert_eq!(status.status.code(), Some(73));
+    assert_eq!(
+        status.status.code(),
+        Some(73),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
     assert!(!String::from_utf8_lossy(&status.stdout).contains(&ticket));
     assert!(!String::from_utf8_lossy(&status.stderr).contains(&ticket));
-    let connection = Database::open(&f.path).unwrap().connect().unwrap();
-    let count: i64 = connection
-        .query_row("SELECT count(*) FROM credentials", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 0);
-    assert!(f.exchange(&ticket).is_ok());
+    let artifacts: Vec<_> = ["-wal", "-shm", "-journal"]
+        .into_iter()
+        .map(|suffix| {
+            let path = std::path::PathBuf::from(format!("{}{suffix}", f.path.display()));
+            (path.clone(), std::fs::read(path).ok())
+        })
+        .filter(|(_, bytes)| bytes.is_some())
+        .collect();
+    assert!(!artifacts.is_empty());
+    assert!(matches!(
+        Database::open(&f.path),
+        Err(journal_storage_sqlite::StorageError::ResetRequired { .. })
+    ));
+    for (path, bytes) in artifacts {
+        assert_eq!(std::fs::read(path).ok(), bytes);
+    }
 }

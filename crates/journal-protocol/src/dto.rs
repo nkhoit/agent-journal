@@ -501,14 +501,49 @@ pub type MailboxStatusPage = Page<MailboxStatus>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrincipalCreateRequest {
-    pub id: String,
+    pub handle: String,
     pub display_name: String,
 }
 
 impl PrincipalCreateRequest {
     pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("id", &self.id)?;
+        validate_identifier("handle", &self.handle)?;
         validate_chars("display_name", &self.display_name, 1, 128)
+    }
+}
+
+/// A principal-client may update only its own mutable descriptor. A retired
+/// current handle becomes a permanent alias; the immutable principal ID and
+/// every authority-bearing binding remain unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileUpdateRequest {
+    pub handle: String,
+    pub display_name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    pub expected_profile_revision: i64,
+}
+
+impl ProfileUpdateRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        validate_identifier("handle", &self.handle)?;
+        validate_chars("display_name", &self.display_name, 1, 128)?;
+        if let Some(description) = &self.description {
+            validate_chars("description", description, 0, 512)?;
+        }
+        if self.expected_profile_revision < 1 {
+            return Err(WireValidationError::Range {
+                field: "expected_profile_revision",
+                min: 1,
+                max: i64::MAX as u64,
+            });
+        }
+        Ok(())
     }
 }
 

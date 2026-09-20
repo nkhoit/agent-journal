@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use journal_protocol::{PrincipalCreateRequest, SpaceCreateRequest};
+use journal_protocol::SpaceCreateRequest;
 use journal_service::BootstrapService;
 use journal_storage_sqlite::{Database, RecoveryAudit};
 
@@ -47,12 +47,6 @@ fn service_and_operator_binary_share_lock_and_persistent_gate() {
     let database =
         Database::open_protected(fixture.0.join("central.db"), fixture.0.join("audit.db")).unwrap();
     let service = BootstrapService::new(database.clone());
-    service
-        .create_principal(&PrincipalCreateRequest {
-            id: "principal-example".to_owned(),
-            display_name: "Example".to_owned(),
-        })
-        .unwrap();
     assert!(!fixture.command("close", &[]).status.success());
     database.recovery_audit().unwrap().close().unwrap();
     assert!(database.connect_read_only().is_err());

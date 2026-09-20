@@ -196,8 +196,8 @@ impl BootstrapService {
             .map_err(|_| BootstrapError::InvalidJournal)?;
         query.validate()?;
         self.transaction(|tx| {
-            active_principal(tx, principal)?;
-            self.status_page(tx, principal, query, true, &self.now()?)
+            let principal = active_principal(tx, principal)?;
+            self.status_page(tx, &principal, query, true, &self.now()?)
         })
     }
 

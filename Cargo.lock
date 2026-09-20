@@ -707,6 +707,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal-lock-test"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "journal-adapter-spool",
+ "journal-storage-sqlite",
+ "libc",
+]
+
+[[package]]
 name = "journal-protocol"
 version = "0.1.0"
 dependencies = [
@@ -794,6 +804,7 @@ dependencies = [
  "journal-service",
  "journal-storage-sqlite",
  "pulldown-cmark",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",

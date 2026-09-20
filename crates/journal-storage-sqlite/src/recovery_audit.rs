@@ -11,11 +11,13 @@ use crate::{Database, RecoveryVerification, StorageError};
 // Ordered so restored ownership never depends on caller-provided SQL or table names.
 const SECURITY_TABLES: &[&str] = &[
     "principals",
+    "principal_names",
     "spaces",
     "adapter_identities",
     "memberships",
     "enrollment_installations",
     "adapter_registrations",
+    "profile_idempotency_keys",
     "credentials",
     "enrollment_tickets",
     "credential_audit",
@@ -49,8 +51,36 @@ struct Snapshot {
 #[derive(Debug)]
 pub struct RecoveryAudit {
     path: PathBuf,
-    _lock: File,
+    _lock: OwnerLock,
     serial: Mutex<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnerLock {
+    file: File,
+    owner_pid: u32,
+    released: bool,
+}
+
+impl OwnerLock {
+    fn release(&mut self) -> std::io::Result<()> {
+        if !self.released {
+            // flock is attached to the open file description. A fork child
+            // inherits that description, so it must only close its copy; an
+            // unlock from the child would release the live parent's lock.
+            if std::process::id() == self.owner_pid {
+                FileExt::unlock(&self.file)?;
+            }
+            self.released = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,36 +102,251 @@ pub struct RecoveryStatus {
     pub last_verified_restore_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct AuditLineage {
+    journal_id: String,
+    revision: i64,
+    snapshot: Snapshot,
+}
+
 impl RecoveryAudit {
+    /// Admit the external lineage before a recovery lock, writable central
+    /// connection, WAL pragma, or SQLite sidecar can be created. `true` means
+    /// a validated current audit exists; `false` is limited to the original
+    /// unadopted revision-zero anchor, which may initialize its first audit.
+    pub(crate) fn preflight_admission(
+        database: &Database,
+        path: &Path,
+    ) -> Result<bool, StorageError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                Self::preflight_existing(database, path)?;
+                Ok(true)
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let central = database.connect_recovery_read_only()?;
+                let (revision, required): (i64, bool) = central.query_row(
+                    "SELECT revision,audit_required FROM recovery_anchor WHERE singleton=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if required || revision != 0 {
+                    return Err(StorageError::RecoveryClosed(
+                        "required external audit is missing",
+                    ));
+                }
+                Ok(false)
+            }
+            Err(source) => Err(io("inspect recovery audit", path, source)),
+        }
+    }
+
+    pub(crate) fn entry_exists(path: &Path) -> Result<bool, StorageError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(io("inspect recovery audit", path, source)),
+        }
+    }
+
+    /// Parse an existing lineage without taking the sidecar lock or opening a
+    /// SQLite writer. Protected startup calls this before any operation that
+    /// could create, replace, or unlink recovery evidence.
+    pub(crate) fn preflight_existing(database: &Database, path: &Path) -> Result<(), StorageError> {
+        let lineage = Self::read_open_lineage(path)?;
+        let central = database.connect_recovery_read_only()?;
+        Self::verify_lineage_matches(&central, &lineage)
+    }
+
+    fn read_open_lineage(path: &Path) -> Result<AuditLineage, StorageError> {
+        validate_file(path)?;
+        let audit = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let (journal_id, state): (String, String) = audit.query_row(
+            "SELECT journal_id,state FROM control WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let events = audit
+            .prepare("SELECT revision,snapshot,outcome FROM events ORDER BY revision")?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if state != "open" || events.is_empty() {
+            return Err(StorageError::RecoveryClosed(
+                "audit intent, restore, or reconciliation is unresolved",
+            ));
+        }
+        let mut latest = None;
+        let mut last_revision = -1;
+        for (expected, (revision, snapshot_json, outcome)) in events.into_iter().enumerate() {
+            if revision != i64::try_from(expected).expect("audit revision fits i64")
+                || !matches!(outcome.as_str(), "committed" | "reconciled")
+            {
+                return Err(StorageError::RecoveryClosed(
+                    "recovery audit lineage is incomplete or unresolved",
+                ));
+            }
+            latest = Some(serde_json::from_str::<Snapshot>(&snapshot_json)?);
+            last_revision = revision;
+        }
+        Ok(AuditLineage {
+            journal_id,
+            revision: last_revision,
+            snapshot: latest.expect("nonempty audit events have a latest snapshot"),
+        })
+    }
+
+    fn verify_lineage_matches(
+        central: &Connection,
+        lineage: &AuditLineage,
+    ) -> Result<(), StorageError> {
+        let (central_journal, revision): (String, i64) = central.query_row(
+            "SELECT journal_id,revision FROM recovery_anchor WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if lineage.journal_id != central_journal
+            || lineage.revision != revision
+            || lineage.snapshot != snapshot(central)?
+        {
+            return Err(StorageError::RecoveryClosed(
+                "recovery audit does not match the central UUID-native lineage",
+            ));
+        }
+        Ok(())
+    }
+
+    /// With the external audit lock held, atomically bind a durable matching
+    /// revision-zero baseline left by a crashed initializer. Existing adopted
+    /// lineages avoid a writer entirely; only the exact unadopted baseline can
+    /// flip `audit_required`.
+    fn adopt_published_baseline(database: &Database, path: &Path) -> Result<bool, StorageError> {
+        let central = database.connect_recovery_read_only()?;
+        let (revision, required): (i64, bool) = central.query_row(
+            "SELECT revision,audit_required FROM recovery_anchor WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if required {
+            return Ok(false);
+        }
+        if revision != 0 {
+            return Err(StorageError::RecoveryClosed(
+                "required external audit is missing",
+            ));
+        }
+        drop(central);
+
+        // Re-read while stable audit ownership is held, then verify it again
+        // inside the central writer transaction before committing adoption.
+        let lineage = Self::read_open_lineage(path)?;
+        let mut connection = database.connect_unchecked()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        Self::verify_lineage_matches(&transaction, &lineage)?;
+        let changed = transaction.execute(
+            "UPDATE recovery_anchor SET audit_required=1
+             WHERE singleton=1 AND revision=0 AND audit_required=0",
+            [],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::RecoveryClosed(
+                "recovery baseline adoption did not match intent",
+            ));
+        }
+        transaction.commit()?;
+        drop(connection);
+        standalone_current_database(database)?;
+        Ok(true)
+    }
+
+    fn preflight_recovery_operation(path: &Path) -> Result<(), StorageError> {
+        validate_file(path)?;
+        let audit = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let _: (String, String) = audit.query_row(
+            "SELECT journal_id,state FROM control WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let _: i64 = audit.query_row(
+            "SELECT revision FROM events ORDER BY revision DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(())
+    }
+
     /// The directory and log are host-private. Never initialize a replacement
     /// audit when the central anchor says an audit already exists.
     pub fn open(database: &Database, path: &Path) -> Result<Self, StorageError> {
-        Self::open_with_lock(database, path, Self::acquire_lock(path)?)
+        Self::open_with_lock(database, path, Self::acquire_lock(path)?, false)
     }
 
-    pub(crate) fn acquire_lock(path: &Path) -> Result<File, StorageError> {
+    pub(crate) fn acquire_lock(path: &Path) -> Result<OwnerLock, StorageError> {
         protect_parent(path)?;
         let lock_path = path.with_extension("recovery-lock");
         let lock = private_file(&lock_path, false)?;
+        let owner_pid = std::process::id();
         lock.try_lock_exclusive()
             .map_err(|source| io("lock recovery audit", &lock_path, source))?;
-        Ok(lock)
+        Ok(OwnerLock {
+            file: lock,
+            owner_pid,
+            released: false,
+        })
     }
 
     pub(crate) fn open_with_lock(
         database: &Database,
         path: &Path,
-        lock: File,
+        lock: OwnerLock,
+        protected_startup: bool,
     ) -> Result<Self, StorageError> {
-        if path.exists()
-            && std::fs::canonicalize(path).map_err(|source| io("resolve audit", path, source))?
-                == std::fs::canonicalize(database.path())
-                    .map_err(|source| io("resolve central database", database.path(), source))?
-        {
+        let audit_exists = Self::entry_exists(path)?;
+        if audit_exists {
+            if protected_startup {
+                // The caller performed an initial lock-free refusal check;
+                // repeat the full read-only lineage validation while holding
+                // stable audit ownership before any adoption write.
+                Self::preflight_existing(database, path)?;
+                Self::adopt_published_baseline(database, path)?;
+            } else {
+                Self::preflight_recovery_operation(path)?;
+            }
+            return Ok(Self {
+                path: path.to_owned(),
+                _lock: lock,
+                serial: Mutex::new(()),
+            });
+        }
+
+        let central = database.connect_recovery_read_only()?;
+        let (revision, required): (i64, bool) = central.query_row(
+            "SELECT revision,audit_required FROM recovery_anchor WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if required || revision != 0 {
             return Err(StorageError::RecoveryClosed(
-                "audit and central database must differ",
+                "required external audit is missing",
             ));
         }
+        drop(central);
+
+        // Only a fresh, unadopted revision-zero central baseline may create an
+        // audit. Existing required/malformed/foreign/closed audits returned
+        // above without touching central SQLite or recovery artifacts.
         let mut central_connection = database.connect_unchecked()?;
         let central = central_connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -110,95 +355,83 @@ impl RecoveryAudit {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if !path.exists() {
-            if required || revision != 0 {
-                return Err(StorageError::RecoveryClosed(
-                    "required external audit is missing",
-                ));
-            }
-            // Only an unadopted revision-zero anchor may discard interrupted
-            // initialization. The final path never contains a partial baseline.
-            let mut staging_name = path.as_os_str().to_owned();
-            staging_name.push(".initializing");
-            let staging = PathBuf::from(staging_name);
-            let mut journal_name = staging.as_os_str().to_owned();
-            journal_name.push("-journal");
-            for leftover in [&PathBuf::from(journal_name), &staging] {
-                if leftover
-                    .try_exists()
-                    .map_err(|source| io("inspect incomplete recovery audit", leftover, source))?
-                {
-                    validate_file(leftover)?;
-                    if std::fs::canonicalize(leftover)
-                        .map_err(|source| io("resolve incomplete audit", leftover, source))?
-                        == std::fs::canonicalize(database.path()).map_err(|source| {
-                            io("resolve central database", database.path(), source)
-                        })?
-                    {
-                        return Err(StorageError::RecoveryClosed(
-                            "audit staging and central database must differ",
-                        ));
-                    }
-                    std::fs::remove_file(leftover).map_err(|source| {
-                        io("remove incomplete recovery audit", leftover, source)
-                    })?;
-                }
-            }
-            let file = private_file(&staging, true)?;
-            #[cfg(test)]
-            initialization_boundary("created");
-            let audit = audit_connection(&staging)?;
-            audit.execute_batch(
-                "CREATE TABLE control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                   journal_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','closed')));
-                 CREATE TABLE events(revision INTEGER PRIMARY KEY, snapshot TEXT NOT NULL,
-                   outcome TEXT NOT NULL CHECK(outcome IN ('prepared','committed','reconciled')),
-                   occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
-                 CREATE TABLE recovery_events(id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
-                   detail TEXT NOT NULL,
-                   occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));",
-            )?;
-            #[cfg(test)]
-            initialization_boundary("schema");
-            let snapshot = serde_json::to_string(&snapshot(&central)?)?;
-            audit.execute(
-                "INSERT INTO events(revision,snapshot,outcome) VALUES (0,?,'committed')",
-                [&snapshot],
-            )?;
-            audit.execute("INSERT INTO control VALUES(1,?,'open')", [&journal_id])?;
-            drop(audit);
-            file.sync_all()
-                .map_err(|source| io("sync recovery audit", &staging, source))?;
-            drop(file);
-            #[cfg(test)]
-            initialization_boundary("baseline");
-            std::fs::rename(&staging, path)
-                .map_err(|source| io("publish recovery audit", path, source))?;
-            sync_parent(path)?;
-            #[cfg(test)]
-            initialization_boundary("published");
+        if required || revision != 0 {
+            return Err(StorageError::RecoveryClosed(
+                "required external audit is missing",
+            ));
         }
-        validate_file(path)?;
+        // Only an unadopted revision-zero anchor may discard interrupted
+        // initialization. The final path never contains a partial baseline.
+        let mut staging_name = path.as_os_str().to_owned();
+        staging_name.push(".initializing");
+        let staging = PathBuf::from(staging_name);
+        let mut journal_name = staging.as_os_str().to_owned();
+        journal_name.push("-journal");
+        for leftover in [&PathBuf::from(journal_name), &staging] {
+            if leftover
+                .try_exists()
+                .map_err(|source| io("inspect incomplete recovery audit", leftover, source))?
+            {
+                validate_file(leftover)?;
+                if std::fs::canonicalize(leftover)
+                    .map_err(|source| io("resolve incomplete audit", leftover, source))?
+                    == std::fs::canonicalize(database.path())
+                        .map_err(|source| io("resolve central database", database.path(), source))?
+                {
+                    return Err(StorageError::RecoveryClosed(
+                        "audit staging and central database must differ",
+                    ));
+                }
+                std::fs::remove_file(leftover)
+                    .map_err(|source| io("remove incomplete recovery audit", leftover, source))?;
+            }
+        }
+        let file = private_file(&staging, true)?;
+        #[cfg(test)]
+        initialization_boundary("created");
+        let audit_connection = audit_connection(&staging)?;
+        audit_connection.execute_batch(
+            "CREATE TABLE control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+               journal_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','closed')));
+             CREATE TABLE events(revision INTEGER PRIMARY KEY, snapshot TEXT NOT NULL,
+               outcome TEXT NOT NULL CHECK(outcome IN ('prepared','committed','reconciled')),
+               occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+             CREATE TABLE recovery_events(id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+               detail TEXT NOT NULL,
+               occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));",
+        )?;
+        #[cfg(test)]
+        initialization_boundary("schema");
+        let snapshot = serde_json::to_string(&snapshot(&central)?)?;
+        audit_connection.execute(
+            "INSERT INTO events(revision,snapshot,outcome) VALUES (0,?,'committed')",
+            [&snapshot],
+        )?;
+        audit_connection.execute("INSERT INTO control VALUES(1,?,'open')", [&journal_id])?;
+        drop(audit_connection);
+        file.sync_all()
+            .map_err(|source| io("sync recovery audit", &staging, source))?;
+        drop(file);
+        #[cfg(test)]
+        initialization_boundary("baseline");
+        std::fs::rename(&staging, path)
+            .map_err(|source| io("publish recovery audit", path, source))?;
+        sync_parent(path)?;
+        #[cfg(test)]
+        initialization_boundary("published");
+
         let audit = Self {
             path: path.to_owned(),
             _lock: lock,
             serial: Mutex::new(()),
         };
-        let stored: String = audit.connection()?.query_row(
-            "SELECT journal_id FROM control WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        if stored != journal_id {
-            return Err(StorageError::RecoveryClosed(
-                "external audit belongs to another journal",
-            ));
-        }
         central.execute(
             "UPDATE recovery_anchor SET audit_required=1 WHERE singleton=1",
             [],
         )?;
         central.commit()?;
+        drop(central_connection);
+        standalone_current_database(database)?;
         Ok(audit)
     }
 
@@ -220,11 +453,14 @@ impl RecoveryAudit {
                 row.get(0)
             })?;
         let (revision, _, outcome) = head(&audit)?;
-        let anchor: i64 = database.connect_unchecked()?.query_row(
-            "SELECT revision FROM recovery_anchor WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
+        let anchor: i64 = database
+            .connection_factory()
+            .connect_read_only()?
+            .query_row(
+                "SELECT revision FROM recovery_anchor WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
         if state != "open" || outcome == "prepared" || revision != anchor {
             return Err(StorageError::RecoveryClosed(
                 "audit intent, restore, or reconciliation is unresolved",
@@ -295,7 +531,10 @@ impl RecoveryAudit {
         protect_parent(destination)?;
         database.backup_to_unguarded(destination)?;
         sync_parent(destination)?;
-        let verification = Database::open(destination)?.recovery_verification()?;
+        let backup = Database::open(destination)?;
+        let verification = backup.recovery_verification()?;
+        standalone_current_database(&backup)?;
+        drop(backup);
         self.connection()?.execute(
             "INSERT INTO recovery_events(kind,detail) VALUES('backup',?)",
             [serde_json::to_string(&verification)?],
@@ -318,7 +557,10 @@ impl RecoveryAudit {
         }
         protect_parent(destination)?;
         Database::verify_backup(backup)?;
-        let expected = Database::open(backup)?.recovery_verification()?;
+        let backup_database = Database::open(backup)?;
+        let expected = backup_database.recovery_verification()?;
+        standalone_current_database(&backup_database)?;
+        drop(backup_database);
         Database::restore_backup(backup, destination)?;
         sync_parent(destination)?;
         let restored = Database::open(destination)?;
@@ -420,6 +662,10 @@ impl RecoveryAudit {
             "INSERT INTO recovery_events(kind,detail) VALUES('reconciled',?)",
             [serde_json::to_string(&approval)?],
         )?;
+        // A restored central path is handed back as a standalone current-schema
+        // database. Checkpoint the audited reconciliation before dropping its
+        // final writer so a later cold admission never has to interpret a WAL.
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE")?;
         Ok(approval)
     }
 
@@ -573,7 +819,11 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
          UPDATE mailbox_items SET state='pending' WHERE state='claimed';
          DELETE FROM memberships;",
     )?;
-    for (table, rows) in SECURITY_TABLES.iter().zip(&latest.tables).take(6) {
+    for (table, rows) in SECURITY_TABLES.iter().zip(&latest.tables).take(8) {
+        if *table == "principal_names" {
+            restore_principal_names(transaction, rows)?;
+            continue;
+        }
         let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
         let columns = statement
             .query_map([], |row| {
@@ -636,6 +886,62 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
     Ok(())
 }
 
+fn restore_principal_names(
+    transaction: &Transaction<'_>,
+    rows: &[Vec<Cell>],
+) -> Result<(), StorageError> {
+    for row in rows {
+        let [
+            Cell::Text(name),
+            Cell::Text(principal_id),
+            Cell::Text(kind),
+            Cell::Text(created_at),
+        ] = row.as_slice()
+        else {
+            return Err(StorageError::RecoveryClosed(
+                "principal-name snapshot row differs",
+            ));
+        };
+        if !matches!(kind.as_str(), "current" | "alias") {
+            return Err(StorageError::RecoveryClosed(
+                "principal-name snapshot kind differs",
+            ));
+        }
+        if kind == "current" {
+            transaction.execute(
+                "UPDATE principal_names SET kind='alias'
+                 WHERE principal_id=? AND kind='current' AND name<>?",
+                params![principal_id, name],
+            )?;
+        }
+        let existing: Option<(String, String, String)> = transaction
+            .query_row(
+                "SELECT principal_id,kind,created_at FROM principal_names WHERE name=?",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        match existing {
+            Some((stored_principal, stored_kind, stored_created))
+                if stored_principal == *principal_id
+                    && stored_kind == *kind
+                    && stored_created == *created_at => {}
+            Some(_) => {
+                return Err(StorageError::RecoveryClosed(
+                    "principal-name lineage conflicts",
+                ));
+            }
+            None => {
+                transaction.execute(
+                    "INSERT INTO principal_names(name,principal_id,kind,created_at) VALUES(?,?,?,?)",
+                    params![name, principal_id, kind, created_at],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn identifiers(connection: &Connection, sql: &str) -> Result<Vec<String>, StorageError> {
     Ok(connection
         .prepare(sql)?
@@ -649,7 +955,7 @@ fn installation_inventory(audit: &Connection) -> Result<Vec<(String, String)>, S
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         let snapshot: Snapshot = serde_json::from_str(&row.get::<_, String>(0)?)?;
-        let installations = snapshot.tables.get(4).ok_or(StorageError::RecoveryClosed(
+        let installations = snapshot.tables.get(5).ok_or(StorageError::RecoveryClosed(
             "installation inventory is malformed",
         ))?;
         for installation in installations {
@@ -669,6 +975,16 @@ fn audit_connection(path: &Path) -> Result<Connection, StorageError> {
     connection.busy_timeout(crate::BUSY_TIMEOUT)?;
     connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA;")?;
     Ok(connection)
+}
+
+/// A protected backup/restore path is freshly reserved or already admitted as
+/// current. Normalize only our own completed verification WAL before returning
+/// the path to cold current-schema admission.
+fn standalone_current_database(database: &Database) -> Result<(), StorageError> {
+    let connection = database.connect_unchecked()?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")?;
+    drop(connection);
+    sync_parent(database.path())
 }
 
 fn io(operation: &'static str, path: &Path, source: std::io::Error) -> StorageError {
@@ -812,29 +1128,32 @@ mod tests {
 
     fn seed(database: &Database) {
         database.connect_unchecked().unwrap().execute_batch(
-                "INSERT INTO principals VALUES('p','Principal','2026-01-01T00:00:00Z',NULL);
+                "INSERT INTO principals(id,display_name,description,profile_revision,created_at,disabled_at)
+                     VALUES('018f1f59-6e90-7000-8000-000000000001','Principal',NULL,1,'2026-01-01T00:00:00Z',NULL);
+                 INSERT INTO principal_names(name,principal_id,kind,created_at)
+                     VALUES('principal','018f1f59-6e90-7000-8000-000000000001','current','2026-01-01T00:00:00Z');
                  INSERT INTO spaces VALUES('s','Space','2026-01-01T00:00:00Z',NULL);
-                 INSERT INTO memberships VALUES('s','p',1,1,0,'2026-01-01T00:00:00Z');
-                 INSERT INTO adapter_identities VALUES('a','p','2026-01-01T00:00:00Z');
+                 INSERT INTO memberships VALUES('s','018f1f59-6e90-7000-8000-000000000001',1,1,0,'2026-01-01T00:00:00Z');
+                 INSERT INTO adapter_identities VALUES('a','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
                  INSERT INTO enrollment_installations VALUES('a','installation-example',0,'2026-01-01T00:00:00Z');
-                 INSERT INTO adapter_registrations VALUES('a','p','installation-example',1,'active',
+                 INSERT INTO adapter_registrations VALUES('a','018f1f59-6e90-7000-8000-000000000001','installation-example',1,'active',
                      '2026-01-01T00:00:00Z','2026-01-02T00:00:00Z','2026-01-01T00:00:00Z');
                  INSERT INTO credentials(id,principal_id,class,token_hash,created_at)
-                     VALUES('c','p','principal-client','fixture-digest','2026-01-01T00:00:00Z');
+                     VALUES('c','018f1f59-6e90-7000-8000-000000000001','principal-client','fixture-digest','2026-01-01T00:00:00Z');
                  INSERT INTO credentials(id,principal_id,class,token_hash,adapter_id,created_at,instance_id)
-                     VALUES('d','p','delivery-adapter','fixture-delivery-digest','a','2026-01-01T00:00:00Z','installation-example');
+                     VALUES('d','018f1f59-6e90-7000-8000-000000000001','delivery-adapter','fixture-delivery-digest','a','2026-01-01T00:00:00Z','installation-example');
                  INSERT INTO enrollment_tickets(ticket_hash,principal_id,adapter_id,expires_at)
-                     VALUES(lower(hex(zeroblob(32))),'p','a','2026-01-02T00:00:00Z');
+                     VALUES(lower(hex(zeroblob(32))),'018f1f59-6e90-7000-8000-000000000001','a','2026-01-02T00:00:00Z');
                  INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
-                     VALUES('r1','s',1,'p','note','pending recovery','2026-01-01T00:00:00Z'),
-                           ('r2','s',2,'p','note','retained custody','2026-01-01T00:00:00Z');
-                 INSERT INTO attention VALUES('r1','p','2026-01-01T00:00:00Z'),('r2','p','2026-01-01T00:00:00Z');
-                 INSERT INTO mailbox_items VALUES('m1','r1','p','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-                     ('m2','r2','p','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                     VALUES('r1','s',1,'018f1f59-6e90-7000-8000-000000000001','note','pending recovery','2026-01-01T00:00:00Z'),
+                           ('r2','s',2,'018f1f59-6e90-7000-8000-000000000001','note','retained custody','2026-01-01T00:00:00Z');
+                 INSERT INTO attention VALUES('r1','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z'),('r2','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
+                 INSERT INTO mailbox_items VALUES('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+                     ('m2','r2','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
                  UPDATE mailbox_items SET state='claimed';
                  UPDATE delivery_attempts SET state='claimed';
                  INSERT INTO claims(id,adapter_id,principal_id,instance_id,generation,state,lease_expires_at,created_at,credential_id)
-                     VALUES('claim','a','p','installation-example',1,'active','2026-01-02T00:00:00Z','2026-01-01T00:00:00Z','d');
+                     VALUES('claim','a','018f1f59-6e90-7000-8000-000000000001','installation-example',1,'active','2026-01-02T00:00:00Z','2026-01-01T00:00:00Z','d');
                  INSERT INTO claim_items VALUES('claim','m1','initial-m1'),('claim','m2','initial-m2');
                  INSERT INTO host_custody VALUES('initial-m2','m2','claim','2026-01-01T00:00:00Z');
                  UPDATE mailbox_items SET state='host-accepted' WHERE id='m2';
@@ -951,6 +1270,87 @@ mod tests {
             assert!(RecoveryAudit::open(&database, &fixture.0.join("audit.db")).is_err());
             assert!(!fixture.0.join("audit.db").exists());
         }
+    }
+
+    /// A durable audit may outlive the initializer that published it. The next
+    /// protected owner must adopt that exact revision-zero baseline rather than
+    /// treating the central store as still eligible for ordinary writers.
+    #[test]
+    fn published_baseline_crash_is_adopted_by_protected_restart() {
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        seed(&database);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recovery_audit::tests::initialization_crash_child",
+                "--nocapture",
+            ])
+            .env("JOURNAL_AUDIT_INIT_ROOT", &fixture.0)
+            .env("JOURNAL_AUDIT_INIT_STAGE", "published")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !fixture.0.join("ready").exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "child exited before published audit boundary"
+            );
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("child did not reach published audit boundary");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let central = fixture.0.join("central.db");
+        let audit_path = fixture.0.join("audit.db");
+        let audit_before = std::fs::read(&audit_path).unwrap();
+        // This owner survived the initializer crash and deliberately makes the
+        // current schema standalone before handing it to cold protected startup.
+        database.normalize_for_clean_shutdown().unwrap();
+        drop(database);
+
+        let protected = Database::open_protected(&central, &audit_path).unwrap();
+        let anchor: (i64, bool) = protected
+            .connect_unchecked()
+            .unwrap()
+            .query_row(
+                "SELECT revision,audit_required FROM recovery_anchor WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(anchor, (0, true));
+        assert_eq!(std::fs::read(&audit_path).unwrap(), audit_before);
+
+        let ordinary = Database::open(&central).unwrap();
+        assert!(matches!(
+            ordinary.connect(),
+            Err(StorageError::RecoveryClosed(
+                "protected writes require the audited transaction wrapper"
+            ))
+        ));
+        assert!(matches!(
+            ordinary.with_transaction(|transaction| {
+                transaction.execute(
+                    "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000003','Unaudited','2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok::<_, StorageError>(())
+            }),
+            Err(StorageError::RecoveryClosed(
+                "protected writes require the audited transaction wrapper"
+            ))
+        ));
+        protected
+            .recovery_audit()
+            .unwrap()
+            .ensure_open(&protected)
+            .unwrap();
     }
 
     #[test]
@@ -1212,7 +1612,7 @@ mod tests {
                     .connect_unchecked()
                     .unwrap()
                     .query_row(
-                        "SELECT can_read FROM memberships WHERE space_id='s' AND principal_id='p'",
+                        "SELECT can_read FROM memberships WHERE space_id='s' AND principal_id='018f1f59-6e90-7000-8000-000000000001'",
                         [],
                         |row| row.get(0),
                     )
