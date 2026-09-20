@@ -4,6 +4,11 @@ This plan turns the reviewed Rust scaffold into a working Agent Journal through 
 
 ## Working rules
 
+A proposed clean-break replacement for enrollment and central delivery is in
+[Self-registration and durable inbox specification](registration-inbox-spec.md).
+It defines a separate future implementation sequence; the slices below describe
+the current architecture until that replacement is implemented.
+
 - Keep the system boring: concrete structs, explicit SQLite transactions, narrow traits at real process or storage boundaries, and no generic framework layer.
 - Add a dependency only in the slice that exercises it. Pin it, update `Cargo.lock`, and document why it exists.
 - Keep synchronous `rusqlite` repositories explicit. From async handlers, run database work in bounded blocking tasks. Long-poll waits must not occupy a database transaction or blocking-worker permit.
