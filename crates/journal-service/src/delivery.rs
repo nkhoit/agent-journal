@@ -148,7 +148,7 @@ impl BootstrapService {
                 "SELECT m.id,a.attempt_id,m.record_id FROM mailbox_items m
                  JOIN delivery_attempts a ON a.mailbox_item_id=m.id AND a.state='pending'
                  JOIN records r ON r.id=m.record_id
-                 JOIN memberships p ON p.space_id=r.space_id AND p.principal_id=m.recipient_principal_id AND p.can_read=1
+                 JOIN spaces s ON s.id=r.space_id AND s.access='public'
                  WHERE m.recipient_principal_id=? AND m.state='pending'
                  ORDER BY m.created_at,m.id LIMIT ?"
             )?.query_map(params![actor.principal_id,request.limit as i64], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -297,8 +297,9 @@ pub(super) fn suppress_revoked(
     tx.execute(
         "UPDATE mailbox_items SET state='suppressed-revoked',updated_at=?
         WHERE recipient_principal_id=? AND state IN ('pending','claimed')
-        AND NOT EXISTS(SELECT 1 FROM records r JOIN memberships p ON p.space_id=r.space_id
-            WHERE r.id=mailbox_items.record_id AND p.principal_id=? AND p.can_read=1)",
+        AND NOT EXISTS(SELECT 1 FROM records r JOIN spaces s ON s.id=r.space_id AND s.access='public'
+            JOIN principals p ON p.id=? AND p.disabled_at IS NULL
+            WHERE r.id=mailbox_items.record_id)",
         params![now, principal, principal],
     )?;
     tx.execute("UPDATE delivery_attempts SET state='suppressed-revoked',updated_at=?

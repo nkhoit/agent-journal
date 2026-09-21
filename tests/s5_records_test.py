@@ -92,11 +92,11 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
         self.assertIsNone(next_tree["next_cursor"])
         self.admin("membership-set", "space-example", "principal-example",
                    "false", "false", "false")
-        aj("get", "--record", first["record"]["id"], succeeds=False)
-        aj("list", "--space", "space-example", succeeds=False)
-        aj("search", "--space", "space-example", "--q", "hello", succeeds=False)
-        aj("thread", "--record", first["record"]["id"], succeeds=False)
-        self.assertEqual(aj("spaces")["items"], [])
+        self.assertEqual(aj("get", "--record", first["record"]["id"]), first["record"])
+        self.assertEqual(len(aj("list", "--space", "space-example")["items"]), 3)
+        self.assertEqual(len(aj("search", "--space", "space-example", "--q", "hello")["items"]), 2)
+        self.assertEqual(len(aj("thread", "--record", first["record"]["id"])["items"]), 2)
+        self.assertEqual(aj("spaces")["items"][0]["access"], "public")
 
 
 if __name__ == "__main__":

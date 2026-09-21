@@ -610,6 +610,7 @@ impl ProfileUpdateRequest {
 pub struct SpaceCreateRequest {
     pub id: String,
     pub name: String,
+    pub access: domain::SpaceAccess,
 }
 
 impl SpaceCreateRequest {

@@ -1180,6 +1180,37 @@ mod peer_tests {
                 r#"["array-principal","Array"]"#,
             ),
             ("spaces", "application/json", r#"["array-space","Array"]"#),
+            ("spaces", "application/json", r#"{"id":"s","name":"Space"}"#),
+            (
+                "spaces",
+                "application/json",
+                r#"{"id":"s","name":"Space","access":"private"}"#,
+            ),
+            (
+                "spaces",
+                "application/json",
+                r#"{"id":"s","name":"Space","access":"unknown"}"#,
+            ),
+            (
+                "spaces",
+                "application/json",
+                r#"{"id":"s","name":"Space","access":null}"#,
+            ),
+            (
+                "spaces",
+                "application/json",
+                r#"{"id":"s","name":"Space","access":true}"#,
+            ),
+            (
+                "spaces",
+                "application/json",
+                r#"{"id":"s","name":"Space","access":1}"#,
+            ),
+            (
+                "spaces",
+                "application/json",
+                r#"{"id":"s","name":"Space","access":"public","access":"private"}"#,
+            ),
             (
                 "memberships",
                 "application/json",

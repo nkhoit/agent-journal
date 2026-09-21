@@ -19,6 +19,7 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
         .unwrap();
     service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space".into(),
             name: "Space".into(),
         })

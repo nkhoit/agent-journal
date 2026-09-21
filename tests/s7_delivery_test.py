@@ -75,13 +75,13 @@ class DeliveryTest(s4_bootstrap_test.BootstrapTest):
                           credential="new-delivery")
         self.admin("membership-set", "space-example", "principal-example",
                    "false", "false", "false")
-        suppressed = aj("mailbox-claim", "--instance", "installation-replacement",
+        public_claim = aj("mailbox-claim", "--instance", "installation-replacement",
                         "--generation", str(registration["generation"]), "--limit", "1",
                         credential="new-delivery")
-        self.assertEqual(suppressed["items"], [])
+        self.assertEqual(len(public_claim["items"]), 1)
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(connection.execute("SELECT state FROM delivery_attempts").fetchall(),
-                             [("suppressed-revoked",)])
+                             [("claimed",)])
             self.assertEqual(connection.execute("SELECT count(*) FROM delivery_attempts").fetchone()[0], 1)
 
 

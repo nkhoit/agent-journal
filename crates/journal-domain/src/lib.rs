@@ -32,10 +32,25 @@ pub struct Principal {
     pub disabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpaceAccess {
+    Public,
+}
+
+impl SpaceAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Space {
     pub id: String,
     pub name: String,
+    pub access: SpaceAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
     pub created_at: String,

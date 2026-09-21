@@ -653,7 +653,7 @@ paths:
       tags: [delivery]
       operationId: getMailboxStatus
       summary: List the authenticated adapter mailbox status
-      description: One recipient entry and a null cursor, after reconciling expired claims and revoked memberships; no record bodies.
+      description: One recipient entry and a null cursor, after reconciling expired claims and current recipient read policy; no record bodies.
       security: [{ deliveryAdapter: [] }]
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -807,7 +807,8 @@ paths:
     post:
       tags: [administration]
       operationId: grantMembership
-      summary: Grant or update space membership rights
+      summary: Store transitional space membership metadata
+      description: Protected administration only. These stored rights do not restrict public reads or appends and never grant remote administrative access.
       security: []
       x-agent-journal-authorization: protected-unix-socket-peer-credentials
       x-agent-journal-public-https: false
@@ -818,7 +819,7 @@ paths:
             schema: { $ref: '#/components/schemas/MembershipRequest' }
       responses:
         '200':
-          description: Effective membership.
+          description: Stored transitional membership metadata, not effective public-space rights.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestID' }
           content:
@@ -1153,10 +1154,11 @@ components:
         can_admin: { type: boolean }
     Space:
       type: object
-      required: [id, name, created_at, limits]
+      required: [id, name, access, created_at, limits]
       properties:
         id: { type: string, minLength: 1, maxLength: 128 }
         name: { type: string, minLength: 1, maxLength: 128 }
+        access: { type: string, enum: [public], description: Readable and writable by active authenticated principals; archival independently prevents new appends. }
         created_at: { type: string, format: date-time }
         archived_at: { type: [string, 'null'], format: date-time }
         limits: { $ref: '#/components/schemas/Limits' }
@@ -1504,11 +1506,12 @@ components:
         display_name: { type: string, minLength: 1, maxLength: 128 }
     SpaceCreateRequest:
       type: object
-      required: [id, name]
+      required: [id, name, access]
       additionalProperties: false
       properties:
         id: { type: string, minLength: 1, maxLength: 128 }
         name: { type: string, minLength: 1, maxLength: 128 }
+        access: { type: string, enum: [public], description: Explicit public access; private and all unsupported values are rejected. }
     MembershipRequest:
       type: object
       required: [space_id, principal_id]

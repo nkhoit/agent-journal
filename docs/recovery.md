@@ -57,7 +57,8 @@ and next revision before committing the central transaction. The central revisio
 commits with the mutation; only then is external completion recorded. Read-only
 operations do not advance the revision. Failure or process death between those
 commits is deliberately uncertain, not reported as rollback. Subsequent service
-operations fail closed until protected reconciliation. Protected read, status,
+operations fail closed; unresolved prepared input intents require explicit
+archive/reset rather than reconciliation. Protected read, status,
 and verification gate checks serialize with in-flight audit writers, waiting for
 completion rather than treating transient prepared intents as recovery failures;
 abandoned intents still fail closed. Snapshots include principal
@@ -137,16 +138,27 @@ checks succeed. Raw `Database::backup_to` calls have no external audit timestamp
    each retained installation. Reopen external ingress only after deployment ACL,
    search, and delivery canaries.
 
-For an interrupted intent or recovery operation, stop/quiesce as above and use:
+For a closed, resolved input snapshot, stop/quiesce as above and use:
 
 ```sh
 journal-recover reconcile "$DATABASE" "$AUDIT" "$NEW_APPROVAL" --adapters-quiesced
 ```
 
 This is not a success override. It revokes credentials/tickets, advances fencing,
-runs probes, and generates a new unapproved template. If the latest external
-intent was uncertain, it also denies all memberships; after approved reopening,
-restore reviewed memberships through protected administration. An audit older
+runs probes, and generates a new unapproved template. An uncertain prepared input
+intent is archive/reset-required: restore and reconcile reject it before durable
+recovery mutation or destination publication, preserve audit evidence, and leave
+service admission closed. Repeated attempts and an approval cannot turn an
+uncertain input into an approved reconciliation. Denying memberships or disabling
+existing principals would not protect public spaces from a newly registered
+principal after reopening, so neither is a recovery fallback.
+
+A successfully completed reconciliation has a prepared output head until
+`reopen`; its matching durable reconciliation evidence and exact approved
+inventory still allow reopening. Do not confuse this with an uncertain input
+intent. A crash before that durable evidence exists remains archive/reset-required.
+Ordinary verified committed-snapshot restore remains supported. There is no
+automatic reset, deletion, or migration. An audit older
 than the central revision is rejected rather than replayed. A damaged or failed
 restore stays closed; preserve the failed destination and retry to a fresh path.
 

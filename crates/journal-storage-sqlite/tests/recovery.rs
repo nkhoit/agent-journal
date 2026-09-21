@@ -35,7 +35,7 @@ impl Fixture {
              VALUES ('018f1f59-6e90-7000-8000-000000000001','Principal',NULL,1,'2026-01-01T00:00:00Z',NULL);
              INSERT INTO principal_names(name,principal_id,kind,created_at)
              VALUES ('principal','018f1f59-6e90-7000-8000-000000000001','current','2026-01-01T00:00:00Z');
-             INSERT INTO spaces VALUES ('s','Space','2026-01-01T00:00:00Z',NULL);
+             INSERT INTO spaces VALUES ('s','Space','public','2026-01-01T00:00:00Z',NULL);
              INSERT INTO memberships VALUES ('s','018f1f59-6e90-7000-8000-000000000001',1,1,0,'2026-01-01T00:00:00Z');
              INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
              VALUES ('r','s',1,'018f1f59-6e90-7000-8000-000000000001','note','recovery probe','2026-01-01T00:00:00Z');

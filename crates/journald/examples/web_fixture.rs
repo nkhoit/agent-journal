@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     service.create_space(&SpaceCreateRequest {
+        access: journal_protocol::domain::SpaceAccess::Public,
         id: "space".into(),
         name: "Browser fixture".into(),
     })?;

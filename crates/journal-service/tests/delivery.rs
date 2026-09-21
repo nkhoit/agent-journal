@@ -60,6 +60,7 @@ impl Fixture {
             .unwrap();
         service
             .create_space(&SpaceCreateRequest {
+                access: journal_protocol::domain::SpaceAccess::Public,
                 id: "space".into(),
                 name: "Space".into(),
             })
@@ -562,11 +563,13 @@ fn status_authorization_pagination_and_current_acl_matrix() {
                 can_admin: false,
             })
             .unwrap();
-        assert!(matches!(
-            f.service
-                .delivery_status(token, record, &PageQuery::default()),
-            Err(BootstrapError::NotFound)
-        ));
+        assert!(
+            !f.service
+                .delivery_status(token, record, &PageQuery::default())
+                .unwrap()
+                .items
+                .is_empty()
+        );
     }
     let first = f
         .service
@@ -584,7 +587,7 @@ fn status_authorization_pagination_and_current_acl_matrix() {
 }
 
 #[test]
-fn custody_cross_principal_rotated_credential_and_suppression() {
+fn custody_cross_principal_rotated_credential_and_public_policy() {
     let f = Fixture::new();
     let other = add_identity(&f, "other");
     f.append("one");
@@ -627,12 +630,12 @@ fn custody_cross_principal_rotated_credential_and_suppression() {
             .unwrap()
             .items[0]
             .result,
-        CommitItemResult::SuppressedRevoked
+        CommitItemResult::Committed
     );
     assert!(
         f.service
             .requeue_mailbox_item(&claim.items[0].mailbox_item_id, &RequeueRequest::default())
-            .is_err()
+            .is_ok()
     );
     let credential = f
         .service
@@ -982,7 +985,7 @@ fn restart_lost_response_expiry_and_bounds() {
 }
 
 #[test]
-fn revocation_suppresses_without_exposing_content() {
+fn membership_denial_does_not_suppress_public_content() {
     let f = Fixture::new();
     f.append("one");
     f.service
@@ -994,19 +997,14 @@ fn revocation_suppresses_without_exposing_content() {
             can_admin: false,
         })
         .unwrap();
-    assert!(
-        f.service
-            .claim_mailbox(&f.delivery, &f.request())
-            .unwrap()
-            .items
-            .is_empty()
-    );
+    let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
+    assert_eq!(claim.items.len(), 1);
     let state: String =
         f.db.connect()
             .unwrap()
             .query_row("SELECT state FROM delivery_attempts", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(state, "suppressed-revoked");
+    assert_eq!(state, "claimed");
     f.service
         .set_membership(&MembershipRequest {
             space_id: "space".into(),
@@ -1016,12 +1014,13 @@ fn revocation_suppresses_without_exposing_content() {
             can_admin: false,
         })
         .unwrap();
-    assert!(
+    assert_eq!(
         f.service
-            .claim_mailbox(&f.delivery, &f.request())
+            .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
             .unwrap()
-            .items
-            .is_empty()
+            .items[0]
+            .result,
+        CommitItemResult::Committed
     );
 }
 
@@ -1336,8 +1335,8 @@ fn status_counts_only_current_pending_and_rejects_foreign_cursors() {
         .service
         .mailbox_status(&f.delivery, &PageQuery::default())
         .unwrap();
-    assert_eq!(status.items[0].pending, 0);
-    assert!(status.items[0].oldest_pending_at.is_none());
+    assert_eq!(status.items[0].pending, 1);
+    assert!(status.items[0].oldest_pending_at.is_some());
     assert_eq!(
         status,
         f.service
@@ -1415,7 +1414,7 @@ fn recipient_isolation_and_credential_revocation() {
 }
 
 #[test]
-fn selection_rechecks_membership_after_waiting_for_the_write_lock() {
+fn selection_rechecks_disabled_principal_after_waiting_for_the_write_lock() {
     let f = Fixture::new();
     f.append("one");
     let connection = f.db.connect().unwrap();
@@ -1433,15 +1432,18 @@ fn selection_rechecks_membership_after_waiting_for_the_write_lock() {
     };
     barrier.wait();
     connection
-        .execute_batch("UPDATE memberships SET can_read=0; COMMIT;")
+        .execute_batch("UPDATE principals SET disabled_at='2026-01-01T00:00:00Z'; COMMIT;")
         .unwrap();
-    assert!(worker.join().unwrap().unwrap().items.is_empty());
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(BootstrapError::Unauthorized)
+    ));
     assert_eq!(
         connection
             .query_row("SELECT state FROM mailbox_items", [], |r| r
                 .get::<_, String>(0))
             .unwrap(),
-        "suppressed-revoked"
+        "pending"
     );
 }
 

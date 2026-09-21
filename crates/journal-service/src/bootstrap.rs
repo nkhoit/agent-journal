@@ -552,14 +552,15 @@ impl BootstrapService {
         let now = self.now()?;
         self.transaction(|tx| {
             tx.execute(
-                "INSERT INTO spaces(id,name,created_at) VALUES (?,?,?)",
-                params![request.id, request.name, now],
+                "INSERT INTO spaces(id,name,access,created_at) VALUES (?,?,?,?)",
+                params![request.id, request.name, request.access.as_str(), now],
             )?;
             Ok(())
         })?;
         Ok(Space {
             id: request.id.clone(),
             name: request.name.clone(),
+            access: request.access,
             created_at: now,
             archived_at: None,
             limits: default_limits(),

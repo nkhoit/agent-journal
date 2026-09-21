@@ -55,8 +55,8 @@ cases:
     operation_ids: [claimMailbox, commitHostCustody, recordDeliveryEvent]
     expectation: ambiguous_runtime_error_is_terminal_without_reinjection
   - id: revocation
-    operation_ids: [grantMembership, claimMailbox]
-    expectation: suppress_unclaimed_content_without_recall_claim
+    operation_ids: [revokeCredential, claimMailbox]
+    expectation: reject_revoked_credentials_without_recalling_content
 limits:
   claim_items_max: 20
   envelope_bytes_max: 65536

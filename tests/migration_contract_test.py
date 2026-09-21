@@ -29,7 +29,7 @@ def main() -> None:
     connection.executescript(MIGRATION.read_text(encoding="utf-8"))
 
     assert connection.execute("SELECT version, format FROM schema_contract").fetchone() == (
-        9,
+        10,
         "uuid-native-v1",
     )
     assert connection.execute("SELECT count(*) FROM schema_contract").fetchone() == (1,)
@@ -95,7 +95,11 @@ def main() -> None:
         "INSERT INTO principal_names(name,principal_id,kind,created_at) VALUES ('reader',?,'current',?)",
         (P2, NOW),
     )
-    connection.execute("INSERT INTO spaces(id,name,created_at) VALUES ('s1','Space',?)", (NOW,))
+    connection.execute("INSERT INTO spaces(id,name,access,created_at) VALUES ('s1','Space','public',?)", (NOW,))
+    rejects(connection, "INSERT INTO spaces(id,name,created_at) VALUES ('missing','Missing',?)", (NOW,))
+    for access in ("private", "", "PUBLIC", "unknown", None):
+        rejects(connection, "INSERT INTO spaces(id,name,access,created_at) VALUES ('bad','Bad',?,?)", (access, NOW))
+        rejects(connection, "UPDATE spaces SET access=? WHERE id='s1'", (access,))
     for principal, append in [(P1, 1), (P2, 0)]:
         connection.execute(
             "INSERT INTO memberships(space_id,principal_id,can_read,can_append,can_admin,created_at) VALUES ('s1',?,?,?,0,?)",

@@ -102,6 +102,7 @@ fn self_registration_replays_exactly_and_rejects_conflicts_and_dead_credentials(
     assert_eq!(first.receipt.principal.handle, request.handle);
     f.service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "registration-space".into(),
             name: "Registration space".into(),
         })
@@ -546,6 +547,7 @@ fn profile_rename_preserves_aliases_and_idempotent_uuid_looking_handles() {
     ));
     f.service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "profile-space".into(),
             name: "Profile space".into(),
         })
@@ -772,6 +774,7 @@ fn provisioning_validation_membership_and_revocation_are_persistent() {
     );
     f.service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space-test".into(),
             name: "Test".into(),
         })

@@ -68,7 +68,7 @@ fn seed_space(connection: &Connection) {
         .expect("insert principal name");
     connection
         .execute(
-            "INSERT OR IGNORE INTO spaces(id, name, created_at) VALUES ('s1', 'Space 1', ?1)",
+            "INSERT OR IGNORE INTO spaces(id, name, access, created_at) VALUES ('s1', 'Space 1', 'public', ?1)",
             [NOW],
         )
         .expect("insert space");
@@ -195,6 +195,7 @@ fn empty_path_initializes_directly_to_the_uuid_native_baseline() {
             "missing {expected}"
         );
     }
+
     let indexes = schema_object_names(&connection, "index");
     assert!(
         indexes
@@ -219,6 +220,29 @@ fn empty_path_initializes_directly_to_the_uuid_native_baseline() {
         reopened.schema_version().expect("schema version"),
         CURRENT_SCHEMA_VERSION
     );
+}
+
+#[test]
+fn membership_only_schema_is_rejected_without_exposing_or_rewriting_spaces() {
+    let temporary = TempDir::new("pre-public");
+    let path = temporary.database("journal.db");
+    let connection = Connection::open(&path).unwrap();
+    let old = include_str!("../../../migrations/0001_uuid_native.sql")
+        .replace("\r\n", "\n")
+        .replace("version = 10", "version = 9")
+        .replace("(1, 10, 'uuid-native-v1')", "(1, 9, 'uuid-native-v1')")
+        .replace("    access TEXT NOT NULL CHECK (access = 'public'),\n", "");
+    connection.execute_batch(&old).unwrap();
+    connection
+        .execute(
+            "INSERT INTO spaces(id,name,created_at) VALUES('old','Old',?)",
+            [NOW],
+        )
+        .unwrap();
+    drop(connection);
+    let before = std::fs::read(&path).unwrap();
+    assert!(Database::open(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]

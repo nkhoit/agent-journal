@@ -510,8 +510,7 @@ impl RecoveryAudit {
     }
 
     /// Offline only: the exclusive lifetime lock excludes the running daemon.
-    /// An uncertain intent is retained and conservatively becomes the security
-    /// ceiling; all credentials are revoked before it can be acknowledged.
+    /// Uncertain intents remain evidence, never authority to reopen public access.
     pub fn close(&self) -> Result<(), StorageError> {
         self.connection()?.execute_batch(
             "BEGIN IMMEDIATE;
@@ -550,6 +549,7 @@ impl RecoveryAudit {
         adapters_quiesced: bool,
     ) -> Result<RecoveryApproval, StorageError> {
         let _guard = self.lock()?;
+        self.require_resolved_recovery_input()?;
         self.close()?;
         if !adapters_quiesced {
             return Err(StorageError::RecoveryClosed(
@@ -591,12 +591,22 @@ impl RecoveryAudit {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Also the explicit recovery path for a crash between either pair of commits.
+    fn require_resolved_recovery_input(&self) -> Result<(), StorageError> {
+        if head(&self.connection()?)?.2 == "prepared" {
+            return Err(StorageError::RecoveryClosed(
+                "archive/reset required: uncertain audit intent cannot be reconciled; preserve the database and external audit; a completed reconciliation may only reopen with its matching approval",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reconcile only a resolved input snapshot; uncertain intents require reset.
     pub fn reconcile(
         &self,
         database: &Database,
         adapters_quiesced: bool,
     ) -> Result<RecoveryApproval, StorageError> {
+        self.require_resolved_recovery_input()?;
         self.close()?;
         if !adapters_quiesced {
             return Err(StorageError::RecoveryClosed(
@@ -604,7 +614,7 @@ impl RecoveryAudit {
             ));
         }
         let audit = self.connection()?;
-        let (revision, serialized, outcome) = head(&audit)?;
+        let (revision, serialized, _) = head(&audit)?;
         let latest: Snapshot = serde_json::from_str(&serialized)?;
         let mut connection = database.connect_unchecked()?;
         let transaction =
@@ -628,12 +638,6 @@ impl RecoveryAudit {
             ));
         }
         restore_security(&transaction, &latest)?;
-        if outcome == "prepared" {
-            transaction.execute(
-                "UPDATE memberships SET can_read=0,can_append=0,can_admin=0",
-                [],
-            )?;
-        }
         let revision = revision
             .checked_add(1)
             .ok_or(StorageError::RecoveryClosed("audit revision exhausted"))?;
@@ -1133,7 +1137,7 @@ mod tests {
                      VALUES('018f1f59-6e90-7000-8000-000000000001','Principal',NULL,1,'2026-01-01T00:00:00Z',NULL);
                  INSERT INTO principal_names(name,principal_id,kind,created_at)
                      VALUES('principal','018f1f59-6e90-7000-8000-000000000001','current','2026-01-01T00:00:00Z');
-                 INSERT INTO spaces VALUES('s','Space','2026-01-01T00:00:00Z',NULL);
+                 INSERT INTO spaces VALUES ('s','Space','public','2026-01-01T00:00:00Z',NULL);
                  INSERT INTO memberships VALUES('s','018f1f59-6e90-7000-8000-000000000001',1,1,0,'2026-01-01T00:00:00Z');
                  INSERT INTO adapter_identities VALUES('a','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
                  INSERT INTO enrollment_installations VALUES('a','installation-example',0,'2026-01-01T00:00:00Z');
@@ -1607,19 +1611,58 @@ mod tests {
                 continue;
             }
             assert!(audit.ensure_open(&database).is_err(), "{stage}");
-            let mut approval = audit.reconcile(&database, true).unwrap();
             if stage == "prepared" || stage == "committed" {
-                let can_read: bool = database
-                    .connect_unchecked()
-                    .unwrap()
-                    .query_row(
-                        "SELECT can_read FROM memberships WHERE space_id='s' AND principal_id='018f1f59-6e90-7000-8000-000000000001'",
-                        [],
-                        |row| row.get(0),
+                let before = snapshot(&database.connect_unchecked().unwrap()).unwrap();
+                let evidence = head(&audit.connection().unwrap()).unwrap();
+                for _ in 0..2 {
+                    let error = audit.reconcile(&database, true).unwrap_err();
+                    assert!(error.to_string().contains("archive/reset required"));
+                    assert!(audit.ensure_open(&database).is_err());
+                    assert_eq!(head(&audit.connection().unwrap()).unwrap(), evidence);
+                    assert_eq!(
+                        serde_json::to_string(
+                            &snapshot(&database.connect_unchecked().unwrap()).unwrap()
+                        )
+                        .unwrap(),
+                        serde_json::to_string(&before).unwrap()
+                    );
+                }
+                let connection = database.connect_unchecked().unwrap();
+                let adapters = installation_inventory(&audit.connection().unwrap()).unwrap();
+                let forged = RecoveryApproval {
+                    verification: database.recovery_verification_unguarded().unwrap(),
+                    audit_revision: evidence.0,
+                    previous_space_heads: before.space_heads,
+                    quiesced_adapters: adapters.clone(),
+                    reconciled_spools: adapters,
+                    reconciled_clients: identifiers(
+                        &connection,
+                        "SELECT id FROM principals ORDER BY id",
                     )
-                    .unwrap();
-                assert!(!can_read, "uncertain intent must not restore a grant");
+                    .unwrap(),
+                    inventory_complete: true,
+                    accepted_record_loss: true,
+                };
+                assert!(audit.reopen(&database, &forged).is_err());
+                let destination = fixture.0.join("rejected-restore.db");
+                let error = audit
+                    .restore(&fixture.0.join("central.db"), &destination, true)
+                    .unwrap_err();
+                assert!(error.to_string().contains("archive/reset required"));
+                assert!(!destination.exists());
+                assert_eq!(head(&audit.connection().unwrap()).unwrap(), evidence);
+                assert!(audit.ensure_open(&database).is_err());
+                continue;
             }
+            let mut approval = if stage == "reconciled" {
+                let serialized: String = audit.connection().unwrap().query_row(
+                    "SELECT detail FROM recovery_events WHERE kind='reconciled' ORDER BY id DESC LIMIT 1",
+                    [], |row| row.get(0),
+                ).unwrap();
+                serde_json::from_str::<RecoveryApproval>(&serialized).unwrap()
+            } else {
+                audit.reconcile(&database, true).unwrap()
+            };
             approval.accepted_record_loss = true;
             approval.inventory_complete = true;
             audit.reopen(&database, &approval).unwrap();

@@ -37,11 +37,12 @@ override the configured viewer. There is no browser login, token URL, browser
 storage, publishing endpoint, or administrative authority on this listener.
 
 The read-only service interface checks the principal remains active and applies
-current ACLs in each read transaction. It cannot be used for append, credential,
+current space policy in each read transaction. It cannot be used for append, credential,
 mailbox-claim, or administrative operations. Delivery summaries retain the same
 author/recipient-only policy as the principal API. Use a dedicated minimally
-privileged viewer principal; granting it a space publishes that space to every
-visitor allowed through the proxy. Revocation prevents future responses, not
+privileged viewer principal for delivery-summary scope. Every public space is
+visible to every visitor allowed through the proxy; membership metadata cannot
+restrict this. Disabling the viewer prevents future responses, not
 bytes already rendered or copied.
 
 Responses, including errors, carry `Cache-Control: no-store`, a no-referrer policy,
@@ -56,9 +57,22 @@ labelled untrusted-content boundary separate from authenticated author metadata.
 
 ## Authorization
 
-Default deny. Space membership controls read/append. An attention recipient must exist and be permitted to read the space. Relation targets must be readable and same-space. Search filters ACLs before ranking, snippets, counts, or facets are produced. Mailbox claims recheck current membership before exposing record content. Claims bind credential, principal, adapter, installation ID, generation, and item set. Delivery telemetry additionally requires the authenticated adapter principal to equal the mailbox recipient for the exact attempt, and the attempt must already be `host-accepted`.
+Default deny for anonymous, invalid, revoked, expired, wrong-class, or disabled
+ordinary callers. Explicit public-space policy permits all active authenticated
+principals to read and append without membership rows. Archived spaces reject
+new appends, not reads. Unsupported policies including private are rejected.
+Membership rights remain transitional metadata, never public deny overrides.
+An attention recipient must be active and permitted to read the space. Relation
+targets must be readable and same-space. Search filters policy inside SQL before
+ranking, snippets, counts, or facets are produced. Mailbox claims recheck current
+policy before exposing content. Claims bind credential, principal, adapter,
+installation ID, generation, and item set. Telemetry additionally requires the
+authenticated adapter principal to equal the exact mailbox recipient and exact
+host custody. The documented immutable append replay exception still permits a
+valid credential to replay after a later principal disablement; it grants no new
+write or ordinary read.
 
-Record delivery-status visibility is deliberately narrower than space visibility: an addressed recipient sees only its own recipient entry; the record author sees all recipient-scoped entries only while still authorized to read the record; other space readers receive a non-leaking `404`; service administrators use only the protected Unix-socket admin interface. The concrete service checks current membership, authorship, and recipient identity in the same transaction before selecting status rows; the `Authorizer.can_read_delivery_status` port expresses the same policy for future integrations.
+Record delivery-status visibility is deliberately narrower than space visibility: an addressed recipient sees only its own recipient entry; the record author sees all recipient-scoped entries only while still authorized to read the record; other space readers receive a non-leaking `404`; service administrators use only the protected Unix-socket admin interface. The concrete service checks current public policy, authorship, and recipient identity in the same transaction before selecting status rows; the `Authorizer.can_read_delivery_status` port expresses the same policy for future integrations.
 
 Revocation stops future central access and claims. It cannot recall bytes already accepted into a local spool or runtime transcript; operators must treat those as exposed and rotate/recover accordingly.
 
@@ -130,7 +144,7 @@ heartbeats and stale generations fail closed; same-installation registration can
 renew an expired lease without changing generation. Claim selection repeats these
 checks inside its write transaction and stores the issuing credential ID.
 
-Central restore is a recovery event: close ingress, quiesce adapters, reconcile protected audit events, invalidate claims/registrations, advance generations, compare spools/checkpoints, run ACL and delivery probes, and reopen only after evidence is complete. If evidence is incomplete, remain read-only and rotate affected credentials.
+Central restore is a recovery event: close ingress, quiesce adapters, reconcile resolved protected audit events, invalidate claims/registrations, advance generations, compare spools/checkpoints, run policy and delivery probes, and reopen only after evidence is complete. Uncertain prepared input intents remain closed and require explicit archive/reset. Denying memberships or disabling existing principals cannot protect public spaces from fresh registrations.
 
 Custody receipts retain the exact issuing claim and credential binding; neither
 lease expiry nor later telemetry erases them. Replay still authenticates and

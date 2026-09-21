@@ -37,6 +37,7 @@ impl Fixture {
         })
         .unwrap();
         s.create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space".into(),
             name: "Space".into(),
         })

@@ -138,8 +138,8 @@ impl BootstrapService {
                 [item],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(BootstrapError::NotFound)?;
             if state=="pending" || state=="claimed" { return Err(BootstrapError::Conflict); }
             active_principal(tx,&principal)?;
-            let readable: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM memberships WHERE principal_id=? AND space_id=? AND can_read=1)",
-                params![principal,space],|r|r.get(0))?;
+            let readable: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE id=? AND access='public')",
+                [&space],|r|r.get(0))?;
             if !readable { return Err(BootstrapError::Conflict); }
             let ordinal: i64=tx.query_row("SELECT max(ordinal) FROM delivery_attempts WHERE mailbox_item_id=?",[item],|r|r.get(0))?;
             let ordinal=ordinal.checked_add(1).ok_or(BootstrapError::Conflict)?;
@@ -194,10 +194,10 @@ impl BootstrapService {
         self.transaction(|tx| {
             let actor=self.read_actor(tx,identity)?;
             let author: String=tx.query_row("SELECT r.author_principal_id FROM records r
-                JOIN memberships p ON p.space_id=r.space_id AND p.principal_id=? AND p.can_read=1
+                JOIN spaces s ON s.id=r.space_id AND s.access='public'
                 WHERE r.id=? AND (r.author_principal_id=? OR EXISTS(
                     SELECT 1 FROM mailbox_items m WHERE m.record_id=r.id AND m.recipient_principal_id=?))",
-                params![actor,record,actor,actor],|r|r.get(0)).optional()?.ok_or(BootstrapError::NotFound)?;
+                params![record,actor,actor],|r|r.get(0)).optional()?.ok_or(BootstrapError::NotFound)?;
             let now=self.now()?;
             let recipients=tx.prepare("SELECT recipient_principal_id FROM mailbox_items WHERE record_id=? AND (? OR recipient_principal_id=?)")?
                 .query_map(params![record,actor==author,actor],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;

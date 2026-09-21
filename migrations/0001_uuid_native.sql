@@ -4,10 +4,10 @@ PRAGMA foreign_keys=ON;
 -- central database; existing database files are never migrated or rewritten.
 CREATE TABLE schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 9),
+    version INTEGER NOT NULL CHECK (version = 10),
     format TEXT NOT NULL CHECK (format = 'uuid-native-v1')
 );
-INSERT INTO schema_contract(singleton, version, format) VALUES (1, 9, 'uuid-native-v1');
+INSERT INTO schema_contract(singleton, version, format) VALUES (1, 10, 'uuid-native-v1');
 
 CREATE TABLE principals (
     id TEXT PRIMARY KEY CHECK (
@@ -62,6 +62,7 @@ BEGIN SELECT RAISE(ABORT, 'registration credential digest is immutable'); END;
 CREATE TABLE spaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 128),
+    access TEXT NOT NULL CHECK (access = 'public'),
     created_at TEXT NOT NULL,
     archived_at TEXT
 );

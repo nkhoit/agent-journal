@@ -10,6 +10,194 @@ struct Fixture {
     delivery: String,
     path: std::path::PathBuf,
 }
+
+#[test]
+fn independently_registered_principals_use_public_spaces_without_memberships() {
+    let f = Fixture::new();
+    let alpha = "a".repeat(64);
+    let beta = "b".repeat(64);
+    for (token, handle) in [(&alpha, "alpha"), (&beta, "beta")] {
+        f.service
+            .register(
+                token,
+                &RegistrationRequest {
+                    handle: handle.into(),
+                    display_name: handle.into(),
+                },
+            )
+            .unwrap();
+    }
+    let memberships = f.count("memberships");
+    let first_page = f
+        .service
+        .list_spaces(&alpha, &PageQuery::new(None, Some(1)))
+        .unwrap();
+    assert_eq!(first_page.items[0].id, "other");
+    let continuation = PageQuery::new(first_page.next_cursor, Some(1));
+    let second_page = f.service.list_spaces(&alpha, &continuation).unwrap();
+    assert_eq!(second_page.items[0].id, "space");
+    assert!(second_page.next_cursor.is_none());
+    assert!(f.service.list_spaces(&beta, &continuation).is_err());
+    assert_eq!(
+        f.service
+            .list_spaces(&alpha, &PageQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    assert_eq!(f.service.get_space(&beta, "space").unwrap().id, "space");
+    let posted = f
+        .service
+        .append_record(
+            &alpha,
+            "space",
+            "public",
+            &RecordInput {
+                attention: vec!["beta".into()],
+                ..f.input()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        f.service.get_record(&beta, &posted.record.id).unwrap(),
+        posted.record
+    );
+    assert_eq!(posted.mailbox_created, 1);
+    assert_eq!(
+        f.service
+            .delivery_status(&beta, &posted.record.id, &PageQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(f.count("memberships"), memberships);
+    f.db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE spaces SET archived_at='2026-01-01T00:00:00Z' WHERE id='space'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        f.service
+            .append_record(&alpha, "space", "new", &f.input())
+            .is_err()
+    );
+    assert_eq!(
+        f.service.get_record(&beta, &posted.record.id).unwrap(),
+        posted.record
+    );
+    assert_eq!(
+        f.service
+            .append_record(
+                &alpha,
+                "space",
+                "public",
+                &RecordInput {
+                    attention: vec!["beta".into()],
+                    ..f.input()
+                }
+            )
+            .unwrap(),
+        posted
+    );
+    f.service
+        .provision_adapter(&AdapterProvisionRequest {
+            principal_id: "beta".into(),
+            adapter_id: "beta-adapter".into(),
+        })
+        .unwrap();
+    let ticket = f
+        .service
+        .create_ticket(&EnrollmentTicketCreateRequest {
+            principal_id: "beta".into(),
+            adapter_id: "beta-adapter".into(),
+            ttl_seconds: 900,
+        })
+        .unwrap();
+    let enrolled = f
+        .service
+        .exchange(
+            &ticket.enrollment_ticket.ticket,
+            &EnrollmentExchangeRequest {
+                instance_id: "beta-installation".into(),
+            },
+        )
+        .unwrap();
+    let delivery = &enrolled.delivery_adapter_secret.secret;
+    let registration = f
+        .service
+        .register_adapter(
+            delivery,
+            &AdapterRegisterRequest {
+                instance_id: "beta-installation".into(),
+            },
+        )
+        .unwrap();
+    let claim = f
+        .service
+        .claim_mailbox(
+            delivery,
+            &ClaimRequest {
+                instance_id: "beta-installation".into(),
+                generation: registration.generation,
+                limit: 20,
+                wait_seconds: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(claim.items.len(), 1);
+    assert_eq!(claim.items[0].record, posted.record);
+    let custody = f
+        .service
+        .commit_custody(
+            delivery,
+            &claim.claim_id,
+            &CommitRequest {
+                generation: registration.generation,
+                items: vec![CommitItem {
+                    mailbox_item_id: claim.items[0].mailbox_item_id.clone(),
+                    attempt_id: claim.items[0].attempt_id.clone(),
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(custody.items[0].result, CommitItemResult::Committed);
+    assert_eq!(f.count("memberships"), memberships);
+    assert!(matches!(
+        f.service
+            .append_record(delivery, "other", "delivery-cannot-publish", &f.input()),
+        Err(BootstrapError::Unauthorized)
+    ));
+    f.db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z' WHERE id=?",
+            [f.principal_id("beta")],
+        )
+        .unwrap();
+    let records = f.count("records");
+    assert!(matches!(
+        f.service.append_record(
+            &alpha,
+            "other",
+            "disabled-recipient",
+            &RecordInput {
+                attention: vec!["beta".into()],
+                ..f.input()
+            }
+        ),
+        Err(BootstrapError::NotFound)
+    ));
+    assert_eq!(f.count("records"), records);
+    assert_eq!(f.count("mailbox_items"), 1);
+    assert!(matches!(
+        f.service.get_record(&beta, &posted.record.id),
+        Err(BootstrapError::Unauthorized)
+    ));
+}
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -33,6 +221,7 @@ impl Fixture {
         for id in ["space", "other"] {
             service
                 .create_space(&SpaceCreateRequest {
+                    access: journal_protocol::domain::SpaceAccess::Public,
                     id: id.into(),
                     name: id.into(),
                 })
@@ -188,7 +377,7 @@ fn search_reads_do_not_acquire_the_writer_lock() {
         .unwrap();
     writer
         .execute(
-            "INSERT INTO spaces(id,name,created_at) VALUES ('uncommitted','Uncommitted','2026-01-01T00:00:00Z')",
+            "INSERT INTO spaces(id,name,access,created_at) VALUES ('uncommitted','Uncommitted','public','2026-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
@@ -301,7 +490,7 @@ fn search_is_authorized_before_scoring_and_cursors_are_scoped() {
             .is_empty()
     );
     assert!(matches!(
-        f.service.search_records(&f.token, "other", &query),
+        f.service.search_records(&f.token, "missing", &query),
         Err(BootstrapError::NotFound)
     ));
     assert!(matches!(
@@ -415,10 +604,13 @@ fn thread_projects_only_replies_and_binds_cursor_to_anchor() {
             can_admin: false,
         })
         .unwrap();
-    assert!(matches!(
-        f.service.get_thread(&f.token, &child.id, &query),
-        Err(BootstrapError::NotFound)
-    ));
+    assert_eq!(
+        f.service
+            .get_thread(&f.token, &child.id, &query)
+            .unwrap()
+            .items,
+        vec![child]
+    );
 }
 
 #[test]
@@ -813,11 +1005,11 @@ fn authorization_recipients_relations_and_utf8_limits() {
     ));
     assert!(matches!(
         f.service
-            .append_record(&f.token, "other", "key", &f.input()),
+            .append_record(&f.token, "missing", "key", &f.input()),
         Err(BootstrapError::NotFound)
     ));
     let mut input = f.input();
-    input.attention = vec!["outsider".into()];
+    input.attention = vec!["missing".into()];
     assert!(matches!(
         f.service.append_record(&f.token, "space", "key", &input),
         Err(BootstrapError::NotFound)
@@ -862,15 +1054,18 @@ fn authorization_recipients_relations_and_utf8_limits() {
             can_admin: false,
         })
         .unwrap();
-    assert!(matches!(
-        f.service.get_record(&f.token, &first.record.id),
-        Err(BootstrapError::NotFound)
-    ));
-    assert!(matches!(
+    assert_eq!(
+        f.service.get_record(&f.token, &first.record.id).unwrap(),
+        first.record
+    );
+    assert_eq!(
         f.service
-            .list_records(&f.token, "space", &ListRecordsQuery::default()),
-        Err(BootstrapError::NotFound)
-    ));
+            .list_records(&f.token, "space", &ListRecordsQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
     assert!(matches!(
         f.service
             .append_record(&f.token, "space", "key", &f.input()),
@@ -925,7 +1120,7 @@ fn concurrent_sequences_and_scoped_resumable_pages() {
             .unwrap()
             .items
             .len(),
-        1
+        2
     );
     assert_eq!(
         f.service
@@ -939,7 +1134,7 @@ fn concurrent_sequences_and_scoped_resumable_pages() {
             .unwrap()
             .items
             .len(),
-        2
+        3
     );
 }
 #[test]

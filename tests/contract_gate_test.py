@@ -74,6 +74,21 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
         self.assert_gate_rejects("CredentialRotationResponse")
 
+    def test_space_policy_must_be_explicit_public_only(self) -> None:
+        for name in ("Space", "SpaceCreateRequest"):
+            for change in ("private", "default", "optional"):
+                with self.subTest(schema=name, change=change):
+                    document = self.load_yaml(SOURCE_OPENAPI)
+                    schema = document["components"]["schemas"][name]
+                    if change == "private":
+                        schema["properties"]["access"]["enum"].append("private")
+                    elif change == "default":
+                        schema["properties"]["access"]["default"] = "public"
+                    else:
+                        schema["required"].remove("access")
+                    self.write_yaml(self.openapi, document)
+                    self.assert_gate_rejects(name)
+
     def test_recovery_must_not_return_content(self) -> None:
         document = self.load_yaml(self.openapi)
         response = document["paths"]["/v1/admin/enrollment/recover"]["post"]["responses"]["204"]
