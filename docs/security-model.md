@@ -107,6 +107,13 @@ code. The service UID is trusted and can already modify its state and binary.
 POSIX has no atomic conditional unlink: cleanup rechecks artifact identity
 immediately before unlink rather than claiming race elimination.
 
+The serving future directly owns the public, administrative and optional web
+listener futures. Cancelling and awaiting that future closes the listeners and
+releases administrative ownership without requiring detached listener tasks to
+be scheduled. Cancellation is not graceful shutdown or database normalization:
+outstanding request workers can still retain protected audit ownership, and
+hot SQLite state remains fail-closed on restart.
+
 Pending names use bounded safe ASCII and remain inside the final socket path
 budget. Occupied candidates are skipped; bounded exhaustion fails closed.
 A crash before marker publication may leave an unknown pending path, which is

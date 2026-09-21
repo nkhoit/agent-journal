@@ -20,8 +20,6 @@ use thiserror::Error;
 #[cfg(unix)]
 use tokio::sync::watch;
 use tokio::task::JoinError;
-#[cfg(unix)]
-use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::executor::BlockingError;
@@ -234,30 +232,32 @@ impl Server {
         let shutdown_timeout = self.shutdown_timeout;
         let (admin_listener, admin_guard) =
             self.admin.into_parts().map_err(ServerError::ServeAdmin)?;
-        let mut listeners = JoinSet::new();
-        if let Some((listener, viewer)) = self.web_listener {
-            let router = web_router_with_timeout(
-                self.state,
-                viewer,
-                self.max_body_bytes,
-                self.body_read_timeout,
-                shutdown_rx.clone(),
-            );
-            let web_shutdown = shutdown_rx.clone();
-            listeners.spawn(async move {
+        let web_enabled = self.web_listener.is_some();
+        let web_shutdown = shutdown_rx.clone();
+        let web_serving = async move {
+            if let Some((listener, viewer)) = self.web_listener {
+                let router = web_router_with_timeout(
+                    self.state,
+                    viewer,
+                    self.max_body_bytes,
+                    self.body_read_timeout,
+                    web_shutdown.clone(),
+                );
                 axum::serve(listener, router)
                     .with_graceful_shutdown(wait_for_shutdown(web_shutdown))
                     .await
                     .map_err(ServerError::ServeWeb)
-            });
-        }
+            } else {
+                Ok(())
+            }
+        };
         let public_shutdown = shutdown_rx.clone();
-        listeners.spawn(async move {
+        let public_serving = async move {
             axum::serve(self.public_listener, public_router)
                 .with_graceful_shutdown(wait_for_shutdown(public_shutdown))
                 .await
                 .map_err(ServerError::ServePublic)
-        });
+        };
         let admin_shutdown = shutdown_rx;
         let admin_serving = async move {
             axum::serve(
@@ -268,58 +268,80 @@ impl Server {
             .await
             .map_err(ServerError::ServeAdmin)
         };
-        // Keep the serving future, which owns the listener, before the guard.
-        // If this outer future is cancelled, JoinSet aborts this task and the
-        // listener is dropped before the guard can release ownership.
-        listeners.spawn(AdminServing {
+        // Own listener futures directly: dropping serve must finish listener
+        // cleanup, not merely schedule cancellation of detached child tasks.
+        let admin_serving = AdminServing {
             serving: Box::pin(admin_serving),
             _guard: admin_guard,
-        });
+        };
+        tokio::pin!(public_serving, admin_serving, web_serving);
         tracing::info!(
             event = "service_ready",
             version = env!("CARGO_PKG_VERSION"),
             public_address = %self.public_address
         );
 
+        let mut public_done = false;
+        let mut admin_done = false;
+        let mut web_done = !web_enabled;
         let first = tokio::select! {
             () = shutdown => None,
-            result = listeners.join_next() => result,
+            result = &mut public_serving => {
+                public_done = true;
+                Some(result)
+            },
+            result = &mut admin_serving => {
+                admin_done = true;
+                Some(result)
+            },
+            result = &mut web_serving, if web_enabled => {
+                web_done = true;
+                Some(result)
+            },
         };
         let _ = shutdown_tx.send(true);
 
         let mut outcome = match first {
             None => Ok(()),
-            Some(Ok(Ok(()))) => Err(ServerError::ListenerStopped),
-            Some(Ok(Err(error))) => Err(error),
-            Some(Err(error)) => Err(ServerError::ListenerTask(error)),
+            Some(Ok(())) => Err(ServerError::ListenerStopped),
+            Some(Err(error)) => Err(error),
         };
-        let deadline = tokio::time::Instant::now() + shutdown_timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout(remaining, listeners.join_next()).await {
-                Ok(Some(result)) => {
+        let drained = tokio::time::timeout(shutdown_timeout, async {
+            tokio::join!(
+                async {
+                    if public_done {
+                        Ok(())
+                    } else {
+                        public_serving.await
+                    }
+                },
+                async {
+                    if admin_done {
+                        Ok(())
+                    } else {
+                        admin_serving.await
+                    }
+                },
+                async { if web_done { Ok(()) } else { web_serving.await } },
+            )
+        })
+        .await;
+        match drained {
+            Ok((public, admin, web)) => {
+                for result in [public, admin, web] {
                     if outcome.is_ok() {
-                        outcome = match result {
-                            Ok(result) => result,
-                            Err(error) => Err(ServerError::ListenerTask(error)),
-                        };
+                        outcome = result;
                     }
                 }
-                Ok(None) => break,
-                Err(_) => {
-                    tracing::warn!(
-                        event = "shutdown_forced",
-                        timeout_millis = shutdown_timeout.as_millis() as u64
-                    );
-                    listeners.abort_all();
-                    while listeners.join_next().await.is_some() {}
-                    if outcome.is_ok() {
-                        // A task was aborted, so it is not safe to checkpoint
-                        // the authoritative database after it. Cold admission
-                        // must preserve and reject that hot state instead.
-                        outcome = Err(ServerError::ShutdownTimeout);
-                    }
-                    break;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    event = "shutdown_forced",
+                    timeout_millis = shutdown_timeout.as_millis() as u64
+                );
+                // Forced cancellation is not a clean checkpoint boundary.
+                if outcome.is_ok() {
+                    outcome = Err(ServerError::ShutdownTimeout);
                 }
             }
         }
