@@ -64,6 +64,37 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /v1/registrations:
+    post:
+      tags: [principal]
+      operationId: registerPrincipal
+      summary: Register a durable principal with a client-generated credential
+      description: The bearer is exactly 64 lowercase hexadecimal characters encoding 32 random bytes generated and durably prepared by the client before this request. The server stores only its SHA-256 digest. An exact valid replay returns the original receipt with 200; a first commit returns 201.
+      security: [{ registrationToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegistrationRequest' }
+      responses:
+        '201':
+          description: Principal, credential digest binding, and registration receipt created atomically.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegistrationReceipt' }
+        '200':
+          description: Exact valid replay of the original registration receipt.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegistrationReceipt' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/me:
     get:
       tags: [principal]
@@ -721,6 +752,32 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /v1/admin/principals/recover:
+    post:
+      tags: [administration]
+      operationId: recoverPrincipalCredential
+      summary: Revoke all live authority for a principal UUID and issue one replacement credential
+      description: Atomically revokes every currently valid principal-client and delivery-adapter credential for the principal, invalidates outstanding transitional enrollment authority, and issues one principal-client replacement. Repeating by UUID revokes an inaccessible prior replacement. The principal UUID, profile, records, inbox, and disabled state are preserved.
+      security: []
+      x-agent-journal-authorization: protected-unix-socket-peer-credentials
+      x-agent-journal-public-https: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrincipalRecoveryRequest' }
+      responses:
+        '200':
+          description: Existing authority revoked and replacement returned once through protected administration.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrincipalRecoveryResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/admin/spaces:
     post:
       tags: [administration]
@@ -883,6 +940,11 @@ components:
       description: Correlation identifier returned on every HTTP response, including successful responses.
       schema: { type: string, minLength: 1, maxLength: 128 }
   securitySchemes:
+    registrationToken:
+      type: http
+      scheme: bearer
+      bearerFormat: 64 lowercase hexadecimal characters
+      description: Client-generated 256-bit registration credential. The server stores only its SHA-256 digest.
     principalClient:
       type: http
       scheme: bearer
@@ -1052,6 +1114,19 @@ components:
         profile_revision: { type: integer, minimum: 1 }
         created_at: { type: string, format: date-time }
         disabled: { type: boolean }
+    RegistrationRequest:
+      type: object
+      required: [handle, display_name]
+      additionalProperties: false
+      properties:
+        handle: { type: string, minLength: 1, maxLength: 128 }
+        display_name: { type: string, minLength: 1, maxLength: 128 }
+    RegistrationReceipt:
+      type: object
+      required: [principal, credential_id]
+      properties:
+        principal: { $ref: '#/components/schemas/Principal' }
+        credential_id: { type: string, minLength: 1, maxLength: 128 }
     ProfileUpdateRequest:
       type: object
       required: [handle, display_name, expected_profile_revision]
@@ -1451,6 +1526,22 @@ components:
       properties:
         credential_id: { type: string, maxLength: 128 }
         reason: { type: string, maxLength: 512 }
+    PrincipalRecoveryRequest:
+      type: object
+      required: [principal_id]
+      additionalProperties: false
+      properties:
+        principal_id:
+          type: string
+          format: uuid
+          description: Existing immutable principal UUID; handles and aliases are not accepted.
+        reason: { type: string, maxLength: 512 }
+    PrincipalRecoveryResponse:
+      type: object
+      required: [principal, replacement_secret]
+      properties:
+        principal: { $ref: '#/components/schemas/Principal' }
+        replacement_secret: { $ref: '#/components/schemas/OneTimeReplacementSecret' }
     CredentialMetadata:
       type: object
       required: [credential_id, principal_id, class, rotated_at]

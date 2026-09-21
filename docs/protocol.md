@@ -110,6 +110,25 @@ A delivery credential cannot publish as its principal. Adapter self endpoints de
 
 ## Enrollment and administration
 
+`POST /v1/registrations` accepts a client-generated 32-byte token encoded as
+exactly 64 lowercase hexadecimal characters in the bearer header. Before the
+request, `aj register` durably stores that token, endpoint, and exact typed
+`{handle,display_name}` body in private local state. The server stores only the
+SHA-256 digest and atomically creates the UUIDv7 principal, permanent current
+handle binding, principal-client credential, and registration receipt. A first
+commit returns `201`; an exact active replay returns `200` with the original
+receipt. Changed bodies or occupied handles conflict. Known revoked, expired,
+disabled, rotated, recovered, or transitional credentials cannot fall through
+to new identity creation.
+
+Protected `POST /v1/admin/principals/recover` selects an existing principal by
+UUID, atomically revokes every currently valid credential in both transitional
+classes, invalidates outstanding enrollment authority, and issues one new
+principal-client credential. Repeating recovery by UUID revokes an inaccessible
+replacement without requiring its ID. The operation preserves UUID, profile,
+records, mailbox history, and disabled state and participates in the protected
+external mutation audit.
+
 `aj-admin` uses only the protected local Unix socket. Authorization comes from socket ownership, filesystem mode, and OS peer credentials; there is no `X-Admin-Authorization` header and no remote bearer fallback. The OpenAPI contract marks these operations with `security: []` and an explicit transport extension because OpenAPI has no standard Unix-peer-credential scheme.
 
 `POST /v1/admin/enrollment-tickets` creates a short-lived ticket bound to one existing principal/adapter pair and returns the plaintext ticket once in the protected admin response. `POST /v1/enrollment/exchange` accepts that ticket over private HTTPS, atomically consumes it, creates the initial adapter registration, and returns separately scoped principal-client and delivery-adapter credentials once. The database stores only the ticket hash, binding, expiry, and consumed timestamp; none of the plaintext secrets are logged.
@@ -133,10 +152,12 @@ random bits; per-space sequence, not UUID ordering, is the ordering authority.
 
 ### Principal CLI
 
-After enrollment, commands read the principal credential JSON from a private
+After registration or enrollment, commands read the principal credential JSON from a private
 file and emit JSON to stdout. Secrets are never command arguments:
 
 ```sh
+aj register --endpoint "$ENDPOINT" --state-file "$PRINCIPAL_FILE" \
+  --handle agent-alpha --display-name "Agent Alpha"
 aj me --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE"
 aj spaces --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" --limit 50
 aj post --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \

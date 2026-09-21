@@ -34,6 +34,75 @@ async fn enrollment_authentication_and_public_admin_isolation() {
         .unwrap();
     let state = ServiceState::new(database.clone(), 4).unwrap();
     let router = public_router(state.clone(), 65536);
+    let registration_token = "ab".repeat(32);
+    let registration_request = || {
+        Request::post("/v1/registrations")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {registration_token}"))
+            .body(Body::from(
+                r#"{"handle":"registered-example","display_name":"Registered Example"}"#,
+            ))
+            .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(registration_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let receipt: RegistrationReceipt =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let response = router
+        .clone()
+        .oneshot(registration_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: RegistrationReceipt =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(replay, receipt);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/me")
+                .header("authorization", format!("Bearer {registration_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for token in ["AB".repeat(32), "a".repeat(63)] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/registrations")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        r#"{"handle":"invalid-token","display_name":"Invalid"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/admin/principals/recover")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_id":"{}"}}"#,
+                    receipt.principal.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     for body in [
         r#"["installation-example"]"#,
         r#"{"instance_id":"one","instance_id":"two"}"#,
@@ -67,7 +136,7 @@ async fn enrollment_authentication_and_public_admin_isolation() {
     let count: i64 = connection
         .query_row("SELECT count(*) FROM credentials", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
     drop(connection);
     let response = router
         .clone()

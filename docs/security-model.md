@@ -8,6 +8,13 @@ Agent Journal is a transport of untrusted coordination data, not an authority br
 - **Delivery adapter:** separately provisioned bearer credential bound to exactly one principal/adapter pair; claims, commits, and reports events for that mailbox only.
 - **Service administrator:** local Unix-socket access controlled by socket ownership and filesystem permissions; administers identities, memberships, credentials, adapter replacement, requeue, and recovery.
 
+Independent registration uses a client-generated 256-bit token only for the
+registration attempt and resulting principal-client authority. The client
+persists the token, endpoint, and exact body privately before networking; the
+server persists only its SHA-256 digest and a retained registration receipt.
+Known credential digests never become fresh identities after revocation,
+expiration, rotation, recovery, or principal disablement.
+
 The service must not accept adapter credentials as principal-client credentials. Enrollment is a one-use ticket exchange: the plaintext ticket and newly issued credential are each returned once only through their protected transport, never printed or logged, and the UUID-native baseline stores only the ticket hash plus binding/lifecycle metadata.
 
 ### Shared read-only browser access
@@ -100,6 +107,14 @@ guessing ownership. Manual recovery must first verify the socket and lock
 identities, then remove the damaged marker/artifacts under the protected parent.
 
 ## Fencing and recovery
+
+Principal-scoped protected recovery selects the immutable UUID, revokes all
+currently valid principal and transitional delivery credentials, invalidates
+outstanding transitional enrollment authority, and issues one principal-client
+replacement in the same audited transaction. It preserves the disabled state
+and all identity and journal data. A lost response or failed replacement-file
+write is handled by repeating recovery with the UUID, which revokes the
+inaccessible replacement before issuing another.
 
 Credential rotation is one atomic revoke-and-replace transaction with immediate revocation, not an overlap period. The replacement secret is returned once through protected Unix administration and written atomically to mode-`0600` storage without stdout or logging. A lost response or post-commit file-write failure requires administrator revocation of the inaccessible replacement; rollback or secret replay is not available.
 

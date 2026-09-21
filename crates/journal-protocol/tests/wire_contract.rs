@@ -62,6 +62,8 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(Health, "Health");
     example!(OperationalMetrics, "OperationalMetrics");
     example!(domain::Principal, "Principal");
+    example!(RegistrationRequest, "RegistrationRequest");
+    example!(RegistrationReceipt, "RegistrationReceipt");
     example!(domain::Relation, "Relation");
     example!(Membership, "Membership");
     example!(domain::Limits, "Limits");
@@ -98,6 +100,7 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(EnrollmentExchangeResponse, "EnrollmentExchangeResponse");
     example!(CredentialMetadata, "CredentialMetadata");
     example!(CredentialRotationResponse, "CredentialRotationResponse");
+    example!(PrincipalRecoveryResponse, "PrincipalRecoveryResponse");
     example!(OneTimeReplacementSecret, "OneTimeReplacementSecret");
     example!(RequeueResponse, "RequeueResponse");
 }
@@ -142,6 +145,20 @@ fn bootstrap_recovery_requests_are_strict_and_rotation_secrets_are_redacted() {
         wire_example("OneTimeReplacementSecret").clone(),
         &["credential_id", "secret"],
     );
+    let principal_recovery = PrincipalRecoveryRequest {
+        principal_id: "018f1f59-6e90-7000-8000-000000000001".into(),
+        reason: Some("lost credential".into()),
+    };
+    principal_recovery.validate().unwrap();
+    assert!(
+        decode_json::<PrincipalRecoveryRequest>(
+            br#"{"principal_id":"018f1f59-6e90-7000-8000-000000000001","reason":null}"#
+        )
+        .is_err()
+    );
+    let recovered: PrincipalRecoveryResponse =
+        serde_json::from_value(wire_example("PrincipalRecoveryResponse").clone()).unwrap();
+    assert!(!format!("{recovered:?}").contains("recovery-example"));
 }
 
 #[test]
@@ -445,6 +462,14 @@ fn response_dtos_require_every_normative_field() {
             "created_at",
             "disabled",
         ],
+    );
+    assert_required_fields::<RegistrationReceipt>(
+        wire_example("RegistrationReceipt").clone(),
+        &["principal", "credential_id"],
+    );
+    assert_required_fields::<PrincipalRecoveryResponse>(
+        wire_example("PrincipalRecoveryResponse").clone(),
+        &["principal", "replacement_secret"],
     );
     assert_required_fields::<Membership>(
         json!({

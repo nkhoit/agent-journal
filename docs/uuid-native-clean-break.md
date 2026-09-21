@@ -1,6 +1,6 @@
 # UUID-native persistence clean break
 
-The only supported central database contract is `migrations/0001_uuid_native.sql`, schema version 8. It creates the complete UUID-native schema directly; it is not an upgrade sequence.
+The only supported central database contract is `migrations/0001_uuid_native.sql`, schema version 9. It creates the complete UUID-native schema directly; it is not an upgrade sequence.
 
 Principals have immutable server-generated UUIDv7 `id` values. `principal_names` holds the active handle plus permanent aliases. A selector is resolved as a name only when a matching persisted row exists; UUID-shaped text is never treated as an id merely because it looks like one. `PATCH /v1/me/profile` changes only the authenticated principal's mutable handle and display profile with an optimistic `profile_revision`; a renamed handle is retained as an alias. Records, credentials, ACLs, adapters, mailboxes, claims, idempotency rows, and recovery state bind to the UUID.
 

@@ -87,6 +87,20 @@ pub struct AuthenticatedCredential {
 
 pub type CredentialRotation = CredentialRotationResponse;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationOutcome {
+    pub receipt: RegistrationReceipt,
+    pub replayed: bool,
+}
+
+struct ExistingRegistration {
+    principal_id: String,
+    unrevoked: bool,
+    unexpired: bool,
+    request_json: Option<String>,
+    response_json: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 enum ReadIdentity<'a> {
     Bearer(&'a str),
@@ -304,6 +318,120 @@ impl BootstrapService {
             profile_revision: 1,
             created_at: now,
             disabled: false,
+        })
+    }
+
+    pub fn register(
+        &self,
+        token: &str,
+        request: &RegistrationRequest,
+    ) -> Result<RegistrationOutcome, BootstrapError> {
+        request.validate()?;
+        if token.len() != 64
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BootstrapError::InvalidJournal);
+        }
+        let token_hash = digest(token);
+        let request_json =
+            serde_json::to_string(request).map_err(|_| BootstrapError::InvalidJournal)?;
+        self.transaction(|tx| {
+            let now = self.now()?;
+            let existing: Option<ExistingRegistration> = tx
+                .query_row(
+                    "SELECT c.principal_id,c.revoked_at IS NULL,
+                            c.expires_at IS NULL OR julianday(c.expires_at)>julianday(?),
+                            r.request_json,r.response_json
+                     FROM credentials c
+                     LEFT JOIN registration_receipts r ON r.token_hash=c.token_hash
+                     WHERE c.token_hash=?",
+                    params![now, token_hash],
+                    |row| {
+                        Ok(ExistingRegistration {
+                            principal_id: row.get(0)?,
+                            unrevoked: row.get(1)?,
+                            unexpired: row.get(2)?,
+                            request_json: row.get(3)?,
+                            response_json: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                let active: bool = tx.query_row(
+                    "SELECT disabled_at IS NULL FROM principals WHERE id=?",
+                    [&existing.principal_id],
+                    |row| row.get(0),
+                )?;
+                if !existing.unrevoked || !existing.unexpired || !active {
+                    return Err(BootstrapError::Unauthorized);
+                }
+                let (Some(original), Some(response)) =
+                    (existing.request_json, existing.response_json)
+                else {
+                    return Err(BootstrapError::Unauthorized);
+                };
+                if original != request_json {
+                    return Err(BootstrapError::Conflict);
+                }
+                let receipt =
+                    decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal)?;
+                return Ok(RegistrationOutcome {
+                    receipt,
+                    replayed: true,
+                });
+            }
+            self.checkpoint("registration-digest-lookup")?;
+            let principal_id = self.principal_id()?;
+            tx.execute(
+                "INSERT INTO principals(id,display_name,created_at) VALUES (?,?,?)",
+                params![principal_id, request.display_name, now],
+            )?;
+            self.checkpoint("registration-principal")?;
+            tx.execute(
+                "INSERT INTO principal_names(name,principal_id,kind,created_at)
+                 VALUES (?,?,'current',?)",
+                params![request.handle, principal_id, now],
+            )?;
+            self.checkpoint("registration-handle")?;
+            let credential_id = format!("cred-{}", self.secret()?);
+            tx.execute(
+                "INSERT INTO credentials(id,principal_id,class,token_hash,created_at)
+                 VALUES (?,?,'principal-client',?,?)",
+                params![credential_id, principal_id, token_hash, now],
+            )?;
+            tx.execute(
+                "INSERT INTO credential_audit(credential_id,operation,occurred_at)
+                 VALUES (?,'issued',?)",
+                params![credential_id, now],
+            )?;
+            self.checkpoint("registration-credential")?;
+            let receipt = RegistrationReceipt {
+                principal: principal_descriptor(tx, &principal_id)?,
+                credential_id: credential_id.clone(),
+            };
+            let response_json =
+                serde_json::to_string(&receipt).map_err(|_| BootstrapError::CorruptJournal)?;
+            tx.execute(
+                "INSERT INTO registration_receipts(
+                    token_hash,credential_id,principal_id,request_json,response_json,created_at
+                 ) VALUES (?,?,?,?,?,?)",
+                params![
+                    token_hash,
+                    credential_id,
+                    principal_id,
+                    request_json,
+                    response_json,
+                    now
+                ],
+            )?;
+            self.checkpoint("registration-receipt")?;
+            Ok(RegistrationOutcome {
+                receipt,
+                replayed: false,
+            })
         })
     }
 
@@ -701,6 +829,106 @@ impl BootstrapService {
             tx.execute("UPDATE enrollment_installations SET recovery_authorized=1 WHERE adapter_id=? AND instance_id=?",params![adapter_id,instance_id])?;
             self.checkpoint("recovery-authorized")?;
             Ok(AdapterProvisionResponse {adapter_id:adapter_id.into(),principal_id:principal})
+        })
+    }
+
+    pub fn recover_principal(
+        &self,
+        request: &PrincipalRecoveryRequest,
+    ) -> Result<PrincipalRecoveryResponse, BootstrapError> {
+        request.validate()?;
+        self.transaction(|tx| {
+            let now = self.now()?;
+            let principal = match principal_descriptor(tx, &request.principal_id) {
+                Err(BootstrapError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {
+                    return Err(BootstrapError::NotFound);
+                }
+                result => result?,
+            };
+            tx.execute(
+                "INSERT INTO credential_audit(credential_id,operation,occurred_at,reason)
+                 SELECT id,'recovered',?,? FROM credentials
+                 WHERE principal_id=? AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR julianday(expires_at)>julianday(?))",
+                params![now, request.reason, request.principal_id, now],
+            )?;
+            tx.execute(
+                "UPDATE credentials
+                 SET revoked_at=?,revocation_reason=coalesce(?,'principal recovery')
+                 WHERE principal_id=? AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR julianday(expires_at)>julianday(?))",
+                params![now, request.reason, request.principal_id, now],
+            )?;
+            self.checkpoint("principal-recovery-revoked")?;
+            tx.execute(
+                "UPDATE enrollment_tickets SET invalidated_at=?
+                 WHERE principal_id=? AND consumed_at IS NULL AND invalidated_at IS NULL",
+                params![now, request.principal_id],
+            )?;
+            tx.execute(
+                "UPDATE enrollment_installations SET recovery_authorized=0
+                 WHERE adapter_id IN (
+                    SELECT adapter_id FROM adapter_identities WHERE principal_id=?
+                 )",
+                [&request.principal_id],
+            )?;
+            let mut adapters = tx.prepare(
+                "SELECT adapter_id FROM adapter_identities WHERE principal_id=? ORDER BY adapter_id",
+            )?;
+            let adapter_ids = adapters
+                .query_map([&request.principal_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(adapters);
+            for adapter_id in adapter_ids {
+                delivery::close_claims(tx, &adapter_id, &now, true)?;
+            }
+            self.checkpoint("principal-recovery-authority")?;
+            let replacement = self.issue_principal(tx, &request.principal_id, &now)?;
+            self.checkpoint("principal-recovery-issued")?;
+            tx.execute(
+                "INSERT INTO audit_events(
+                    id,event_type,subject_type,subject_id,detail_json,created_at
+                 ) VALUES (?,?,?,?,?,?)",
+                params![
+                    format!("recovery-{}", self.secret()?),
+                    "principal-credential-recovered",
+                    "principal",
+                    request.principal_id,
+                    serde_json::json!({"reason": request.reason}).to_string(),
+                    now
+                ],
+            )?;
+            Ok(PrincipalRecoveryResponse {
+                principal,
+                replacement_secret: OneTimeReplacementSecret {
+                    credential_id: replacement.credential_id,
+                    secret: replacement.secret,
+                },
+            })
+        })
+    }
+
+    fn issue_principal(
+        &self,
+        tx: &Transaction<'_>,
+        principal: &str,
+        now: &str,
+    ) -> Result<OneTimePrincipalClientSecret, BootstrapError> {
+        let credential_id = format!("cred-{}", self.secret()?);
+        let secret = self.secret()?;
+        tx.execute(
+            "INSERT INTO credentials(id,principal_id,class,token_hash,created_at)
+             VALUES (?,?,'principal-client',?,?)",
+            params![credential_id, principal, digest(&secret), now],
+        )?;
+        tx.execute(
+            "INSERT INTO credential_audit(credential_id,operation,occurred_at)
+             VALUES (?,'issued',?)",
+            params![credential_id, now],
+        )?;
+        Ok(OneTimePrincipalClientSecret {
+            credential_id,
+            secret,
         })
     }
 

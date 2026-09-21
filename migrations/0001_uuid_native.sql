@@ -4,10 +4,10 @@ PRAGMA foreign_keys=ON;
 -- central database; existing database files are never migrated or rewritten.
 CREATE TABLE schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 8),
+    version INTEGER NOT NULL CHECK (version = 9),
     format TEXT NOT NULL CHECK (format = 'uuid-native-v1')
 );
-INSERT INTO schema_contract(singleton, version, format) VALUES (1, 8, 'uuid-native-v1');
+INSERT INTO schema_contract(singleton, version, format) VALUES (1, 9, 'uuid-native-v1');
 
 CREATE TABLE principals (
     id TEXT PRIMARY KEY CHECK (
@@ -41,6 +41,24 @@ CREATE TABLE credentials (
     FOREIGN KEY (adapter_id, principal_id)
         REFERENCES adapter_identities(adapter_id, principal_id)
 );
+CREATE TABLE registration_receipts (
+    token_hash TEXT PRIMARY KEY REFERENCES credentials(token_hash),
+    credential_id TEXT NOT NULL UNIQUE REFERENCES credentials(id),
+    principal_id TEXT NOT NULL UNIQUE REFERENCES principals(id),
+    request_json TEXT NOT NULL CHECK (json_valid(request_json)=1 AND json_type(request_json)='object'),
+    response_json TEXT NOT NULL CHECK (json_valid(response_json)=1 AND json_type(response_json)='object'),
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER registration_receipts_are_immutable
+BEFORE UPDATE ON registration_receipts
+BEGIN SELECT RAISE(ABORT, 'registration receipts are immutable'); END;
+CREATE TRIGGER registration_receipts_are_retained
+BEFORE DELETE ON registration_receipts
+BEGIN SELECT RAISE(ABORT, 'registration receipts are retained'); END;
+CREATE TRIGGER registration_credential_digest_is_immutable
+BEFORE UPDATE OF token_hash ON credentials
+WHEN EXISTS(SELECT 1 FROM registration_receipts WHERE credential_id=OLD.id)
+BEGIN SELECT RAISE(ABORT, 'registration credential digest is immutable'); END;
 CREATE TABLE spaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 128),

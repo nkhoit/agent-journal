@@ -25,6 +25,7 @@ class BootstrapTest(unittest.TestCase):
     def setUp(self):
         self.outputs = []
         self.arguments = []
+        self.secrets = []
         self.directory = Path("target") / f"s4-bootstrap-{os.getpid()}"
         self.directory.mkdir(mode=0o700, parents=True)
         self.socket = self.directory / "admin.sock"
@@ -110,7 +111,6 @@ class BootstrapTest(unittest.TestCase):
             return error.code, error.read()
 
     def provision(self):
-        self.secrets = []
         self.admin("principal-create", "principal-example", "Example")
         self.admin("space-create", "space-example", "Example")
         self.admin("membership-set", "space-example", "principal-example",
@@ -132,10 +132,20 @@ class BootstrapTest(unittest.TestCase):
         self.secrets.append(value["secret"])
         return value
 
-    def proxy(self, callback, unix=False, lose_response=False, expected_status=200):
+    def register(self, state, endpoint=None, succeeds=True):
+        return self.cli("aj", "register", "--endpoint", endpoint or self.endpoint,
+                        "--state-file", self.directory / state,
+                        "--handle", "registered-example",
+                        "--display-name", "Registered Example",
+                        succeeds=succeeds)
+
+    def proxy(self, callback, unix=False, lose_response=False, expected_status=200,
+              response_count=1):
         """Forward one exchange, then fail at a deterministic post-commit boundary."""
         listener = socket.socket(socket.AF_UNIX if unix else socket.AF_INET)
         address = str(self.directory / "proxy.sock") if unix else ("127.0.0.1", 0)
+        if unix:
+            Path(address).unlink(missing_ok=True)
         listener.bind(address)
         listener.listen(1)
         listener.settimeout(PROCESS_TIMEOUT)
@@ -144,41 +154,47 @@ class BootstrapTest(unittest.TestCase):
 
         def run():
             try:
-                with listener, listener.accept()[0] as downstream:
-                    downstream.settimeout(35)
-                    source = downstream.makefile("rb")
-                    first = source.readline()
-                    headers = []
-                    length = 0
-                    while (line := source.readline()) != b"\r\n":
-                        if not line:
-                            raise RuntimeError("incomplete request")
-                        headers.append(line)
-                        if line.lower().startswith(b"content-length:"):
-                            length = int(line.split(b":", 1)[1])
-                    body = source.read(length)
-                    if unix:
-                        upstream = socket.socket(socket.AF_UNIX)
-                        upstream.connect(str(self.socket))
-                    else:
-                        host, port = self.endpoint.removeprefix("http://").split(":")
-                        upstream = socket.create_connection((host, int(port)), timeout=35)
-                    upstream.settimeout(35)
-                    with upstream:
-                        upstream.sendall(first + b"".join(headers) + b"\r\n" + body)
-                        response = http.client.HTTPResponse(upstream)
-                        response.begin()
-                        payload = response.read()
-                        request_id = response.getheader("X-Request-ID", "")
-                        if response.status != expected_status:
-                            raise RuntimeError("forwarded operation failed")
-                        callback(payload)
-                        if not lose_response:
-                            downstream.sendall(
-                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                                + f"X-Request-ID: {request_id}\r\n".encode()
-                                + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
-                                + payload)
+                with listener:
+                    for index in range(response_count):
+                        with listener.accept()[0] as downstream:
+                            downstream.settimeout(35)
+                            source = downstream.makefile("rb")
+                            first = source.readline()
+                            headers = []
+                            length = 0
+                            while (line := source.readline()) != b"\r\n":
+                                if not line:
+                                    raise RuntimeError("incomplete request")
+                                headers.append(line)
+                                if line.lower().startswith(b"content-length:"):
+                                    length = int(line.split(b":", 1)[1])
+                            body = source.read(length)
+                            if unix:
+                                upstream = socket.socket(socket.AF_UNIX)
+                                upstream.connect(str(self.socket))
+                            else:
+                                host, port = self.endpoint.removeprefix("http://").split(":")
+                                upstream = socket.create_connection((host, int(port)), timeout=35)
+                            upstream.settimeout(35)
+                            with upstream:
+                                upstream.sendall(first + b"".join(headers) + b"\r\n" + body)
+                                response = http.client.HTTPResponse(upstream)
+                                response.begin()
+                                payload = response.read()
+                                request_id = response.getheader("X-Request-ID", "")
+                                expected = (expected_status[index]
+                                            if isinstance(expected_status, tuple)
+                                            else expected_status)
+                                if response.status != expected:
+                                    raise RuntimeError("forwarded operation failed")
+                                callback(payload)
+                                if not lose_response or index > 0:
+                                    downstream.sendall(
+                                        f"HTTP/1.1 {response.status} OK\r\n".encode()
+                                        + b"Content-Type: application/json\r\n"
+                                        + f"X-Request-ID: {request_id}\r\n".encode()
+                                        + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                                        + payload)
             except Exception as error:
                 failures.append(type(error).__name__)
 
@@ -270,6 +286,202 @@ class BootstrapTest(unittest.TestCase):
                 self.assertNotIn(secret.encode(), path.read_bytes())
         for secret in self.secrets:
             self.assertNotIn(secret, self.trace.read_text())
+
+    def test_registration_response_loss_retries_the_same_identity(self):
+        committed = []
+        endpoint, thread, errors = self.proxy(
+            lambda payload: committed.append(json.loads(payload)),
+            lose_response=True,
+            expected_status=(201, 200),
+            response_count=2,
+        )
+        failed = self.register("registration", endpoint=endpoint, succeeds=False)
+        self.assertIn(b"registration_response_failed", failed.stderr)
+
+        pending = json.loads((self.directory / "registration").read_text())
+        self.secrets.append(pending["token"])
+        retried = self.register("registration", endpoint=endpoint)
+        thread.join(timeout=PROCESS_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        receipt = json.loads(retried.stdout)
+        self.assertEqual(receipt, committed[0])
+        completed = self.credential("registration")
+        self.assertEqual(completed["principal"], receipt["principal"])
+        self.assertEqual(completed["credential_id"], receipt["credential_id"])
+        completed_retry = self.register("registration", endpoint=endpoint)
+        self.assertEqual(json.loads(completed_retry.stdout), receipt)
+        self.assertEqual(
+            self.request("/v1/me", completed["secret"])[0],
+            200,
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM principals WHERE id=?",
+                [receipt["principal"]["id"]],
+            ).fetchone()[0],
+                             1)
+
+    def test_concurrent_registration_resumes_share_one_completed_state(self):
+        committed = []
+
+        def delay_response(payload):
+            committed.append(json.loads(payload))
+            time.sleep(0.2)
+
+        endpoint, thread, errors = self.proxy(
+            delay_response, expected_status=201)
+        arguments = [
+            str(self.bin / "aj"), "register",
+            "--endpoint", endpoint,
+            "--state-file", str(self.directory / "concurrent-registration"),
+            "--handle", "registered-example",
+            "--display-name", "Registered Example",
+        ]
+        first = subprocess.Popen(arguments, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
+        second = subprocess.Popen(arguments, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        first_output = first.communicate(timeout=PROCESS_TIMEOUT)
+        second_output = second.communicate(timeout=PROCESS_TIMEOUT)
+        self.outputs.extend(first_output + second_output)
+        self.arguments.extend([" ".join(arguments[1:])] * 2)
+        thread.join(timeout=PROCESS_TIMEOUT)
+        self.assertEqual(errors, [])
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(json.loads(first_output[0]), committed[0])
+        self.assertEqual(json.loads(second_output[0]), committed[0])
+        credential = self.credential("concurrent-registration")
+        self.assertEqual(self.request("/v1/me", credential["secret"])[0], 200)
+
+    def test_registration_process_kill_preserves_resumable_state(self):
+        listener = socket.socket(socket.AF_INET)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(PROCESS_TIMEOUT)
+        endpoint = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        request_received = threading.Event()
+        release_first = threading.Event()
+        failures = []
+
+        def server():
+            try:
+                with listener:
+                    with listener.accept()[0] as first:
+                        first.settimeout(35)
+                        source = first.makefile("rb")
+                        while source.readline() != b"\r\n":
+                            pass
+                        request_received.set()
+                        release_first.wait(PROCESS_TIMEOUT)
+                    with listener.accept()[0] as downstream:
+                        downstream.settimeout(35)
+                        source = downstream.makefile("rb")
+                        request_line = source.readline()
+                        headers = []
+                        length = 0
+                        while (line := source.readline()) != b"\r\n":
+                            headers.append(line)
+                            if line.lower().startswith(b"content-length:"):
+                                length = int(line.split(b":", 1)[1])
+                        body = source.read(length)
+                        host, port = self.endpoint.removeprefix("http://").split(":")
+                        with socket.create_connection((host, int(port)), timeout=35) as upstream:
+                            upstream.sendall(
+                                request_line + b"".join(headers) + b"\r\n" + body)
+                            response = http.client.HTTPResponse(upstream)
+                            response.begin()
+                            payload = response.read()
+                            downstream.sendall(
+                                f"HTTP/1.1 {response.status} OK\r\n".encode()
+                                + b"Content-Type: application/json\r\n"
+                                + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                                + payload)
+            except Exception as error:
+                failures.append(type(error).__name__)
+
+        thread = threading.Thread(target=server)
+        thread.start()
+        state = self.directory / "killed-registration"
+        arguments = [
+            str(self.bin / "aj"), "register",
+            "--endpoint", endpoint,
+            "--state-file", str(state),
+            "--handle", "registered-example",
+            "--display-name", "Registered Example",
+        ]
+        process = subprocess.Popen(arguments, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        self.assertTrue(request_received.wait(PROCESS_TIMEOUT))
+        process.kill()
+        process.communicate(timeout=PROCESS_TIMEOUT)
+        release_first.set()
+        pending = json.loads(state.read_text())
+        self.secrets.append(pending["token"])
+        self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        resumed = self.register("killed-registration", endpoint=endpoint)
+        thread.join(timeout=PROCESS_TIMEOUT)
+        self.assertEqual(failures, [])
+        receipt = json.loads(resumed.stdout)
+        completed = self.credential("killed-registration")
+        self.assertEqual(receipt["principal"], completed["principal"])
+        self.assertEqual(self.request("/v1/me", completed["secret"])[0], 200)
+
+    def test_registration_state_is_prepared_before_network(self):
+        state = self.directory / "registration-directory"
+        state.mkdir()
+        result = self.register("registration-directory",
+                               endpoint="http://127.0.0.1:9",
+                               succeeds=False)
+        self.assertIn(b"cannot read private registration state", result.stderr)
+
+    def test_principal_recovery_repeats_by_uuid_after_lost_response_and_file_failure(self):
+        receipt = json.loads(self.register("registration").stdout)
+        original = self.credential("registration")
+        inaccessible = []
+
+        def committed(payload):
+            replacement = json.loads(payload)["replacement_secret"]
+            inaccessible.append(replacement)
+            self.secrets.append(replacement["secret"])
+
+        endpoint, thread, errors = self.proxy(
+            committed, unix=True, lose_response=True)
+        self.admin("principal-recover", receipt["principal"]["id"],
+                   self.directory / "lost-replacement",
+                   socket_path=endpoint, succeeds=False)
+        thread.join(timeout=PROCESS_TIMEOUT)
+        self.assertEqual(errors, [])
+        self.assertFalse((self.directory / "lost-replacement").exists())
+        self.assertEqual(self.request("/v1/me", original["secret"])[0], 401)
+
+        recovered_path = self.directory / "recovered"
+        self.admin("principal-recover", receipt["principal"]["id"], recovered_path)
+        recovered = self.credential("recovered")
+        self.assertEqual(self.request("/v1/me", inaccessible[0]["secret"])[0], 401)
+        self.assertEqual(self.request("/v1/me", recovered["secret"])[0], 200)
+
+        failed_path = self.directory / "failed-replacement"
+        endpoint, thread, errors = self.proxy(
+            lambda payload: (
+                committed(payload),
+                failed_path.mkdir(),
+            ),
+            unix=True,
+        )
+        failed = self.admin("principal-recover", receipt["principal"]["id"],
+                            failed_path, socket_path=endpoint, succeeds=False)
+        thread.join(timeout=PROCESS_TIMEOUT)
+        self.assertEqual(errors, [])
+        self.assertIn(b"credential_write_failed", failed.stderr)
+        self.assertEqual(self.request("/v1/me", recovered["secret"])[0], 401)
+
+        self.admin("principal-recover", receipt["principal"]["id"],
+                   self.directory / "final-replacement")
+        final = self.credential("final-replacement")
+        self.assertEqual(self.request("/v1/me", inaccessible[-1]["secret"])[0], 401)
+        self.assertEqual(self.request("/v1/me", final["secret"])[0], 200)
 
     def test_postcommit_enrollment_failures_require_recovery(self):
         self.provision()

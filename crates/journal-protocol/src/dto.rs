@@ -51,6 +51,8 @@ pub enum WireValidationError {
     },
     #[error("{field}: must be an RFC 3339 timestamp")]
     InvalidDateTime { field: &'static str },
+    #[error("{field}: must be a lowercase UUIDv7")]
+    InvalidUuidV7 { field: &'static str },
 }
 
 fn validate_chars(
@@ -76,6 +78,26 @@ fn validate_rfc3339(field: &'static str, value: &str) -> Result<(), WireValidati
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), WireValidationError> {
     domain::validate_identifier(field, value)?;
     Ok(())
+}
+
+fn validate_uuid_v7(field: &'static str, value: &str) -> Result<(), WireValidationError> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes[14] == b'7'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8, 13, 18, 23].contains(&index)
+                || byte.is_ascii_digit()
+                || (b'a'..=b'f').contains(byte)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(WireValidationError::InvalidUuidV7 { field })
+    }
 }
 
 fn validate_optional_identifier(
@@ -510,6 +532,42 @@ impl PrincipalCreateRequest {
         validate_identifier("handle", &self.handle)?;
         validate_chars("display_name", &self.display_name, 1, 128)
     }
+}
+
+pub type RegistrationRequest = PrincipalCreateRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationReceipt {
+    pub principal: domain::Principal,
+    pub credential_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalRecoveryRequest {
+    pub principal_id: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reason: Option<String>,
+}
+
+impl PrincipalRecoveryRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        validate_uuid_v7("principal_id", &self.principal_id)?;
+        if let Some(reason) = &self.reason {
+            validate_chars("reason", reason, 0, 512)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrincipalRecoveryResponse {
+    pub principal: domain::Principal,
+    pub replacement_secret: OneTimeReplacementSecret,
 }
 
 /// A principal-client may update only its own mutable descriptor. A retired

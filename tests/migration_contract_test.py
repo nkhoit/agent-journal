@@ -29,11 +29,11 @@ def main() -> None:
     connection.executescript(MIGRATION.read_text(encoding="utf-8"))
 
     assert connection.execute("SELECT version, format FROM schema_contract").fetchone() == (
-        8,
+        9,
         "uuid-native-v1",
     )
     assert connection.execute("SELECT count(*) FROM schema_contract").fetchone() == (1,)
-    rejects(connection, "UPDATE schema_contract SET version=7")
+    rejects(connection, "UPDATE schema_contract SET version=8")
 
     connection.execute(
         "INSERT INTO principals(id,display_name,created_at) VALUES (?,?,?)",
@@ -72,6 +72,20 @@ def main() -> None:
         "INSERT INTO profile_idempotency_keys(principal_id,idempotency_key,payload_hash,response_json,created_at) VALUES (?,'profile-key','hash','{}',?)",
         (P1, NOW),
     )
+    connection.execute(
+        "INSERT INTO credentials(id,principal_id,class,token_hash,created_at) VALUES ('registration-credential',?,'principal-client',?,?)",
+        (P1, "a" * 64, NOW),
+    )
+    connection.execute(
+        "INSERT INTO registration_receipts(token_hash,credential_id,principal_id,request_json,response_json,created_at) VALUES (?,'registration-credential',?,'{}','{}',?)",
+        ("a" * 64, P1, NOW),
+    )
+    rejects(
+        connection,
+        "UPDATE credentials SET token_hash=? WHERE id='registration-credential'",
+        ("b" * 64,),
+    )
+    rejects(connection, "DELETE FROM registration_receipts")
 
     connection.execute(
         "INSERT INTO principals(id,display_name,created_at) VALUES (?,?,?)",
