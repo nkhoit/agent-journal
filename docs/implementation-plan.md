@@ -6,12 +6,21 @@ This plan turns the reviewed Rust scaffold into a working Agent Journal through 
 
 A proposed clean-break replacement for enrollment and central delivery is in
 [Self-registration and durable inbox specification](registration-inbox-spec.md).
-Its identity and public-space slices are implemented alongside the current delivery
-architecture; durable inbox APIs, client conversion, and delivery retirement remain
-future work. Public policy requires schema 10 and explicit access, permits active
+Its identity, public-space and durable principal-inbox slices are implemented alongside the current delivery
+architecture; client conversion and delivery retirement remain slice 4.
+Public policy requires schema 11 and explicit access, permits active
 authenticated principals without memberships, and preserves archived reads and
 exact append replay. Uncertain recovery inputs now require explicit archive/reset;
 completed verified reconciliation output remains reopenable.
+
+The inbox slice reuses mailbox identity with recipient-local allocation and
+nullable first acknowledgments. GET pages have a captured fixed maximum sequence;
+bodyless POST ack is idempotent. Typed client/CLI and the existing status/viewer
+surface expose receipt state only. Legacy delivery cannot acknowledge or hide
+inbox items. Recovery preserves allocation heads, invalidates inbox cursors, and
+explicitly allows post-backup receipt loss under existing operator loss approval.
+No full inbox snapshot or receipt-delta audit is introduced. This checkpoint is
+not deployment-ready until optional-client conversion and legacy retirement.
 
 - Keep the system boring: concrete structs, explicit SQLite transactions, narrow traits at real process or storage boundaries, and no generic framework layer.
 - Add a dependency only in the slice that exercises it. Pin it, update `Cargo.lock`, and document why it exists.
@@ -67,7 +76,7 @@ Every slice should be one reviewable PR unless its acceptance gate cannot be dem
 
 ### Accept when
 
-- CI reports the expected 33 paths, 35 operations, and 77 fixture mappings.
+- CI reports the expected 35 paths, 37 operations, and 79 fixture mappings.
 - Failure mutations fail deterministically.
 - Early slices may keep binaries as honest stubs; later slices replace them only
   when their executable acceptance gates pass.
@@ -624,7 +633,7 @@ Do not allow `#[ignore]`, a stub return, or a successful empty handler to satisf
 - Add no production dependencies.
 - Preserve status-2 stubs.
 
-**Exit:** explicit coverage of all 33 paths/35 operations and 77 fixture mappings; every mutation fails for the intended reason.
+**Exit:** explicit coverage of all 35 paths/37 operations and 79 fixture mappings; every mutation fails for the intended reason.
 
 ### PR 2 — Domain/protocol kernel
 

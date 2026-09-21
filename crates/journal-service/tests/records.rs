@@ -815,6 +815,7 @@ fn append_replay_read_and_mailbox_are_durable() {
         "records",
         "attention",
         "mailbox_items",
+        "inbox_sequences",
         "delivery_attempts",
         "idempotency_keys",
     ] {
@@ -951,6 +952,7 @@ fn rollback_at_every_append_boundary() {
         "append-relations",
         "append-attention",
         "append-mailbox",
+        "append-inbox-sequence",
         "append-idempotency",
     ] {
         let f = Fixture::new();

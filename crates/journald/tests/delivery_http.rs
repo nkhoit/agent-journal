@@ -202,12 +202,18 @@ async fn custody_telemetry_and_status_http_vertical() {
         .await
         .unwrap();
     assert_eq!(status.status(), StatusCode::OK);
-    let body: DeliveryStatusPage =
+    let body: ReceiptStatusPage =
         decode_json(&to_bytes(status.into_body(), 65536).await.unwrap()).unwrap();
-    assert_eq!(
-        body.items[0].state,
-        domain::DeliveryState::AdapterReportedRuntimeAccepted
-    );
+    assert_eq!(body.items[0].state, ReceiptState::Unacknowledged);
+    let legacy: String = rusqlite::Connection::open(f.directory.join("journal.db"))
+        .unwrap()
+        .query_row(
+            "SELECT state FROM mailbox_items WHERE id=?",
+            [&item.mailbox_item_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(legacy, "adapter-reported-runtime-accepted");
     let public_admin = f
         .router
         .clone()

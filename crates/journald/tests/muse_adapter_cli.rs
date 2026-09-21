@@ -268,11 +268,11 @@ fn cli_once_drops_to_muse_after_custody_with_restart_idempotence() {
             &wire::PageQuery::default(),
         )
         .expect("delivery telemetry");
-    assert_eq!(
-        status.items[0].state,
-        wire::domain::DeliveryState::AdapterReportedRuntimeAccepted
-    );
-    let attempt_id = status.items[0].last_attempt_id.clone().expect("attempt id");
+    assert_eq!(status.items[0].state, wire::ReceiptState::Unacknowledged);
+    let (attempt_id, state): (String, String) = rusqlite::Connection::open(fixture.directory.join("journal.db")).unwrap()
+        .query_row("SELECT attempt_id,state FROM delivery_attempts WHERE mailbox_item_id=? ORDER BY ordinal DESC LIMIT 1",
+            [&status.items[0].inbox_item_id], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(state, "adapter-reported-runtime-accepted");
     let payload: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&drops[0]).expect("drop bytes")).expect("drop JSON");
     assert_eq!(payload["dedupe_key"], attempt_id);

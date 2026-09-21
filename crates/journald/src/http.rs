@@ -657,6 +657,26 @@ async fn journal_operation(
     let request = Request::from_parts(parts, body);
     let space = path.get("space").cloned().unwrap_or_default();
     let record = path.get("record_id").cloned().unwrap_or_default();
+    if route == "/v1/inbox/{item_id}/ack" {
+        if !query.is_empty() || axum::body::to_bytes(request.into_body(), 0).await.is_err() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "acknowledgment requires no body or query",
+                request_id,
+            );
+        }
+        let item = path.get("item_id").cloned().unwrap_or_default();
+        return bootstrap(
+            state,
+            request_id,
+            StatusCode::NO_CONTENT,
+            "inbox_acknowledgment",
+            true,
+            move |s| s.acknowledge_inbox_item(&token, &item),
+        )
+        .await;
+    }
     if method == axum::http::Method::POST {
         let keys = request.headers().get_all("idempotency-key");
         let key = if keys.iter().count() == 1 {
@@ -702,6 +722,13 @@ async fn journal_operation(
         false,
         move |s| {
             let value = match route.as_str() {
+                "/v1/inbox" => serde_json::to_value(
+                    s.inbox(
+                        &token,
+                        &journal_protocol::InboxQuery::from_query(&query)
+                            .map_err(|_| BootstrapError::InvalidJournal)?,
+                    )?,
+                ),
                 "/v1/spaces" => serde_json::to_value(s.list_spaces(
                     &token,
                     &PageQuery::from_query(&query).map_err(|_| BootstrapError::InvalidJournal)?,
@@ -798,6 +825,8 @@ pub(crate) fn public_router_with_timeout(
         .route("/v1/me", get(me))
         .route("/v1/me/profile", patch(update_profile))
         .route("/v1/principals", get(journal_operation))
+        .route("/v1/inbox", get(journal_operation))
+        .route("/v1/inbox/{item_id}/ack", post(journal_operation))
         .route("/v1/spaces", get(journal_operation))
         .route("/v1/spaces/{space}", get(journal_operation))
         .route(
@@ -1035,7 +1064,14 @@ async fn validate_request_body(
             );
         }
     };
-    if is_json && decode_json::<serde_json::Value>(&bytes).is_err() {
+    let bodyless_ack = parts
+        .extensions
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|route| route.as_str() == "/v1/inbox/{item_id}/ack");
+    if is_json
+        && !(bodyless_ack && bytes.is_empty())
+        && decode_json::<serde_json::Value>(&bytes).is_err()
+    {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid-json",

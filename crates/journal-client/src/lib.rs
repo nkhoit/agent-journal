@@ -166,7 +166,7 @@ impl Client {
         token: &str,
         record: &str,
         query: &journal_protocol::PageQuery,
-    ) -> Result<journal_protocol::DeliveryStatusPage, ClientError> {
+    ) -> Result<journal_protocol::ReceiptStatusPage, ClientError> {
         journal_protocol::RecordPath {
             record_id: record.into(),
         }
@@ -185,6 +185,54 @@ impl Client {
                 vec![],
             ),
         )
+    }
+
+    pub fn inbox(
+        &self,
+        token: &str,
+        query: &journal_protocol::InboxQuery,
+    ) -> Result<journal_protocol::InboxPage, ClientError> {
+        query.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.principal(
+            token,
+            Request::new(
+                "GET",
+                format!(
+                    "/v1/inbox?{}",
+                    journal_protocol::query_string(&query.pairs())
+                ),
+                vec![],
+            ),
+        )
+    }
+
+    pub fn acknowledge_inbox_item(&self, token: &str, item: &str) -> Result<(), ClientError> {
+        journal_protocol::MailboxItemPath {
+            item_id: item.into(),
+        }
+        .validate()
+        .map_err(|_| ClientError::InvalidRequest)?;
+        if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ClientError::InvalidRequest);
+        }
+        let mut request = Request::new(
+            "POST",
+            format!("/v1/inbox/{}/ack", journal_protocol::path_segment(item)),
+            vec![],
+        );
+        request
+            .headers
+            .insert("Authorization".into(), format!("Bearer {token}"));
+        let response = self.send(request)?;
+        if response.status != 204 {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        if !response.body.is_empty() {
+            return Err(ClientError::Json);
+        }
+        Ok(())
     }
 
     pub fn list_adapters(

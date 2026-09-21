@@ -1,9 +1,8 @@
 # Self-registration and durable inbox specification
 
-Status: identity and public-space slices implemented. Independent registration, principal credentials,
+Status: identity, public-space and durable-inbox slices implemented. Independent registration, principal credentials,
 `GET /v1/me`, and protected principal-scoped recovery are authoritative in the
-[protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Durable inbox
-operations, optional-client conversion, and retirement of
+[protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Optional-client conversion and retirement of
 the current delivery protocol remain proposed future slices.
 
 ## Product boundary
@@ -138,11 +137,11 @@ the same policy across discovery, reads, append, search, threads, recipient
 validation, inbox fetch, and the optional shared viewer. Filtering must happen
 before content, counts, ranking, or snippets leave storage.
 
-Schema 10 requires explicit `access: "public"` without a default. Membership
+Schema 11 requires explicit `access: "public"` without a default. Membership
 tables, the protected setter, and `Me.memberships` remain transitional metadata;
-they cannot restrict public access. Existing delivery claims/custody/status remain
-until later slices replace them, with current public policy checks and unchanged
-credential separation and status privacy.
+they cannot restrict public access. Existing delivery claims/custody remain until slice 4 replaces them, with current public policy
+checks and unchanged credential separation. The existing record delivery-status
+URL now returns only acknowledgment receipts, with unchanged status privacy.
 
 Recovery deliberately rejects uncertain prepared input intents with an actionable
 archive/reset-required error before durable recovery mutation/publication.
@@ -235,6 +234,15 @@ The first acknowledgment atomically records server time. Repeated requests
 succeed without changing that timestamp. No prior fetch or claim is required.
 A lost response is safely retried.
 
+Ordinary crashes, retries and restarts retain the first committed acknowledgment.
+An intentional restore of an older backup is an explicit exception: the backup's
+receipt state is retained, so newer acknowledgments can be lost and reminders
+can repeat. Existing protected inventory/loss approval must accept that risk.
+External snapshots retain only per-recipient allocation heads, not all inbox
+receipts; restore preserves their high-water marks and invalidates inbox cursors.
+No receipt delta audit or automatic reconstruction is provided. Uncertain
+prepared recovery inputs still require archive/reset.
+
 Acknowledgment means the recipient's client accepts that no further inbox
 reminder is needed for this item. A manual client may acknowledge after fetching;
 a platform integration should acknowledge after its documented handoff succeeds.
@@ -278,6 +286,19 @@ affects both. Initially recommend one automated consumer per principal.
 Competing-worker leases and independent subscriptions are out of scope.
 
 ## Surfaces to retire
+
+Slice 3 reuses `mailbox_items` identities with `recipient_seq` and nullable
+`acknowledged_at`; its only receipt states are derived from that timestamp.
+Legacy state/attempt columns remain temporarily for slice 4. No legacy claim,
+custody, telemetry, suppression or requeue affects receipt state or inbox
+visibility, and acknowledging never implies legacy runtime delivery. The
+intermediate checkpoint is not a deployment release.
+
+`GET /v1/records/{record_id}/delivery-status` retains its URL and the
+`aj delivery-status` command, but returns `ReceiptStatusPage` with
+`inbox_item_id`, `recipient`, receipt `state`, `created_at`, and nullable
+`acknowledged_at`. Attempts and runtime outcomes are absent. The shared viewer
+shows the same receipt-only projection.
 
 Replace, rather than run alongside, the central delivery protocol:
 

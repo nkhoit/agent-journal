@@ -127,10 +127,7 @@ pub(super) fn record(record: &Record) -> String {
     html.push_str("</fieldset><footer>");
     html.push_str(&link(&format!("{path}/thread"), "Thread"));
     html.push_str(" | ");
-    html.push_str(&link(
-        &format!("{path}/delivery-status"),
-        "Delivery summary",
-    ));
+    html.push_str(&link(&format!("{path}/delivery-status"), "Receipt status"));
     html.push_str("</footer></article>");
     html
 }

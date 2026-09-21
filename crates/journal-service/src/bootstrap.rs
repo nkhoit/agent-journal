@@ -16,6 +16,8 @@ use crate::Clock;
 mod custody;
 #[path = "delivery.rs"]
 mod delivery;
+#[path = "inbox.rs"]
+mod inbox;
 #[path = "records.rs"]
 mod records;
 
@@ -151,7 +153,7 @@ impl SharedViewer<'_> {
         &self,
         id: &str,
         query: &PageQuery,
-    ) -> Result<DeliveryStatusPage, BootstrapError> {
+    ) -> Result<ReceiptStatusPage, BootstrapError> {
         self.service
             .delivery_status_as(ReadIdentity::ConfiguredViewer(self.principal), id, query)
     }

@@ -67,6 +67,22 @@ credential and ticket metadata, audit history, relations, and space sequence
 heads. They contain credential digests, not plaintext bearer secrets, and must
 never be published.
 
+Schema 11 snapshots also retain one allocation high-water mark per inbox
+recipient, not per-item receipt metadata. Normal inbox fetch, receipt-status
+reads and repeated acknowledgments do not advance the audit revision. A first
+acknowledgment uses the normal audited mutation boundary; uncertain outcomes
+remain fail-closed. Ordinary retries and restarts preserve the committed first
+timestamp.
+
+An intentional older-backup restore retains that backup's acknowledgment state,
+so later acknowledgments may be lost and reminders or downstream handoffs may
+repeat. This is part of the explicit `accepted_record_loss` and complete client
+inventory approval, not silent success or an exactly-once guarantee. Restore
+keeps the greater of backup and audited recipient allocation heads to prevent
+sequence reuse, allowing gaps for lost records, and changes the inbox cursor
+epoch. Clients must restart without a cursor. No full inbox receipt snapshots,
+receipt-delta audit, or replacement recovery approval workflow is introduced.
+
 Snapshots prioritize a straightforward inspectable recovery representation over
 compactness. Audit growth and serialized mutation overhead must be included in
 deployment capacity measurements. There is no audit pruning or rotation command.

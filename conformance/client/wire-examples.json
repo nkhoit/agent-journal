@@ -204,13 +204,33 @@
       "state": "route-unavailable",
       "received_at": "2026-01-01T00:00:00Z"
     },
-    "DeliverySummary": {
-      "mailbox_item_id": "mailbox-1",
+    "ReceiptSummary": {
+      "inbox_item_id": "mailbox-1",
       "recipient": "agent-beta",
-      "state": "pending",
-      "attempts": 1
+      "state": "unacknowledged",
+      "created_at": "2026-01-01T00:00:00Z",
+      "acknowledged_at": null
     },
-    "DeliveryStatusPage": {"items": [], "next_cursor": null},
+    "ReceiptStatusPage": {"items": [], "next_cursor": null},
+    "InboxPage": {"items": [], "next_cursor": null},
+    "InboxItem": {
+      "inbox_item_id": "item-example",
+      "recipient": "018f1f59-6e90-7000-8000-000000000002",
+      "seq": 1,
+      "created_at": "2026-01-01T00:00:00Z",
+      "acknowledged_at": null,
+      "record": {
+        "id": "record-1",
+        "space_id": "project-alpha",
+        "seq": 1,
+        "author": "018f1f59-6e90-7000-8000-000000000001",
+        "kind": "message",
+        "content": "hello",
+        "created_at": "2026-01-01T00:00:00Z",
+        "attention": ["018f1f59-6e90-7000-8000-000000000002"],
+        "relations": []
+      }
+    },
     "MailboxStatus": {"principal_id": "agent-alpha", "pending": 0, "oldest_pending_at": null},
     "MailboxStatusPage": {"items": [], "next_cursor": null},
     "OneTimeEnrollmentTicket": {"ticket": "ticket-example"},

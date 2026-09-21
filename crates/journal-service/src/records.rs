@@ -405,6 +405,7 @@ impl BootstrapService {
             }
             let actor = self.journal_actor(tx, token)?;
             permitted(tx, &actor, space, true)?;
+            self.cursor_codec(tx)?;
             let mut input = input.clone();
             for recipient in &mut input.attention {
                 let principal_id = active_principal(tx, recipient)?;
@@ -437,8 +438,12 @@ impl BootstrapService {
                 tx.execute("INSERT INTO attention(record_id,recipient_principal_id,created_at) VALUES (?,?,?)", params![id,recipient,now])?;
                 self.checkpoint("append-attention")?;
                 // The mailbox_initial_attempt trigger owns ordinal 1.
-                tx.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at) VALUES (?,?,?,'pending',?,?)",
-                    params![format!("item-{}", self.secret()?),id,recipient,now,now])?;
+                tx.execute("INSERT INTO inbox_sequences(recipient_principal_id,last_seq) VALUES (?,1)
+                    ON CONFLICT(recipient_principal_id) DO UPDATE SET last_seq=last_seq+1", [recipient])?;
+                let recipient_seq: i64 = tx.query_row("SELECT last_seq FROM inbox_sequences WHERE recipient_principal_id=?", [recipient], |r| r.get(0))?;
+                self.checkpoint("append-inbox-sequence")?;
+                tx.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at,recipient_seq) VALUES (?,?,?,'pending',?,?,?)",
+                    params![format!("item-{}", self.secret()?),id,recipient,now,now,recipient_seq])?;
                 self.checkpoint("append-mailbox")?;
             }
             let result = AppendResult {
@@ -713,7 +718,7 @@ fn thread_ids(
     Ok(result)
 }
 
-fn permitted(
+pub(super) fn permitted(
     tx: &Transaction<'_>,
     principal: &str,
     space: &str,

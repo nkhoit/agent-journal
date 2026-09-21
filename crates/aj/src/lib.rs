@@ -15,6 +15,8 @@ Commands:
   list --endpoint URL --credential-file PATH --space SPACE [filters]
   search --endpoint URL --credential-file PATH --space SPACE --q QUERY [filters]
   thread --endpoint URL --credential-file PATH --record RECORD_ID [--cursor CURSOR] [--limit N]
+  inbox --endpoint URL --credential-file PATH [--state unacknowledged|acknowledged|all] [--cursor CURSOR] [--limit N]
+  inbox-ack --endpoint URL --credential-file PATH --item ID
   adapter-register --endpoint URL --credential-file PATH --instance ID
   adapter-heartbeat --endpoint URL --credential-file PATH --instance ID --generation N
   mailbox-claim --endpoint URL --credential-file PATH --instance ID --generation N --limit N
@@ -24,7 +26,7 @@ Commands:
   delivery-status --endpoint URL --credential-file PATH --record RECORD_ID [filters]
   enroll --endpoint URL --ticket-file PATH --instance-id ID --principal-file PATH --delivery-file PATH
 
-Journal command responses are compact JSON on stdout; enrollment writes
+Journal reads return compact JSON on stdout; inbox-ack returns no output. Enrollment writes
 protected files and emits no secret-bearing output. Use `aj --help` for this summary.";
 
 pub fn run(args: &[String], mut error: impl Write) -> i32 {
@@ -236,7 +238,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     use std::collections::BTreeMap;
     let Some(command) = args.first().map(String::as_str) else {
         return Err(
-            "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
+            "expected me, spaces, post, get, list, search, thread, inbox, inbox-ack, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
         );
     };
     let allowed: &[&str] = match command {
@@ -247,6 +249,8 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         "custody-commit" => &["--claim", "--input"],
         "delivery-event" => &["--item", "--input"],
         "delivery-status" => &["--record", "--cursor", "--limit"],
+        "inbox" => &["--state", "--cursor", "--limit"],
+        "inbox-ack" => &["--item"],
         "me" => &[],
         "spaces" => &["--cursor", "--limit"],
         "post" => &["--space", "--idempotency-key", "--input"],
@@ -274,7 +278,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         ],
         _ => {
             return Err(
-                "expected me, spaces, post, get, list, search, thread, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
+                "expected me, spaces, post, get, list, search, thread, inbox, inbox-ack, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
             );
         }
     };
@@ -314,6 +318,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
                 "--q",
                 "--since",
                 "--order",
+                "--state",
             ]
             .contains(key)
         })
@@ -327,6 +332,11 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     let query = query_string(&query_pairs);
     let token = &credential.secret;
     let result = match command {
+        "inbox" => serde_json::to_value(client.inbox(token, &InboxQuery::from_query(&query).map_err(|_|"invalid inbox query")?).map_err(|_|"inbox fetch failed")?),
+        "inbox-ack" => {
+            client.acknowledge_inbox_item(token,required("--item")?).map_err(|_|"acknowledgment failed or response lost; retry the same item")?;
+            return Ok(());
+        },
         "custody-commit" => {
             let input: CommitRequest=decode_json(&read_input(required("--input")?)?).map_err(|_|"invalid commit JSON")?;
             serde_json::to_value(client.commit_custody(token,required("--claim")?,&input).map_err(|_|"commit failed or response lost; retry the exact claim and attempts")?)

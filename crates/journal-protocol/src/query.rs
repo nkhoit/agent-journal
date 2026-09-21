@@ -1,6 +1,27 @@
 use crate::{ListPrincipalsQuery, ListRecordsQuery, PageQuery, SearchOrder, SearchRecordsQuery};
 use std::collections::BTreeMap;
 
+impl crate::InboxQuery {
+    pub fn from_query(query: &str) -> Result<Self, InvalidQuery> {
+        let values = parse(query, &["state", "cursor", "limit"])?;
+        Ok(Self {
+            state: match values.get("state").map(String::as_str) {
+                None | Some("unacknowledged") => crate::InboxState::Unacknowledged,
+                Some("acknowledged") => crate::InboxState::Acknowledged,
+                Some("all") => crate::InboxState::All,
+                _ => return Err(InvalidQuery),
+            },
+            page: page(&values)?,
+        })
+    }
+
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        let mut pairs = self.page.pairs();
+        pairs.push(("state".into(), self.state.as_str().into()));
+        pairs
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidQuery;
 

@@ -4,10 +4,10 @@ PRAGMA foreign_keys=ON;
 -- central database; existing database files are never migrated or rewritten.
 CREATE TABLE schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 10),
+    version INTEGER NOT NULL CHECK (version = 11),
     format TEXT NOT NULL CHECK (format = 'uuid-native-v1')
 );
-INSERT INTO schema_contract(singleton, version, format) VALUES (1, 10, 'uuid-native-v1');
+INSERT INTO schema_contract(singleton, version, format) VALUES (1, 11, 'uuid-native-v1');
 
 CREATE TABLE principals (
     id TEXT PRIMARY KEY CHECK (
@@ -155,6 +155,17 @@ WHEN OLD.consumed_at IS NOT NULL OR NEW.consumed_at IS NULL
 BEGIN
     SELECT RAISE(ABORT, 'enrollment ticket already consumed');
 END;
+CREATE TABLE inbox_sequences (
+    recipient_principal_id TEXT PRIMARY KEY REFERENCES principals(id),
+    last_seq INTEGER NOT NULL CHECK (typeof(last_seq) = 'integer' AND last_seq > 0)
+);
+CREATE TRIGGER inbox_sequence_is_monotonic
+BEFORE UPDATE ON inbox_sequences
+WHEN NEW.recipient_principal_id IS NOT OLD.recipient_principal_id OR NEW.last_seq < OLD.last_seq
+BEGIN SELECT RAISE(ABORT, 'inbox sequence cannot decrease'); END;
+CREATE TRIGGER inbox_sequence_is_retained
+BEFORE DELETE ON inbox_sequences
+BEGIN SELECT RAISE(ABORT, 'inbox sequence is retained'); END;
 CREATE TABLE mailbox_items (
     id TEXT PRIMARY KEY,
     record_id TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
@@ -162,8 +173,26 @@ CREATE TABLE mailbox_items (
     state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'host-accepted', 'adapter-reported-runtime-accepted', 'adapter-reported-retryable-failure', 'route-unavailable', 'adapter-reported-terminal-failure', 'suppressed-revoked')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    recipient_seq INTEGER NOT NULL CHECK (typeof(recipient_seq) = 'integer' AND recipient_seq > 0),
+    acknowledged_at TEXT,
+    UNIQUE (recipient_principal_id, recipient_seq),
     UNIQUE (record_id, recipient_principal_id)
 );
+CREATE INDEX inbox_unacknowledged ON mailbox_items(recipient_principal_id, recipient_seq)
+    WHERE acknowledged_at IS NULL;
+CREATE TRIGGER inbox_identity_is_immutable
+BEFORE UPDATE OF id,record_id,recipient_principal_id,recipient_seq,created_at ON mailbox_items
+WHEN NEW.id IS NOT OLD.id OR NEW.record_id IS NOT OLD.record_id
+ OR NEW.recipient_principal_id IS NOT OLD.recipient_principal_id
+ OR NEW.recipient_seq IS NOT OLD.recipient_seq OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'inbox identity is immutable'); END;
+CREATE TRIGGER inbox_first_acknowledgment_is_immutable
+BEFORE UPDATE OF acknowledged_at ON mailbox_items
+WHEN OLD.acknowledged_at IS NOT NULL AND NEW.acknowledged_at IS NOT OLD.acknowledged_at
+BEGIN SELECT RAISE(ABORT, 'first acknowledgment is immutable'); END;
+CREATE TRIGGER inbox_items_are_retained
+BEFORE DELETE ON mailbox_items
+BEGIN SELECT RAISE(ABORT, 'inbox items are retained'); END;
 CREATE INDEX mailbox_pending_by_recipient
     ON mailbox_items(recipient_principal_id, state, created_at, id);
 CREATE TABLE delivery_attempts (
@@ -439,10 +468,11 @@ CREATE TABLE recovery_anchor (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     journal_id TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision >= 0),
-    audit_required INTEGER NOT NULL CHECK (audit_required IN (0, 1))
+    audit_required INTEGER NOT NULL CHECK (audit_required IN (0, 1)),
+    inbox_epoch INTEGER NOT NULL DEFAULT 0 CHECK (inbox_epoch >= 0)
 );
 -- Handles (including UUID-looking handles) resolve only through this table.
-INSERT INTO recovery_anchor VALUES (1, lower(hex(randomblob(32))), 0, 0);
+INSERT INTO recovery_anchor VALUES (1, lower(hex(randomblob(32))), 0, 0, 0);
 
 CREATE TABLE principal_names (
     name TEXT PRIMARY KEY CHECK (length(name) BETWEEN 1 AND 128),

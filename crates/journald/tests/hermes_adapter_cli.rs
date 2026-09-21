@@ -114,7 +114,7 @@ struct HermesProbe {
 }
 
 impl HermesProbe {
-    fn new(central_endpoint: String, principal: String, record_id: String) -> Self {
+    fn new(database_path: PathBuf, record_id: String) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Hermes listener");
         let address = listener.local_addr().expect("Hermes address");
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -135,8 +135,7 @@ impl HermesProbe {
                     stream,
                     &thread_requests,
                     &thread_custody,
-                    &central_endpoint,
-                    &principal,
+                    &database_path,
                     &record_id,
                 );
             }
@@ -170,8 +169,7 @@ fn handle_hermes(
     mut stream: TcpStream,
     requests: &Arc<Mutex<Vec<String>>>,
     custody_before_run: &Arc<AtomicBool>,
-    central_endpoint: &str,
-    principal: &str,
+    database_path: &Path,
     record_id: &str,
 ) {
     stream
@@ -212,16 +210,11 @@ fn handle_hermes(
     }
     requests.lock().expect("Hermes requests").push(path.clone());
     if path == "/v1/runs" {
-        let client = Client::new(HttpTransport::new(central_endpoint).expect("central transport"));
-        let page = client
-            .delivery_status(principal, record_id, &wire::PageQuery::default())
-            .expect("central status while injecting");
-        custody_before_run.store(
-            page.items
-                .first()
-                .is_some_and(|item| item.state == wire::domain::DeliveryState::HostAccepted),
-            Ordering::Release,
-        );
+        let connection = rusqlite::Connection::open(database_path).unwrap();
+        let custodied: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_items m JOIN host_custody h ON h.mailbox_item_id=m.id WHERE m.record_id=? AND m.state='host-accepted')",
+            [record_id], |r| r.get(0)).unwrap();
+        custody_before_run.store(custodied, Ordering::Release);
     }
     let (status, body) = match path.as_str() {
         "/health" => (200, b"{}".to_vec()),
@@ -345,11 +338,7 @@ fn cli_once_uses_real_journald_spool_and_hermes_runs_ordering() {
         )
         .expect("append record")
         .record;
-    let probe = HermesProbe::new(
-        central_endpoint.clone(),
-        fixture.principal_credential.clone(),
-        record.id.clone(),
-    );
+    let probe = HermesProbe::new(fixture.directory.join("journal.db"), record.id.clone());
     let delivery_file = fixture.directory.join("delivery.credential");
     let hermes_key_file = fixture.directory.join("hermes.key");
     write_private(
@@ -410,11 +399,11 @@ fn cli_once_uses_real_journald_spool_and_hermes_runs_ordering() {
             &wire::PageQuery::default(),
         )
         .expect("delivery telemetry");
-    assert_eq!(
-        status.items[0].state,
-        wire::domain::DeliveryState::AdapterReportedRuntimeAccepted
-    );
-    let attempt_id = status.items[0].last_attempt_id.clone().expect("attempt id");
+    assert_eq!(status.items[0].state, wire::ReceiptState::Unacknowledged);
+    let (attempt_id, state): (String, String) = rusqlite::Connection::open(fixture.directory.join("journal.db")).unwrap()
+        .query_row("SELECT attempt_id,state FROM delivery_attempts WHERE mailbox_item_id=? ORDER BY ordinal DESC LIMIT 1",
+            [&status.items[0].inbox_item_id], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(state, "adapter-reported-runtime-accepted");
     let spool = SqliteStore::open(fixture.directory.join("spool.db"), Limits::default())
         .expect("spool reopen");
     let item = spool.get(&attempt_id).expect("persisted spool item");

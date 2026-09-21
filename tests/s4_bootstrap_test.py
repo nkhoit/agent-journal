@@ -202,6 +202,52 @@ class BootstrapTest(unittest.TestCase):
         thread.start()
         return endpoint, thread, failures
 
+    def test_registered_principal_inbox_cli_without_adapter(self):
+        self.admin("space-create", "inbox-space", "Inbox Space")
+        for handle in ["alpha", "beta"]:
+            self.cli("aj", "register", "--endpoint", self.endpoint,
+                     "--state-file", self.directory / handle,
+                     "--handle", handle, "--display-name", handle.title())
+            self.credential(handle)
+        def command(handle, name, *args, endpoint=None, succeeds=True):
+            return self.cli("aj", name, "--endpoint", endpoint or self.endpoint,
+                            "--credential-file", self.directory / handle,
+                            *args, succeeds=succeeds)
+        body = self.directory / "message.json"
+        body.write_text(json.dumps({"kind": "message", "content": "inbox CLI",
+                                    "attention": ["alpha", "beta"]}))
+        posted = command("alpha", "post", "--space", "inbox-space",
+                         "--idempotency-key", "stable", "--input", body)
+        replay = command("alpha", "post", "--space", "inbox-space",
+                         "--idempotency-key", "stable", "--input", body)
+        self.assertEqual(posted.stdout, replay.stdout)
+        record = json.loads(posted.stdout)["record"]
+        page = json.loads(command("beta", "inbox").stdout)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertEqual(page["items"][0]["record"], record)
+        self.assertIsNone(page["items"][0]["acknowledged_at"])
+        item = page["items"][0]["inbox_item_id"]
+        endpoint, thread, failures = self.proxy(
+            lambda payload: self.assertEqual(payload, b""), lose_response=True, expected_status=204)
+        command("beta", "inbox-ack", "--item", item, endpoint=endpoint, succeeds=False)
+        thread.join(PROCESS_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(failures)
+        before = json.loads(command("beta", "inbox", "--state", "acknowledged").stdout)
+        self.assertIsNotNone(before["items"][0]["acknowledged_at"])
+        self.assertEqual(command("beta", "inbox-ack", "--item", item).stdout, b"")
+        self.assertEqual(json.loads(command("beta", "inbox", "--state", "acknowledged").stdout), before)
+        self.assertEqual(json.loads(command("beta", "inbox").stdout)["items"], [])
+        for handle, count in [("alpha", 2), ("beta", 1)]:
+            status = json.loads(command(handle, "delivery-status", "--record", record["id"]).stdout)
+            self.assertEqual(len(status["items"]), count)
+            self.assertNotIn("attempts", status["items"][0])
+        connection = sqlite3.connect(self.database)
+        for table in ["memberships", "adapter_registrations", "adapter_identities"]:
+            self.assertEqual(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT count(*) FROM mailbox_items").fetchone()[0], 2)
+        connection.close()
+
     def test_bootstrap_rotation_auth_and_recovery(self):
         self.provision()
         self.assertEqual(self.socket.stat().st_mode & 0o777, 0o600)
@@ -216,7 +262,9 @@ class BootstrapTest(unittest.TestCase):
                            ("/v1/spaces/example/search", "GET"),
                            ("/v1/records/example", "GET"),
                            ("/v1/records/example/thread", "GET"),
-                           ("/v1/records/example/delivery-status", "GET")]
+                           ("/v1/records/example/delivery-status", "GET"),
+                           ("/v1/inbox", "GET"),
+                           ("/v1/inbox/missing/ack", "POST")]
         delivery_paths = [("/v1/adapters/self/register", "POST"),
                           ("/v1/adapters/self/heartbeat", "POST"),
                           ("/v1/mailbox/claims", "POST"),
@@ -239,6 +287,8 @@ class BootstrapTest(unittest.TestCase):
                     ("/v1/records/example", "GET"): 404,
                     ("/v1/records/example/thread", "GET"): 404,
                     ("/v1/records/example/delivery-status", "GET"): 404,
+                    ("/v1/inbox", "GET"): 200,
+                    ("/v1/inbox/missing/ack", "POST"): 404,
                     ("/v1/adapters/self/register", "POST"): 400,
                     ("/v1/adapters/self/heartbeat", "POST"): 400,
                     ("/v1/mailbox/claims", "POST"): 400,

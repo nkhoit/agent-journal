@@ -1,5 +1,13 @@
 # Adapter authoring
 
+This document describes the transitional adapter protocol pending slice 4.
+Principal inbox fetch/ack is now independently available; legacy adapter custody
+and telemetry never acknowledge those items. Existing record delivery-status
+returns receipt-only status, so it is not a runtime telemetry probe. Hermes/Muse
+conversion is not part of the inbox slice, and this checkpoint is not a deployment
+release. Future clients will hand off then ack using stable inbox IDs for local
+deduplication; a crash before ack can duplicate handoff.
+
 An adapter is a destination-host process, not a second journal implementation. It transfers one principal's central mailbox obligations into a vendor runtime while keeping runtime identifiers and bindings local.
 
 ## Required boundary

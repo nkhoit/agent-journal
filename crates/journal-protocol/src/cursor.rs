@@ -25,6 +25,7 @@ pub enum CursorRoute {
     MailboxStatus,
     RecordDeliveryStatus,
     AdminMailboxStatus,
+    Inbox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ pub enum CursorOrder {
     Sequence,
     Rank,
     UpdatedAt,
+    BoundedSequence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,7 @@ pub enum CursorPosition {
     Sequence { sequence: u64, id: String },
     Rank { score_bits: u64, id: String },
     UpdatedAt { timestamp: String, id: String },
+    BoundedSequence { sequence: u64, upper_bound: u64 },
 }
 
 impl CursorPosition {
@@ -53,6 +56,7 @@ impl CursorPosition {
                 | (CursorOrder::Sequence, Self::Sequence { .. })
                 | (CursorOrder::Rank, Self::Rank { .. })
                 | (CursorOrder::UpdatedAt, Self::UpdatedAt { .. })
+                | (CursorOrder::BoundedSequence, Self::BoundedSequence { .. })
         )
     }
 }

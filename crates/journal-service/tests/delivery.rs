@@ -352,11 +352,34 @@ fn retryable_success_replay_and_requeue_keep_history_and_fence_old_attempts() {
         .service
         .delivery_status(&f.client, &item.record.id, &PageQuery::default())
         .unwrap();
-    assert_eq!(status.items[0].state, domain::DeliveryState::Pending);
-    assert_eq!(status.items[0].attempts, 2);
+    assert_eq!(status.items[0].state, ReceiptState::Unacknowledged);
+    let inbox_before = f.service.inbox(&f.client, &InboxQuery::default()).unwrap();
+    assert_eq!(inbox_before.items[0].inbox_item_id, item.mailbox_item_id);
+    assert!(inbox_before.items[0].acknowledged_at.is_none());
+    f.service
+        .acknowledge_inbox_item(&f.client, &item.mailbox_item_id)
+        .unwrap();
+    assert!(
+        f.service
+            .inbox(&f.client, &InboxQuery::default())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let latest: (i64, String) = f.db.connect().unwrap().query_row(
+        "SELECT ordinal,attempt_id FROM delivery_attempts WHERE mailbox_item_id=? ORDER BY ordinal DESC LIMIT 1",
+        [&item.mailbox_item_id], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(latest, (2, next.attempt_id.clone()));
     assert_eq!(
-        status.items[0].last_attempt_id.as_deref(),
-        Some(next.attempt_id.as_str())
+        f.db.connect()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM mailbox_items WHERE id=?",
+                [&item.mailbox_item_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "pending"
     );
     let conn = f.db.connect().unwrap();
     assert_eq!(
@@ -734,11 +757,11 @@ fn telemetry_transition_matrix_old_attempt_projection_and_atomic_failure() {
             .service
             .delivery_status(&f.client, &item.record.id, &PageQuery::default())
             .unwrap();
-        assert_eq!(status.items[0].state, domain::DeliveryState::Pending);
-        assert_eq!(
-            status.items[0].last_attempt_id.as_ref(),
-            Some(&next.attempt_id)
-        );
+        assert_eq!(status.items[0].state, ReceiptState::Unacknowledged);
+        let latest: String = f.db.connect().unwrap().query_row(
+            "SELECT attempt_id FROM delivery_attempts WHERE mailbox_item_id=? ORDER BY ordinal DESC LIMIT 1",
+            [&item.mailbox_item_id], |r| r.get(0)).unwrap();
+        assert_eq!(latest, next.attempt_id);
         assert_eq!(
             f.service
                 .commit_custody(&f.delivery, &claim.claim_id, &commit_request(&claim))
@@ -800,7 +823,7 @@ fn expired_claim_cannot_borrow_a_later_claims_receipt() {
 }
 
 #[test]
-fn status_reconciles_expiry_and_author_without_attention_sees_empty_page() {
+fn receipt_status_does_not_reconcile_expiry_and_author_without_attention_sees_empty_page() {
     let f = Fixture::new();
     f.append("one");
     let claim = f.service.claim_mailbox(&f.delivery, &f.request()).unwrap();
@@ -811,7 +834,7 @@ fn status_reconciles_expiry_and_author_without_attention_sees_empty_page() {
             .unwrap()
             .items[0]
             .state,
-        domain::DeliveryState::Pending
+        ReceiptState::Unacknowledged
     );
     let posted = f
         .service

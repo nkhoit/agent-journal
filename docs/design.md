@@ -8,9 +8,17 @@
 The implemented access contract requires explicit public spaces: active
 authenticated principals read and append without memberships, archival prevents
 new appends, and private/group grants are deferred. Membership APIs remain
-transitional metadata. Schema 10 rejects older state rather than exposing it.
+transitional metadata. Schema 11 rejects older state rather than exposing it.
 Uncertain recovery input intents require operator archive/reset; verified
 committed-snapshot restore and completed reconciliation reopening remain supported.
+
+The principal durable inbox now uses fetch and acknowledgment without adapter
+enrollment. The legacy custody architecture below remains transitional until
+slice 4 and cannot acknowledge inbox items. The authoritative replacement is
+[the registration/inbox specification](registration-inbox-spec.md). The existing
+record status surface now shows receipt states only. Older-backup recovery may
+repeat reminders under explicit loss approval; normal retries/restarts retain
+the first timestamp.
 
 ## 1. Executive summary
 
