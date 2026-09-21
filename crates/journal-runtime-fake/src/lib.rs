@@ -1,6 +1,6 @@
 //! Deterministic runtime acceptance fixture, not a vendor runtime or a delivery guarantee.
 
-use journal_adapter_core::{CoreError, CoreResult, Envelope, Route, Runtime};
+use journal_inbox_worker::{Envelope, Route, Runtime, RuntimeError, RuntimeResult};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
@@ -36,14 +36,14 @@ impl Default for FakeRuntime {
     }
 }
 
-fn unavailable(_: impl std::fmt::Display) -> CoreError {
-    CoreError::RuntimeUnavailable("fake runtime ledger unavailable".into())
+fn unavailable(_: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::RuntimeUnavailable("fake runtime ledger unavailable".into())
 }
 
 impl FakeRuntime {
     /// The caller owns the private fixture directory and its cleanup. The ledger
     /// contains local routes and record content; it must never be published.
-    pub fn durable(path: impl AsRef<Path>) -> CoreResult<Self> {
+    pub fn durable(path: impl AsRef<Path>) -> RuntimeResult<Self> {
         let path = path.as_ref();
         let mut options = OpenOptions::new();
         options.append(true).create(true);
@@ -82,12 +82,14 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
-    fn inject(&self, route: &Route, envelope: &Envelope, rendered: &str) -> CoreResult<String> {
+    fn inject(&self, route: &Route, envelope: &Envelope, rendered: &str) -> RuntimeResult<String> {
         if !self.available.get() {
-            return Err(CoreError::RuntimeUnavailable("fake runtime offline".into()));
+            return Err(RuntimeError::RuntimeUnavailable(
+                "fake runtime offline".into(),
+            ));
         }
         if !route.enabled || route.runtime_target.is_empty() || rendered != envelope.render() {
-            return Err(CoreError::RuntimeRejected);
+            return Err(RuntimeError::RuntimeRejected);
         }
         let acceptance = Acceptance {
             route: route.clone(),

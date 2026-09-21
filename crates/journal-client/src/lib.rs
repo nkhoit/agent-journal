@@ -10,8 +10,7 @@ use thiserror::Error;
 pub use journal_protocol;
 
 pub use journal_protocol::{
-    CredentialRotationResponse as RotationResponse, EnrollmentRecoveryRequest,
-    OneTimeReplacementSecret as ReplacementSecret,
+    CredentialRotationResponse as RotationResponse, OneTimeReplacementSecret as ReplacementSecret,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,71 +95,6 @@ impl Client {
         journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
     }
 
-    pub fn commit_custody(
-        &self,
-        token: &str,
-        claim: &str,
-        input: &journal_protocol::CommitRequest,
-    ) -> Result<journal_protocol::CommitResponse, ClientError> {
-        journal_protocol::ClaimPath {
-            claim_id: claim.into(),
-        }
-        .validate()
-        .map_err(|_| ClientError::InvalidRequest)?;
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json(
-            &format!(
-                "/v1/claims/{}/commit",
-                journal_protocol::path_segment(claim)
-            ),
-            input,
-            Some(token),
-        )
-    }
-
-    pub fn record_delivery_event(
-        &self,
-        token: &str,
-        item: &str,
-        input: &journal_protocol::DeliveryEventRequest,
-    ) -> Result<journal_protocol::DeliveryEventResponse, ClientError> {
-        journal_protocol::MailboxItemPath {
-            item_id: item.into(),
-        }
-        .validate()
-        .map_err(|_| ClientError::InvalidRequest)?;
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json(
-            &format!(
-                "/v1/mailbox-items/{}/events",
-                journal_protocol::path_segment(item)
-            ),
-            input,
-            Some(token),
-        )
-    }
-
-    pub fn requeue_mailbox_item(
-        &self,
-        item: &str,
-        input: &journal_protocol::RequeueRequest,
-    ) -> Result<journal_protocol::RequeueResponse, ClientError> {
-        journal_protocol::MailboxItemPath {
-            item_id: item.into(),
-        }
-        .validate()
-        .map_err(|_| ClientError::InvalidRequest)?;
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json(
-            &format!(
-                "/v1/admin/mailbox-items/{}/requeue",
-                journal_protocol::path_segment(item)
-            ),
-            input,
-            None,
-        )
-    }
-
     pub fn delivery_status(
         &self,
         token: &str,
@@ -233,119 +167,6 @@ impl Client {
             return Err(ClientError::Json);
         }
         Ok(())
-    }
-
-    pub fn list_adapters(
-        &self,
-        query: &journal_protocol::PageQuery,
-    ) -> Result<journal_protocol::AdapterPage, ClientError> {
-        query.validate().map_err(|_| ClientError::InvalidRequest)?;
-        let response = self.send(Request::new(
-            "GET",
-            format!(
-                "/v1/admin/adapters?{}",
-                journal_protocol::query_string(&query.pairs())
-            ),
-            vec![],
-        ))?;
-        if response.status != 200 {
-            return Err(ClientError::Http {
-                status: response.status,
-            });
-        }
-        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
-    }
-
-    pub fn register_adapter(
-        &self,
-        token: &str,
-        input: &journal_protocol::AdapterRegisterRequest,
-    ) -> Result<journal_protocol::AdapterRegistration, ClientError> {
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json("/v1/adapters/self/register", input, Some(token))
-    }
-
-    pub fn heartbeat_adapter(
-        &self,
-        token: &str,
-        input: &journal_protocol::AdapterHeartbeatRequest,
-    ) -> Result<journal_protocol::AdapterRegistration, ClientError> {
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json("/v1/adapters/self/heartbeat", input, Some(token))
-    }
-
-    pub fn claim_mailbox(
-        &self,
-        token: &str,
-        input: &journal_protocol::ClaimRequest,
-    ) -> Result<journal_protocol::ClaimResponse, ClientError> {
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json("/v1/mailbox/claims", input, Some(token))
-    }
-
-    pub fn mailbox_status(
-        &self,
-        token: &str,
-        query: &journal_protocol::PageQuery,
-    ) -> Result<journal_protocol::MailboxStatusPage, ClientError> {
-        query.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.principal(
-            token,
-            Request::new(
-                "GET",
-                format!(
-                    "/v1/mailbox/status?{}",
-                    journal_protocol::query_string(&query.pairs())
-                ),
-                vec![],
-            ),
-        )
-    }
-
-    pub fn replace_adapter(
-        &self,
-        adapter: &str,
-        input: &journal_protocol::AdapterReplaceRequest,
-    ) -> Result<journal_protocol::AdapterRegistration, ClientError> {
-        journal_protocol::AdapterPath {
-            adapter_id: adapter.into(),
-        }
-        .validate()
-        .map_err(|_| ClientError::InvalidRequest)?;
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json(
-            &format!(
-                "/v1/admin/adapters/{}/replace",
-                journal_protocol::path_segment(adapter)
-            ),
-            input,
-            None,
-        )
-    }
-
-    pub fn admin_mailbox_status(
-        &self,
-        principal: &str,
-        query: &journal_protocol::PageQuery,
-    ) -> Result<journal_protocol::MailboxStatusPage, ClientError> {
-        journal_protocol::domain::validate_identifier("principal", principal)
-            .map_err(|_| ClientError::InvalidRequest)?;
-        query.validate().map_err(|_| ClientError::InvalidRequest)?;
-        let response = self.send(Request::new(
-            "GET",
-            format!(
-                "/v1/admin/mailboxes/{}/status?{}",
-                journal_protocol::path_segment(principal),
-                journal_protocol::query_string(&query.pairs())
-            ),
-            vec![],
-        ))?;
-        if response.status != 200 {
-            return Err(ClientError::Http {
-                status: response.status,
-            });
-        }
-        journal_protocol::decode_json(&response.body).map_err(|_| ClientError::Json)
     }
 
     fn principal<O: serde::de::DeserializeOwned + serde::Serialize>(
@@ -616,31 +437,6 @@ impl Client {
         self.json("/v1/admin/memberships", input, None)
     }
 
-    pub fn provision_adapter(
-        &self,
-        input: &journal_protocol::AdapterProvisionRequest,
-    ) -> Result<journal_protocol::AdapterProvisionResponse, ClientError> {
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json("/v1/admin/adapters", input, None)
-    }
-
-    pub fn create_ticket(
-        &self,
-        input: &journal_protocol::EnrollmentTicketCreateRequest,
-    ) -> Result<journal_protocol::EnrollmentTicketCreateResponse, ClientError> {
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json("/v1/admin/enrollment-tickets", input, None)
-    }
-
-    pub fn enroll(
-        &self,
-        ticket: &str,
-        input: &journal_protocol::EnrollmentExchangeRequest,
-    ) -> Result<journal_protocol::EnrollmentExchangeResponse, ClientError> {
-        input.validate().map_err(|_| ClientError::InvalidRequest)?;
-        self.json("/v1/enrollment/exchange", input, Some(ticket))
-    }
-
     pub fn rotate(
         &self,
         input: &journal_protocol::CredentialRotateRequest,
@@ -655,14 +451,6 @@ impl Client {
     ) -> Result<(), ClientError> {
         input.validate().map_err(|_| ClientError::InvalidRequest)?;
         self.mutate("/v1/admin/credentials/revoke", input)
-    }
-
-    pub fn recover_enrollment(&self, input: &EnrollmentRecoveryRequest) -> Result<(), ClientError> {
-        journal_protocol::domain::validate_identifier("adapter_id", &input.adapter_id)
-            .map_err(|_| ClientError::InvalidRequest)?;
-        journal_protocol::domain::validate_identifier("instance_id", &input.instance_id)
-            .map_err(|_| ClientError::InvalidRequest)?;
-        self.mutate("/v1/admin/enrollment/recover", input)
     }
 
     pub fn recover_principal(

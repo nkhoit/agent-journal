@@ -9,13 +9,12 @@ mod unix {
     use std::{
         env,
         fs::OpenOptions,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
         process::Command,
     };
 
     use fs2::FileExt;
-    use journal_adapter_spool::{Limits, SqliteStore};
     use journal_storage_sqlite::Database;
 
     pub fn run() {
@@ -25,16 +24,6 @@ mod unix {
         if mode == "probe" {
             probe(Path::new(&args.next().expect("lock path")));
             return;
-        }
-        if mode == "spool-open" {
-            let path = PathBuf::from(args.next().expect("spool path"));
-            match SqliteStore::open(path, Limits::default()) {
-                Ok(store) => {
-                    store.close().expect("close spool probe");
-                    std::process::exit(0);
-                }
-                Err(_) => std::process::exit(1),
-            }
         }
         if mode == "central-open" {
             let database = PathBuf::from(args.next().expect("central path"));
@@ -58,10 +47,6 @@ mod unix {
             "recovery-parent-drop" => recovery_parent_drop(&root),
             "recovery-clone-exec" => recovery_clone_and_exec(&root),
             "recovery-constructor-error" => recovery_constructor_error(&root),
-            "spool-child-drop" => spool_child_drop(&root),
-            "spool-parent-drop" => spool_parent_drop(&root),
-            "spool-current-legacy" => spool_current_and_legacy(&root),
-            "spool-hardlink-alias" => spool_hardlink_alias(&root),
             "central-hardlink-alias" => central_hardlink_alias(&root),
             other => panic!("unknown fixture mode: {other}"),
         }
@@ -212,104 +197,6 @@ mod unix {
         let database_path = directory.join("central.db");
         let lock_path = database_path.with_extension("recovery-lock");
         assert!(Database::open_protected(&database_path, &database_path).is_err());
-        expect_released(&lock_path);
-    }
-
-    fn spool_paths(root: &Path, name: &str) -> (PathBuf, PathBuf) {
-        let directory = root.join(name);
-        private_directory(&directory);
-        let spool = directory.join("spool.db");
-        let lock = directory.join("spool.db.lock");
-        (spool, lock)
-    }
-
-    fn spool_child_drop(root: &Path) {
-        let (spool_path, lock_path) = spool_paths(root, "child-drop");
-        let store = SqliteStore::open(&spool_path, Limits::default()).expect("open spool");
-        expect_blocked(&lock_path);
-        let child = fork();
-        if child == 0 {
-            drop(store);
-            unsafe { libc::_exit(0) };
-        }
-        wait_for(child);
-        expect_blocked(&lock_path);
-        drop(store);
-        expect_released(&lock_path);
-    }
-
-    fn spool_parent_drop(root: &Path) {
-        let (spool_path, lock_path) = spool_paths(root, "parent-drop");
-        let store = SqliteStore::open(&spool_path, Limits::default()).expect("open spool");
-        expect_blocked(&lock_path);
-        let child = fork();
-        if child == 0 {
-            unsafe {
-                libc::pause();
-                libc::_exit(0);
-            }
-        }
-        drop(store);
-        expect_released(&lock_path);
-        stop_child(child);
-    }
-
-    fn spool_current_and_legacy(root: &Path) {
-        let (spool_path, lock_path) = spool_paths(root, "current");
-        let store = SqliteStore::open(&spool_path, Limits::default()).expect("open current spool");
-        drop(store);
-        let reopened =
-            SqliteStore::open(&spool_path, Limits::default()).expect("reopen current spool");
-        drop(reopened);
-        assert!(lock_path.exists(), "current spool lock inode must remain");
-
-        let directory = root.join("legacy");
-        private_directory(&directory);
-        let legacy = directory.join("spool.db");
-        let legacy_lock = directory.join("spool.db.lock");
-        std::fs::write(&legacy, b"unsupported historical spool").expect("write legacy spool");
-        std::fs::write(&legacy_lock, b"stable lock inode").expect("write lock");
-        let before_spool = std::fs::read(&legacy).expect("read legacy spool");
-        let before_lock = std::fs::metadata(&legacy_lock).expect("stat legacy lock");
-        assert!(SqliteStore::open(&legacy, Limits::default()).is_err());
-        assert_eq!(
-            std::fs::read(&legacy).expect("read legacy spool"),
-            before_spool
-        );
-        let after_lock = std::fs::metadata(&legacy_lock).expect("stat legacy lock");
-        assert_eq!(
-            before_lock.ino(),
-            after_lock.ino(),
-            "legacy lock inode changed"
-        );
-    }
-
-    fn spool_hardlink_alias(root: &Path) {
-        let (spool_path, lock_path) = spool_paths(root, "preexisting-alias");
-        drop(SqliteStore::open(&spool_path, Limits::default()).expect("initialize spool"));
-        std::fs::remove_file(&lock_path).expect("remove initial lock");
-        let alias = spool_path.with_file_name("spool-alias.db");
-        std::fs::hard_link(&spool_path, &alias).expect("create hardlink alias");
-        let before = std::fs::read(&spool_path).expect("read spool");
-        assert!(SqliteStore::open(&spool_path, Limits::default()).is_err());
-        assert_eq!(std::fs::read(&spool_path).expect("read spool"), before);
-        assert!(!lock_path.exists(), "hardlink refusal created a lock");
-
-        let (spool_path, lock_path) = spool_paths(root, "live-owner-alias");
-        let store = SqliteStore::open(&spool_path, Limits::default()).expect("open owner spool");
-        let alias = spool_path.with_file_name("spool-alias.db");
-        std::fs::hard_link(&spool_path, &alias).expect("create live hardlink alias");
-        let status = Command::new(env::current_exe().expect("fixture executable"))
-            .arg("spool-open")
-            .arg(&alias)
-            .status()
-            .expect("run alias opener");
-        assert!(
-            !status.success(),
-            "same-inode alias opened in another process"
-        );
-        expect_blocked(&lock_path);
-        drop(store);
         expect_released(&lock_path);
     }
 

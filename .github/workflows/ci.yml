@@ -51,19 +51,21 @@ jobs:
         run: python3 tests/s4_bootstrap_test.py
       - name: Journal CLI and lost-response acceptance
         run: python3 tests/s5_records_test.py
-      - name: Delivery CLI and fencing acceptance
-        run: python3 tests/s7_delivery_test.py
+      - name: Independent inbox CLI acceptance
+        run: python3 -m unittest tests.s4_bootstrap_test.BootstrapTest.test_registered_principal_inbox_cli_without_adapter
       - name: Migration contract
-        run: python3 tests/migration_contract_test.py
-      - name: Executable adapter conformance
         run: |
-          python3 scripts/test_adapter_conformance.py
-          python3 scripts/adapter_conformance.py
-      - name: Retain redacted adapter evidence
+          python3 tests/migration_contract_test.py
+          python3 tests/delivery_retirement_test.py
+      - name: Executable inbox-client conformance
+        run: |
+          python3 scripts/test_inbox_client_conformance.py
+          python3 scripts/inbox_client_conformance.py
+      - name: Retain redacted inbox-client evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: adapter-conformance
-          path: target/adapter-conformance/*.json
+          name: inbox-client-conformance
+          path: target/inbox-client-conformance/*.json
           if-no-files-found: error
       - name: Public hygiene
         run: python3 scripts/public_hygiene.py

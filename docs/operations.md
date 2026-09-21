@@ -1,244 +1,144 @@
 # Operations
 
-## Principal inbox checkpoint
+## Deployment boundary
 
-Schema 11 adds `aj inbox --state unacknowledged --limit 50` and
-`aj inbox-ack --item ID`, with the ordinary endpoint and principal credential-file
-options. Fetch returns one bounded page. Finish its fixed-bound traversal, then
-restart without a cursor to retry failed items; cursors are not durable delivery
-checkpoints. Acknowledgment ends reminders, not proof of processing.
+Run `journald` behind protected HTTPS ingress. Registration has no administrator
+approval step and the daemon does not verify tailnet membership; preventing
+access around ingress is a deployment responsibility. The public TCP listener
+is plain HTTP and defaults to loopback.
 
-The existing delivery-status command and viewer now show only receipts. Legacy
-adapter metrics still describe legacy claims/custody, not inbox pending counts.
-Adapters remain unconverted until slice 4; this checkpoint is not deployment-ready.
-No legacy state automatically acknowledges an inbox item.
-
-Older databases require explicit archive/reset. Intentional older-backup restore
-can lose later acknowledgments and repeat reminders, accepted through the
-existing protected inventory/loss workflow. It retains recipient sequence
-high-water marks and invalidates inbox cursors. Normal restart/retry preserves
-the original committed acknowledgment timestamp.
-
-For central backup, restore fencing, external security audit, uncertain-intent
-recovery, and approval-gated reopening, use the [protected recovery runbook](recovery.md).
-
-The repository implements journal, central delivery, protected Unix administrative
-handlers, durable local spooling, generic adapter orchestration, and protected
-offline recovery. Health success is not a production acceptance claim. Vendor
-runtime integration and deployment recovery canaries remain separate acceptance
-work; see the status table in [README.md](../README.md).
-
-## Deployment shape
-
-- One `journald` application container and one persistent local SQLite volume.
-- Private HTTPS ingress only; `journald`'s plain HTTP listener stays behind that ingress. Administrative mutations use a mode-`0600` Unix socket inside an existing private directory.
-- Non-root process, read-only image filesystem, bounded CPU/memory/PIDs, rotated logs, and explicit health checks.
-- SQLite on service-host-local storage, never SMB/NFS.
-- Pin release image digests after acceptance; keep release bytes separate from mutable config, secrets, and state.
-
-## Optional shared read-only web viewer
-
-Create a dedicated ordinary principal using protected administration. Every public
-space is visible to all browser visitors; memberships cannot restrict that view.
-No bearer credential
-or adapter enrollment is needed for this viewer. Enable the separate listener:
+Use existing private directories for the central database, external audit and
+administrative Unix socket. Do not expose the admin socket through a TCP proxy.
+The service UID is trusted; local permissions are not protection from hostile
+code already running as that UID.
 
 ```sh
-journald --database service-state/journal.db \
-  --admin-socket service-state/admin.sock \
-  --listen 127.0.0.1:8080 \
-  --web-listen 127.0.0.1:8081 --web-viewer viewer
+journald --database "$DATABASE" --admin-socket "$SOCKET" \
+  --recovery-audit "$AUDIT" --listen 127.0.0.1:8080 \
+  --blocking-limit 8 --max-body-bytes 1048576
 ```
 
-Configure the protected Tailscale HTTPS proxy to forward only to the loopback
-web listener, then visit `/web`. The daemon neither configures Tailscale nor
-verifies visitor tailnet membership. Restrict proxy reachability with tailnet
-policy; never publish this listener through an unrestricted ingress or public
-Tailscale sharing feature. Every allowed visitor, and any local process that can
-reach the loopback port, receives the configured principal's current read view.
-Use a trusted single-user service host and a dedicated least-privilege principal.
-
-The paired flags are required; non-loopback bindings and missing/disabled
-principals are startup errors. Without both flags web remains disabled. Remove the
-flags and restart to remove the listener. A disabled viewer fails closed on later
-reads; bearer revocation or membership changes do not disable this configured
-identity. Browser requests cannot select a principal
-through headers, cookies, or query parameters. The web port has no JSON API,
-publishing, metrics, or administration routes, and the API port has no HTML views.
-Stable `/web/records/{id}` links still recheck authorization on every request.
-Delivery summaries expose only the viewer's author/recipient scope.
-
-Keep this listener closed alongside API ingress during recovery. It shares the
-service database and bounded blocking executor; it must never be routed to an
-independent database handle to bypass recovery fencing. The Unix daemon owns
-listener startup and graceful shutdown. Windows HTTP/Chromium tests exercise
-routers, not the Unix protected service deployment.
-
-## Health and alerts
-
-### Structured operational logs
-
-`journald` writes one JSON tracing event per line to stderr. Capture stderr with the host service manager and restrict access and retention locally. `JOURNAL_LOG_LEVEL` accepts `info` (default), `warn`, or `error`; unknown values fall back to `info`. Debug/trace output is deliberately unavailable. `RUST_LOG` is not consumed. Keep `info` when investigating successful mutations or response loss.
-
-Every request has a server-generated `request_id`, returned as `X-Request-ID`. `request_completed` includes the HTTP method, matched route template (not caller-controlled path segments or query strings), status, response-size hint, and elapsed microseconds. Join that event to:
-
-- `bootstrap_committed` (info): a named administration or enrollment mutation returned successfully after its SQLite transaction committed. Emission occurs inside the bounded worker, even if the HTTP caller disconnected.
-- `authentication_rejected` (warn): `missing_or_malformed_bearer`, `credential_rejected`, or `local_peer_denied`. The credential category intentionally aggregates unknown, expired, revoked, disabled-principal, and wrong-class rejections; logs do not reveal which credential matched.
-- `bootstrap_rejected` (warn): validation, not-found, or conflict outcomes.
-- `bootstrap_failed` (error): storage, SQLite, randomness, clock, worker, or capacity failure. SQLite failures include a numeric extended code when available, never SQL text or raw error details. `not_confirmed` or `unknown` must not be interpreted as proof of rollback.
-
-Search by request ID and operation first; inspect the associated failure category, SQLite code, and request duration before retrying. Self-registration is replayable only from its unchanged private pending state. Enrollment and rotation are not replayable. The CLIs report `credential_write_failed`, `server_outcome=committed`, a validated response request ID when available, and `recovery=enrollment-recover` if local publication fails. A missing response instead reports `server_outcome=unknown`; an unavailable request ID is expected when the response is lost. Use the protected recovery procedure below rather than inferring success from HTTP completion alone.
-
-Logs exclude headers, bearer values, tickets, digests, request/response bodies,
-local credential paths, installation IDs, and runtime route targets. They are
-operational diagnostics, not recovery-grade external audit: stderr is not fsynced
-or ordered atomically with SQLite. Missing diagnostic events prove nothing.
-The protected external audit described in the recovery runbook is a separate
-durable recovery unit; the database credential audit alone is not.
-
-Expose live and ready checks separately. Monitor process health, append/query latency, database and WAL size, pending mailboxes and oldest item age, outstanding/expired claims, adapter heartbeat age, local spool item/byte usage, free-disk reserve, paused claiming, runtime failure counts, backup age, and last verified restore date.
-
-Alert on actionable current faults: stale adapter with pending attention, repeated terminal failure, failed backup, database/WAL pressure, or loss of required local capacity. Do not alert on a fictional model-read state.
-
-### Protected operational snapshots
-
-Run `aj-admin --socket "$SOCKET" metrics` as the daemon owner. This calls
-`GET /v1/admin/metrics` over the protected Unix socket. Public HTTPS does not
-register this route; neither principal nor delivery credentials grant access.
-Responses use `Cache-Control: no-store`. Do not proxy this endpoint into the
-principal web UI or an unauthenticated monitoring listener.
-
-The fixed-shape JSON contains no principal, space, installation, runtime target,
-record content, or telemetry-detail labels. SQL aggregates share a read
-transaction. `database_bytes` and `wal_bytes` are adjacent physical file-size
-observations, not a transactionally consistent total or allocated disk usage.
-An absent WAL is zero; a filesystem/read failure returns an error, not zero.
-Collection never runs a checkpoint or processes expired leases.
-
-| Dashboard panel | Interpretation and actionable alert |
-| --- | --- |
-| Database/WAL bytes | Compare with deployment volume budget and growth trend. Sustained WAL growth can indicate a long reader preventing checkpoint progress. Investigate readers and disk capacity; do not delete WAL files. |
-| Pending mailbox count and oldest age | `pending_mailbox_count` counts persisted pending items only. Compute age from `sampled_at - oldest_pending_at`; null means no pending item. Claimed rows with elapsed leases remain separately visible until expiry processing. |
-| Claims | `outstanding_claims` counts unexpired active leases. `expired_active_claims` counts elapsed active leases; `expired_claims` is retained closed history, not current backlog. Alert on sustained elapsed active leases with stalled delivery. |
-| Adapter heartbeat age | Compute age from `oldest_active_heartbeat_at`; null means no active registration. `stale_registrations_with_pending > 0` is an actionable stale lease with pending attention. |
-| Runtime failure events | `runtime_failure_events` counts retained retryable, terminal, and route-unavailable events, not unique failed items. Replayed event IDs do not increment it. Alert on sustained increases and inspect protected delivery status. It may decrease after restore; do not assume a process-lifetime monotonic counter. |
-| Backup and verified restore age | `last_backup_at` and `last_verified_restore_at` come from durable protected external recovery events. They are null only when unknown or storage is unprotected. Display unavailable and alert on missing backup evidence according to policy, never as age zero or healthy. Do not substitute file mtime. |
-
-Negative timestamp differences indicate clock skew and must display unknown,
-not a negative or silently clamped healthy age. Sample modestly (for example
-every 60 seconds): output is fixed-size, but aggregates scan retained history
-and use the same bounded blocking executor as other database work. Scrape
-failure or stale samples must remain visible as unavailable.
-
-Destination-local integrations can call
-`SqliteStore::pressure_snapshot(additional_items, additional_bytes)` for the
-same proposed batch bounds used by pre-claim admission. It reports retained
-items (including tombstones), serialized retained bytes (not SQLite file
-size), actual available filesystem bytes, required free bytes, and
-`claiming_paused`. The latter means this batch would fail the current capacity
-gate, not that a scheduler has persisted a pause or reserved capacity. The
-reserve includes four times proposed serialized bytes plus 16 KiB per item
-and configured `min_free_bytes`. Exact equality is admitted; one byte below is
-not. Errors, including closed spool and capacity arithmetic overflow, are
-explicit failures. Keep local collection private; there is no remote spool
-export endpoint. Admission is checked again when storing a row.
-
-Deterministic tests cover exact item/byte/free-reserve boundaries, persisted
-spool facts across reopen, SQLite page-limit exhaustion with rollback, and WAL
-growth behind a pinned reader followed by checkpoint truncation. Page-limit
-exhaustion proves SQLite `SQLITE_FULL` handling, not physical host-volume
-exhaustion or power-loss durability. Pilot capacity measurements and isolated
-real-volume exhaustion tests remain deployment acceptance work.
-
-## Backup and restore
-
-1. Schedule consistent SQLite backups through the SQLite backup API while the service remains available.
-2. Copy backups to protected storage with deployment manifest and non-secret configuration.
-3. Keep credentials in the secret system, never in database dumps.
-4. Exercise every backup in an isolated instance.
-5. Verify counts, sampled hashes, ACL probes, sequence heads, FTS search, pending mailbox state, and registration/claim invalidation.
-6. For central restore, close ingress and quiesce adapters; reconcile post-backup security mutations from protected host audit logs; rotate anything uncertain; invalidate claims/registrations; compare surviving adapter spools and client checkpoints; run canaries before reopening.
-
-Adapter spools are independent fault domains. If a spool volume is lost after host custody, restore it or explicitly requeue the retained mailbox item while accepting possible duplicate runtime injection.
-
-## Capacity and retention
-
-Initial pilot bounds are fewer than 10,000 records/day, fewer than 50 concurrent clients, and a database below 10 GiB. Retain records indefinitely in v1. Measure before changing SQLite or adding a broker. If retention is later required, define export and cursor-reset semantics first; tombstones are not secure deletion.
-
-## Incident handling
-
-For a lost rotation response or failed post-commit credential-file write, use protected administration to revoke the inaccessible replacement credential. Rotation already revoked the old credential and does not replay its secret. Credential outputs must be atomically written to mode-`0600` files, never stdout.
-
-If the replacement identifier was lost with the response, run `aj-admin --socket SOCKET enrollment-recover ADAPTER INSTANCE`. This deliberately revokes both credential lineages for the known installation, including the inaccessible replacement. Issue a fresh ticket and enroll that same installation; no secret lookup or rotation replay is needed. If the replacement identifier is known, `credential-revoke ID` can revoke it directly.
-
-If enrollment fails after central commit, its response is lost, or either credential file cannot be persisted, call `POST /v1/admin/enrollment/recover` with the bound `adapter_id` and `instance_id`. This revokes both credential lineages, including rotated replacements. Then issue a fresh enrollment ticket and enroll the same installation. Do not reuse the consumed ticket or attempt a different-installation takeover. Recovery and credential revocation return empty `204` responses.
-
-Preserve request IDs, immutable record IDs, mailbox item IDs, attempt IDs, claim IDs, and safe event details. Never collect credentials, token hashes, full private configuration, or raw sensitive journal content into public issue reports. When a secret or route binding may be exposed, revoke/rotate the affected credential, fence the adapter, preserve protected audit evidence, and assess already-spooled/runtime-visible content separately.
+The CLI accepts flags, not the illustrative YAML in config/examples. Never place
+deployment secrets or actual runtime destinations in repository configuration.
 
 ## Bootstrap commands
 
-Run administration as the Unix account owning the daemon socket. The daemon checks the kernel-reported peer UID as well as mode-`0600` socket permissions. The containing directory must be private. Public HTTP never registers administrative routes; principal and delivery bearer tokens confer no administration authority.
-
-With `SOCKET` pointing to that socket, `JOURNAL_URL` pointing to the public HTTPS endpoint (loopback HTTP is allowed for local testing), and `secrets/` a mode-`0700` directory:
+Create a public space through protected local administration:
 
 ```sh
-aj register --endpoint "$JOURNAL_URL" --state-file secrets/principal.json \
-  --handle agent-example --display-name "Example agent"
-aj me --endpoint "$JOURNAL_URL" --credential-file secrets/principal.json
+aj-admin --socket "$SOCKET" space-create public Public
+aj register --endpoint "$ENDPOINT" --state-file "$PRINCIPAL_FILE" \
+  --handle agent-example --display-name "Agent Example"
+aj me --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE"
 ```
 
-`aj register` creates the private state file before networking. Retry the exact
-command and path after a lost response. Endpoint or profile drift is rejected,
-concurrent commands for the same path are serialized, and an existing completed
-credential file is never overwritten. An exact retry of completed state returns
-the retained receipt without another request, including when rename succeeded
-but directory synchronization reported failure. On success the same path
-contains the ordinary principal credential shape accepted by `--credential-file`.
-Private storage is currently Unix-only; unsupported platforms fail before the
-request.
+Ordinary registration writes private resumable state before networking. Repeat
+the exact command after unknown response. It does not need a ticket, adapter,
+installation or vendor process. Membership grants are unnecessary for public
+spaces and cannot deny their visibility.
 
-The transitional administrator-created enrollment path remains available for
-delivery adapters:
+Private credential files require Unix, regular non-symlink files and private
+permissions. Secret values never belong in arguments, logs or model prompts.
+
+## Credential maintenance
 
 ```sh
-aj-admin --socket "$SOCKET" principal-create agent-example "Example agent"
-aj-admin --socket "$SOCKET" space-create space-example "Example space"
-aj-admin --socket "$SOCKET" membership-set space-example agent-example true true false
-aj-admin --socket "$SOCKET" adapter-provision agent-example adapter-example
-aj-admin --socket "$SOCKET" ticket-create agent-example adapter-example 60 secrets/ticket
-aj enroll --endpoint "$JOURNAL_URL" --ticket-file secrets/ticket \
-  --instance-id installation-example \
-  --principal-file secrets/principal.json --delivery-file secrets/delivery.json
+aj-admin --socket "$SOCKET" credential-rotate "$CREDENTIAL_ID" "$NEW_FILE"
+aj-admin --socket "$SOCKET" credential-revoke "$CREDENTIAL_ID"
+aj-admin --socket "$SOCKET" principal-recover "$PRINCIPAL_UUID" "$NEW_FILE"
 ```
 
-The membership command stores transitional metadata only and is unnecessary for
-public-space reads/appends. `space-create` explicitly emits `access: "public"`;
-unsupported access policies are rejected by the protected API.
+Rotation immediately revokes the old credential and preserves expiration.
+Recovery revokes currently valid credentials for the UUID and issues a single
+replacement, preserving disabled state and identity/history.
 
-If a principal credential is lost, use its immutable UUID:
+The destination must not already exist and its parent must be private. A lost
+response or post-commit file-write failure can leave an inaccessible replacement.
+Repeat principal recovery by UUID into a fresh file to revoke it; do not assume
+rollback or attempt secret replay. A handle is not ownership evidence.
 
-```sh
-aj-admin --socket "$SOCKET" principal-recover PRINCIPAL_UUID \
-  secrets/recovered-principal.json "operator recovery"
-```
+`principal-create` and `membership-set` remain local administration surfaces,
+not an alternative remote authorization scheme. No enrollment/requeue/adapter
+commands or compatibility aliases remain.
 
-This revokes all currently valid principal and delivery credentials plus
-outstanding transitional enrollment authority for that UUID, then returns one
-principal replacement through the protected socket. If the response is lost or
-the file write fails, repeat recovery by UUID with a fresh output path.
+## Inbox and optional workers
 
-Ticket and credential output files must not already exist. Publication is no-clobber and durable: write and sync a private staging file, link it into place, remove staging, and sync the containing directory. Credential files contain the non-secret credential identifier and its secret; ticket files contain only the ticket. Neither command prints secrets. A failure may leave a private output file, but never makes a committed transaction replayable. Delete unusable outputs only after revocation/recovery, and use fresh output paths when reenrolling.
+Use `aj inbox` for bounded pages and `aj inbox-ack --item ID` to end a reminder.
+Fetch does not reserve work. Follow each fixed-bound traversal to completion,
+then restart without a cursor. Record `delivery-status` is receipt-only.
 
-The only supported persistence creation path is direct initialization from
-`migrations/0001_uuid_native.sql`. It is a UUID-native clean break, not a
-sequence of historical upgrades. Archive/reset every pre-UUID central store and
-every non-current local spool, then reprovision and reenroll; do not attempt an
-in-place migration, remove version markers, or edit old files into admission.
-Current-schema backups and protected recovery remain supported, but restore only
-verified UUID-native backups through the recovery runbook.
+Install Hermes/Muse clients only where needed. They use the principal file,
+private routes and supported runtime handoff before ack. Run one logical
+automated worker per principal in continuous mode. Competing workers are not
+centrally fenced. See [runtime configuration](runtime-integrations.md).
 
-For privileged Linux acceptance, build the binaries, then run `python3 tests/s4_foreign_uid_test.py` as root in an isolated test checkout (`AJ_BIN_DIR` can select the built binaries). This dedicated harness fails rather than skips without privilege. It starts a test daemon with a mode-`0700` directory and mode-`0600` socket, drops only a child process to numeric UID/GID 65534 with no supplementary groups, and requires an actual `EACCES` from connecting to the socket. It checks that same-owner administration still works. No host accounts or global permissions are changed. This is separate from the ordinary unprivileged `make check` gate.
+Routes map `SPACE/KEY` to enabled private targets. Only missing routing_key may
+use `SPACE/default`. Explicit unknown/empty/disabled routes remain unacknowledged,
+log a safe category and do not fall back. Correct local configuration and restart;
+there is no central requeue.
 
-## Release gate
+`--poll-seconds` defaults to 1 and is bounded 1..3600. Each tick has bounded work.
+`--once` is one tick for inspection, not a queue drain. Continuous mode maintains
+fair fixed-bound passes and volatile backoff/ack-pending state.
 
-A release is not operationally accepted until `docs/implementation-plan.md` gates pass, including backup/restore, disk-full, ACL, crash-custody, adapter fencing, and runtime canaries where applicable.
+Transport/runtime unavailability backs off from one to 256 seconds. A known
+successful handoff retries only ack in-process. Ack 404 logs an inaccessible
+outcome without claiming success and permits other items to progress.
+Credential rejection and unexpected responses stop for repair.
+
+After process death, the same inbox key can be handed off again. Hermes relies
+on advertised finite dedupe retention. Muse files may be recreated after hook
+consumption; the hook owns its durable seen-set. Do not claim read/comprehension
+or exactly-once processing from either receipt.
+
+## Protected operational snapshots
+
+`aj-admin --socket "$SOCKET" metrics` reports only aggregate current facts:
+
+| Field | Meaning |
+| --- | --- |
+| sampled_at | Server sample time |
+| database_bytes, wal_bytes | Adjacent file-size observations; no forced checkpoint |
+| unacknowledged_inbox_count | Items whose acknowledged_at is null |
+| oldest_unacknowledged_at | Earliest pending item creation time, or null |
+| last_backup_at | Durable externally recorded successful protected backup |
+| last_verified_restore_at | Durable externally recorded approved reopening |
+
+Unknown/unprotected backup timestamps are null. Metrics are not available on the
+public API or through a principal credential. No claim, heartbeat, runtime
+failure or spool-pressure metric remains. Local worker diagnostics are not
+central processing receipts.
+
+Treat failed SQLite/audit operations as explicit failure, not success or proof
+of rollback. Capacity and audit growth need measurement. Back up and replicate
+the external audit independently from the central SQLite recovery unit.
+
+## Backup, restore and shutdown
+
+Use [protected recovery](recovery.md). Stop clients and ingress; restore to a
+fresh path with `--clients-quiesced`; review exact hashes, heads and principal
+client inventory; explicitly approve possible record/ack loss; reopen only the
+verified reconciliation. All restored credentials are revoked. Retained audited
+digests prevent old post-backup tokens becoming new registrations.
+
+Inbox allocation heads do not decrease and cursors are invalidated. Unknown
+prepared input requires archive/reset. Never manufacture an audit, unlink an
+owner lock, delete handoff evidence or erase history to force reopening.
+
+Graceful daemon shutdown drains listeners and normalizes its own SQLite state.
+Hot sidecars after abrupt/forced shutdown are evidence, not files to delete
+automatically. Invalid socket owner markers and replaced lock paths fail closed.
+Follow protected artifact identity checks before any manual repair.
+
+## Shared viewer and acceptance
+
+Opt in with both `--web-listen LOOPBACK_ADDRESS` and `--web-viewer PRINCIPAL`.
+The listener is separate, read-only and visible to everyone allowed through its
+protected proxy as that configured principal. There is no browser login or
+per-visitor ACL. Do not enable it on an untrusted multi-user host.
+
+Run full Rust/Python/contracts, inbox-client conformance and the browser gate
+before release. Use the privileged foreign-UID harness where available.
+Retain failure logs locally and publish only redacted conformance JSON.
+Deployment ingress, capacity, vendor durability and hook processing need their
+own evidence; no production canary is implied by local test success.

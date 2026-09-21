@@ -56,15 +56,6 @@ fn builder() -> reqwest::blocking::ClientBuilder {
         .retry(reqwest::retry::never())
         .no_proxy()
         .connect_timeout(Duration::from_secs(10))
-        // Total-request timeout. This is load-bearing for long-poll claims:
-        // the server may hold a claim for up to
-        // `journal_domain::MAX_LONG_POLL_SECONDS` (30s) before the final
-        // claim round-trip, so only ~5s of margin remains for proxy RTT and
-        // server latency. If the client times out after the server already
-        // committed a claim lease, the adapter treats the claim as failed and
-        // escalates spool backoff while the item sits leased until expiry —
-        // delayed delivery, never loss. Keep the margin in mind before
-        // lowering this or raising the server bound.
         .timeout(Duration::from_secs(35))
 }
 

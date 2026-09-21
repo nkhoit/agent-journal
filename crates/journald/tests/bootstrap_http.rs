@@ -1,37 +1,16 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use journal_protocol::*;
-use journal_service::BootstrapService;
 use journal_storage_sqlite::Database;
 use journald::{ServiceState, admin_router, public_router};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn enrollment_authentication_and_public_admin_isolation() {
+async fn registration_authentication_and_public_admin_isolation() {
     let directory =
         std::path::Path::new("target").join(format!("http-bootstrap-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let database = Database::open(directory.join("journal.db")).unwrap();
-    let service = BootstrapService::new(database.clone());
-    service
-        .create_principal(&PrincipalCreateRequest {
-            handle: "agent-example".into(),
-            display_name: "Example".into(),
-        })
-        .unwrap();
-    service
-        .provision_adapter(&AdapterProvisionRequest {
-            adapter_id: "adapter-example".into(),
-            principal_id: "agent-example".into(),
-        })
-        .unwrap();
-    let ticket = service
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: "agent-example".into(),
-            adapter_id: "adapter-example".into(),
-            ttl_seconds: 60,
-        })
-        .unwrap();
     let state = ServiceState::new(database.clone(), 4).unwrap();
     let router = public_router(state.clone(), 65536);
     let registration_token = "ab".repeat(32);
@@ -104,18 +83,15 @@ async fn enrollment_authentication_and_public_admin_isolation() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     for body in [
-        r#"["installation-example"]"#,
-        r#"{"instance_id":"one","instance_id":"two"}"#,
+        r#"["registered-example","Registered Example"]"#,
+        r#"{"handle":"one","handle":"two","display_name":"Example"}"#,
     ] {
         let response = router
             .clone()
             .oneshot(
-                Request::post("/v1/enrollment/exchange")
+                Request::post("/v1/registrations")
                     .header("content-type", "application/json")
-                    .header(
-                        "authorization",
-                        format!("Bearer {}", ticket.enrollment_ticket.ticket),
-                    )
+                    .header("authorization", format!("Bearer {}", registration_token))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -127,61 +103,28 @@ async fn enrollment_authentication_and_public_admin_isolation() {
         assert!(body["error"]["request_id"].is_string());
     }
     let connection = database.connect().unwrap();
-    let consumed: Option<String> = connection
-        .query_row("SELECT consumed_at FROM enrollment_tickets", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert!(consumed.is_none());
     let count: i64 = connection
         .query_row("SELECT count(*) FROM credentials", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1);
     drop(connection);
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/enrollment/exchange")
-                .header("content-type", "application/json")
-                .header(
-                    "authorization",
-                    format!("Bearer {}", ticket.enrollment_ticket.ticket),
-                )
-                .body(Body::from(r#"{"instance_id":"installation-example"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let credentials: EnrollmentExchangeResponse =
-        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let unknown_token = "cd".repeat(32);
     for (path, token, expected) in [
+        ("/v1/me", Some(registration_token.as_str()), StatusCode::OK),
         (
             "/v1/me",
-            Some(credentials.principal_client_secret.secret.as_str()),
-            StatusCode::OK,
-        ),
-        (
-            "/v1/me",
-            Some(credentials.delivery_adapter_secret.secret.as_str()),
+            Some(unknown_token.as_str()),
             StatusCode::UNAUTHORIZED,
         ),
         ("/v1/me", None, StatusCode::UNAUTHORIZED),
         (
-            "/v1/mailbox/status",
-            Some(credentials.delivery_adapter_secret.secret.as_str()),
+            "/v1/inbox",
+            Some(registration_token.as_str()),
             StatusCode::OK,
         ),
         (
-            "/v1/mailbox/status",
-            Some(credentials.principal_client_secret.secret.as_str()),
-            StatusCode::UNAUTHORIZED,
-        ),
-        (
             "/v1/admin/principals",
-            Some(credentials.principal_client_secret.secret.as_str()),
+            Some(registration_token.as_str()),
             StatusCode::NOT_FOUND,
         ),
     ] {
@@ -206,10 +149,7 @@ async fn enrollment_authentication_and_public_admin_isolation() {
         Request::builder()
             .method("PATCH")
             .uri("/v1/me/profile")
-            .header(
-                "authorization",
-                format!("Bearer {}", credentials.principal_client_secret.secret),
-            )
+            .header("authorization", format!("Bearer {}", registration_token))
             .header("content-type", "application/json")
             .header("idempotency-key", "profile-example")
             .body(Body::from(serde_json::to_vec(&profile).unwrap()))
@@ -236,7 +176,7 @@ async fn enrollment_authentication_and_public_admin_isolation() {
                 .uri("/v1/me/profile")
                 .header(
                     "authorization",
-                    format!("Bearer {}", credentials.principal_client_secret.secret),
+                    format!("Bearer {}", registration_token),
                 )
                 .header("content-type", "application/json")
                 .header("idempotency-key", "profile-example")

@@ -23,7 +23,7 @@ pub use recovery_audit::{RecoveryApproval, RecoveryAudit, RecoveryStatus};
 
 /// The sole supported central on-disk contract. Existing databases are never
 /// upgraded in place: archive/reset them and initialize a new UUID-native DB.
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const BACKUP_PAGES_PER_STEP: i32 = 128;

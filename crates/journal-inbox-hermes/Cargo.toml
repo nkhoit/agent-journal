@@ -1,0 +1,21 @@
+[package]
+name = "journal-inbox-hermes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+journal-inbox-worker = { path = "../journal-inbox-worker" }
+journal-runtime-hermes = { path = "../journal-runtime-hermes" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "journal-inbox-hermes"
+path = "src/main.rs"
+
+[lints]
+workspace = true

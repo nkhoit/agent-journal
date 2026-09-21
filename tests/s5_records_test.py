@@ -11,10 +11,7 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
     # Reuse bootstrap helpers, not the S4 test cases.
     def test_journal_cli_and_lost_response(self):
         self.provision()
-        self.ticket("ticket")
-        self.enroll("ticket", "principal", "delivery")
         self.credential("principal")
-        self.credential("delivery")
         common = ["--endpoint", self.endpoint, "--credential-file",
                   str(self.directory / "principal")]
 
@@ -76,7 +73,7 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
         aj("post", *args, succeeds=False)
         with sqlite3.connect(self.database) as connection:
             for table in ["records", "attention", "mailbox_items",
-                          "delivery_attempts", "idempotency_keys"]:
+                          "idempotency_keys"]:
                 self.assertEqual(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 2)
         payload.write_text(json.dumps({
             "kind": "note", "content": "reply",

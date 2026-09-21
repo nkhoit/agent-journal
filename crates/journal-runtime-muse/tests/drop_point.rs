@@ -1,16 +1,15 @@
 //! Drop-point contract tests: the exact on-disk behavior the hook worker
 //! relies on. These run against real temporary directories, not mocks.
 
-use journal_adapter_core::{CoreError, Envelope, Route, Runtime};
+use journal_inbox_worker::{Envelope, Route, Runtime, RuntimeError};
 use journal_runtime_muse::{MuseRuntime, STATUS};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 
-fn envelope(attempt_id: &str) -> Envelope {
+fn envelope(inbox_item_id: &str) -> Envelope {
     Envelope {
         record_id: "record-1".into(),
-        mailbox_item_id: "item-1".into(),
-        attempt_id: attempt_id.into(),
+        inbox_item_id: inbox_item_id.into(),
         space_id: "space".into(),
         from_principal: "source".into(),
         source_run: None,
@@ -54,7 +53,7 @@ fn status_is_supported_and_constructor_validates_the_drop_point() {
     let missing = dir.join("nope");
     assert!(matches!(
         MuseRuntime::new(missing.to_str().unwrap()),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     ));
 
     // Regular file instead of directory.
@@ -62,7 +61,7 @@ fn status_is_supported_and_constructor_validates_the_drop_point() {
     std::fs::write(&file, b"x").unwrap();
     assert!(matches!(
         MuseRuntime::new(file.to_str().unwrap()),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     ));
 
     // Symlink is rejected.
@@ -70,7 +69,7 @@ fn status_is_supported_and_constructor_validates_the_drop_point() {
     std::os::unix::fs::symlink(&dir, &link).unwrap();
     assert!(matches!(
         MuseRuntime::new(link.to_str().unwrap()),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     ));
 
     // Non-private directory is rejected.
@@ -78,7 +77,7 @@ fn status_is_supported_and_constructor_validates_the_drop_point() {
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(matches!(
         MuseRuntime::new(open.to_str().unwrap()),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     ));
 
     std::fs::remove_dir_all(&dir).ok();
@@ -89,7 +88,7 @@ fn status_is_supported_and_constructor_validates_the_drop_point() {
 fn accepted_injection_writes_the_documented_payload() {
     let dir = private_dir("accept");
     let runtime = MuseRuntime::new(dir.to_str().unwrap()).expect("runtime");
-    let body = envelope("attempt-1");
+    let body = envelope("item-1");
     let rendered = body.render();
     let receipt = runtime
         .inject(&route("main"), &body, &rendered)
@@ -100,12 +99,11 @@ fn accepted_injection_writes_the_documented_payload() {
     let path = dir.join(&receipt);
     let bytes = std::fs::read(&path).expect("drop file");
     let value: Value = serde_json::from_slice(&bytes).expect("drop JSON");
-    assert_eq!(value["version"], 1);
-    assert_eq!(value["dedupe_key"], "attempt-1");
+    assert_eq!(value["version"], 2);
+    assert_eq!(value["dedupe_key"], "item-1");
     assert_eq!(value["target_chat"], "main");
     assert_eq!(value["record_id"], "record-1");
-    assert_eq!(value["mailbox_item_id"], "item-1");
-    assert_eq!(value["attempt_id"], "attempt-1");
+    assert_eq!(value["inbox_item_id"], "item-1");
     assert_eq!(value["space_id"], "space");
     assert_eq!(value["from_principal"], "source");
     assert_eq!(value["addressed_to"], "destination");
@@ -126,7 +124,7 @@ fn accepted_injection_writes_the_documented_payload() {
 fn exact_replay_returns_the_same_receipt_without_rewriting() {
     let dir = private_dir("replay");
     let runtime = MuseRuntime::new(dir.to_str().unwrap()).expect("runtime");
-    let body = envelope("attempt-replay");
+    let body = envelope("item-replay");
     let rendered = body.render();
     let first = runtime
         .inject(&route("chat-abc"), &body, &rendered)
@@ -156,10 +154,27 @@ fn exact_replay_returns_the_same_receipt_without_rewriting() {
 }
 
 #[test]
+fn identical_payload_through_a_symlink_is_not_handoff_evidence() {
+    let dir = private_dir("symlink-replay");
+    let runtime = MuseRuntime::new(dir.to_str().unwrap()).unwrap();
+    let envelope = envelope("item-symlink");
+    let receipt = runtime
+        .inject(&route("main"), &envelope, &envelope.render())
+        .unwrap();
+    let published = dir.join(receipt);
+    let moved = dir.join("elsewhere.json");
+    std::fs::rename(&published, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &published).unwrap();
+    let result = runtime.inject(&route("main"), &envelope, &envelope.render());
+    std::fs::remove_dir_all(dir).unwrap();
+    assert_eq!(result, Err(RuntimeError::RuntimeRejected));
+}
+
+#[test]
 fn conflicting_payload_at_the_stable_name_fails_closed() {
     let dir = private_dir("conflict");
     let runtime = MuseRuntime::new(dir.to_str().unwrap()).expect("runtime");
-    let body = envelope("attempt-conflict");
+    let body = envelope("item-conflict");
     let rendered = body.render();
     let receipt = runtime
         .inject(&route("main"), &body, &rendered)
@@ -170,7 +185,7 @@ fn conflicting_payload_at_the_stable_name_fails_closed() {
 
     assert_eq!(
         runtime.inject(&route("main"), &body, &rendered),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -180,7 +195,7 @@ fn conflicting_payload_at_the_stable_name_fails_closed() {
 fn unreadable_existing_file_is_ambiguous_and_fails_closed() {
     let dir = private_dir("ambiguous");
     let runtime = MuseRuntime::new(dir.to_str().unwrap()).expect("runtime");
-    let body = envelope("attempt-ambiguous");
+    let body = envelope("item-ambiguous");
     let rendered = body.render();
     let receipt = runtime
         .inject(&route("main"), &body, &rendered)
@@ -191,7 +206,7 @@ fn unreadable_existing_file_is_ambiguous_and_fails_closed() {
 
     assert_eq!(
         runtime.inject(&route("main"), &body, &rendered),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -202,12 +217,12 @@ fn vanished_drop_dir_is_retryable_not_terminal() {
     let dir = private_dir("vanished");
     let runtime = MuseRuntime::new(dir.to_str().unwrap()).expect("runtime");
     std::fs::remove_dir_all(&dir).expect("remove drop dir");
-    let body = envelope("attempt-gone");
+    let body = envelope("item-gone");
     let rendered = body.render();
 
     assert!(matches!(
         runtime.inject(&route("main"), &body, &rendered),
-        Err(CoreError::RuntimeUnavailable(_))
+        Err(RuntimeError::RuntimeUnavailable(_))
     ));
 }
 
@@ -215,26 +230,26 @@ fn vanished_drop_dir_is_retryable_not_terminal() {
 fn malformed_routes_are_rejected_before_any_write() {
     let dir = private_dir("routes");
     let runtime = MuseRuntime::new(dir.to_str().unwrap()).expect("runtime");
-    let body = envelope("attempt-routes");
+    let body = envelope("item-routes");
     let rendered = body.render();
 
     let mut disabled = route("main");
     disabled.enabled = false;
     assert_eq!(
         runtime.inject(&disabled, &body, &rendered),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     );
     for bad in ["", "../escape", "chat/1", "a:/b", "chat\n1"] {
         assert_eq!(
             runtime.inject(&route(bad), &body, &rendered),
-            Err(CoreError::RuntimeRejected),
+            Err(RuntimeError::RuntimeRejected),
             "chat id rejected: {bad:?}"
         );
     }
     // Mismatched rendered text is never injected.
     assert_eq!(
         runtime.inject(&route("main"), &body, "different text"),
-        Err(CoreError::RuntimeRejected)
+        Err(RuntimeError::RuntimeRejected)
     );
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count(),

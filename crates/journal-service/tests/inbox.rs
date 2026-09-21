@@ -108,9 +108,7 @@ fn independent_principals_replay_ack_and_archive_without_adapters() {
     for table in ["records", "mailbox_items", "inbox_sequences"] {
         assert_eq!(f.count(table), 1);
     }
-    for table in ["memberships", "adapter_registrations"] {
-        assert_eq!(f.count(table), 0);
-    }
+    assert_eq!(f.count("memberships"), 0);
     let page = f.service.inbox(&f.beta, &InboxQuery::default()).unwrap();
     let item = &page.items[0];
     assert_eq!(item.seq, 1);
@@ -150,7 +148,6 @@ fn independent_principals_replay_ack_and_archive_without_adapters() {
             .is_empty()
     );
     assert_eq!(f.count("records"), 1);
-    assert_eq!(f.count("delivery_attempts"), 1);
     for token in [&f.alpha, &f.beta] {
         let status = f
             .service
@@ -253,7 +250,6 @@ fn multi_recipient_append_and_ack_failures_are_atomic() {
         "attention",
         "mailbox_items",
         "inbox_sequences",
-        "delivery_attempts",
         "idempotency_keys",
     ] {
         assert_eq!(f.count(table), 0, "{table}");
@@ -409,7 +405,7 @@ fn receipt_authentication_is_current_even_after_acknowledgment() {
 }
 
 #[test]
-fn every_legacy_state_is_independent_of_inbox_receipts() {
+fn legacy_state_cannot_mutate_inbox_receipts() {
     let f = Fixture::new();
     f.post("legacy");
     let original = f.service.inbox(&f.beta, &InboxQuery::default()).unwrap();
@@ -424,12 +420,16 @@ fn every_legacy_state_is_independent_of_inbox_receipts() {
         "suppressed-revoked",
     ] {
         let connection = f.db.connect().unwrap();
-        connection
-            .execute("UPDATE mailbox_items SET state=?", [state])
-            .unwrap();
-        connection
-            .execute("UPDATE delivery_attempts SET state=?", [state])
-            .unwrap();
+        assert!(
+            connection
+                .execute("UPDATE mailbox_items SET state=?", [state])
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute("UPDATE delivery_attempts SET state=?", [state])
+                .is_err()
+        );
         assert_eq!(
             f.service.inbox(&f.beta, &InboxQuery::default()).unwrap(),
             original
@@ -442,10 +442,12 @@ fn every_legacy_state_is_independent_of_inbox_receipts() {
         .service
         .inbox(&f.beta, &InboxQuery::from_query("state=all").unwrap())
         .unwrap();
-    f.db.connect()
-        .unwrap()
-        .execute("UPDATE mailbox_items SET state='pending'", [])
-        .unwrap();
+    assert!(
+        f.db.connect()
+            .unwrap()
+            .execute("UPDATE mailbox_items SET state='pending'", [])
+            .is_err()
+    );
     assert_eq!(
         f.service
             .inbox(&f.beta, &InboxQuery::from_query("state=all").unwrap())

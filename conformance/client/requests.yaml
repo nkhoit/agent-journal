@@ -1,122 +1,79 @@
 fixture_version: 1
 operations:
-  - operation_id: getInbox
-    method: GET
-    path: /v1/inbox
-    max_limit: 100
-  - operation_id: acknowledgeInboxItem
-    method: POST
-    path: /v1/inbox/{item_id}/ack
-  - operation_id: getOperationalMetrics
-    method: GET
-    path: /v1/admin/metrics
-  - operation_id: healthLive
-    method: GET
-    path: /health/live
-  - operation_id: healthReady
-    method: GET
-    path: /health/ready
-  - operation_id: registerPrincipal
-    method: POST
-    path: /v1/registrations
-  - operation_id: getMe
-    method: GET
-    path: /v1/me
-  - operation_id: updateProfile
-    method: PATCH
-    path: /v1/me/profile
-  - operation_id: listPrincipals
-    method: GET
-    path: /v1/principals
-  - operation_id: listSpaces
-    method: GET
-    path: /v1/spaces
-  - operation_id: getSpace
-    method: GET
-    path: /v1/spaces/{space}
-  - operation_id: appendRecord
-    method: POST
-    path: /v1/spaces/{space}/records
-    max_content_bytes: 65536
-    max_attention: 16
-    max_relations: 32
-  - operation_id: listRecords
-    method: GET
-    path: /v1/spaces/{space}/records
-    max_limit: 100
-  - operation_id: getRecord
-    method: GET
-    path: /v1/records/{record_id}
-  - operation_id: searchRecords
-    method: GET
-    path: /v1/spaces/{space}/search
-    order: [rank, seq]
-  - operation_id: getThread
-    method: GET
-    path: /v1/records/{record_id}/thread
-  - operation_id: createEnrollmentTicket
-    method: POST
-    path: /v1/admin/enrollment-tickets
-  - operation_id: exchangeEnrollmentTicket
-    method: POST
-    path: /v1/enrollment/exchange
-  - operation_id: provisionAdapter
-    method: POST
-    path: /v1/admin/adapters
-  - operation_id: listAdapters
-    method: GET
-    path: /v1/admin/adapters
-  - operation_id: registerAdapter
-    method: POST
-    path: /v1/adapters/self/register
-  - operation_id: heartbeatAdapter
-    method: POST
-    path: /v1/adapters/self/heartbeat
-  - operation_id: replaceAdapter
-    method: POST
-    path: /v1/admin/adapters/{adapter_id}/replace
-  - operation_id: claimMailbox
-    method: POST
-    path: /v1/mailbox/claims
-    max_items: 20
-    max_wait_seconds: 30
-  - operation_id: commitHostCustody
-    method: POST
-    path: /v1/claims/{claim_id}/commit
-  - operation_id: recordDeliveryEvent
-    method: POST
-    path: /v1/mailbox-items/{item_id}/events
-    max_detail_serialized_utf8_bytes: 4096
-  - operation_id: getMailboxStatus
-    method: GET
-    path: /v1/mailbox/status
-  - operation_id: getRecordDeliveryStatus
-    method: GET
-    path: /v1/records/{record_id}/delivery-status
-  - operation_id: getAdminMailboxStatus
-    method: GET
-    path: /v1/admin/mailboxes/{principal}/status
-  - operation_id: createPrincipal
-    method: POST
-    path: /v1/admin/principals
-  - operation_id: recoverPrincipalCredential
-    method: POST
-    path: /v1/admin/principals/recover
-  - operation_id: createSpace
-    method: POST
-    path: /v1/admin/spaces
-  - operation_id: grantMembership
-    method: POST
-    path: /v1/admin/memberships
-  - operation_id: rotateCredential
-    method: POST
-    path: /v1/admin/credentials/rotate
-  - operation_id: requeueMailboxItem
-    method: POST
-    path: /v1/admin/mailbox-items/{item_id}/requeue
-  - operation_id: revokeCredential
-    method: POST
-    path: /v1/admin/credentials/revoke
-  - operation_id: recoverEnrollment
-    method: POST
-    path: /v1/admin/enrollment/recover
+- operation_id: getInbox
+  method: GET
+  path: /v1/inbox
+  max_limit: 100
+- operation_id: acknowledgeInboxItem
+  method: POST
+  path: /v1/inbox/{item_id}/ack
+- operation_id: getOperationalMetrics
+  method: GET
+  path: /v1/admin/metrics
+- operation_id: healthLive
+  method: GET
+  path: /health/live
+- operation_id: healthReady
+  method: GET
+  path: /health/ready
+- operation_id: registerPrincipal
+  method: POST
+  path: /v1/registrations
+- operation_id: getMe
+  method: GET
+  path: /v1/me
+- operation_id: updateProfile
+  method: PATCH
+  path: /v1/me/profile
+- operation_id: listPrincipals
+  method: GET
+  path: /v1/principals
+- operation_id: listSpaces
+  method: GET
+  path: /v1/spaces
+- operation_id: getSpace
+  method: GET
+  path: /v1/spaces/{space}
+- operation_id: appendRecord
+  method: POST
+  path: /v1/spaces/{space}/records
+  max_content_bytes: 65536
+  max_attention: 16
+  max_relations: 32
+- operation_id: listRecords
+  method: GET
+  path: /v1/spaces/{space}/records
+  max_limit: 100
+- operation_id: getRecord
+  method: GET
+  path: /v1/records/{record_id}
+- operation_id: searchRecords
+  method: GET
+  path: /v1/spaces/{space}/search
+  order:
+  - rank
+  - seq
+- operation_id: getThread
+  method: GET
+  path: /v1/records/{record_id}/thread
+- operation_id: getRecordDeliveryStatus
+  method: GET
+  path: /v1/records/{record_id}/delivery-status
+- operation_id: createPrincipal
+  method: POST
+  path: /v1/admin/principals
+- operation_id: recoverPrincipalCredential
+  method: POST
+  path: /v1/admin/principals/recover
+- operation_id: createSpace
+  method: POST
+  path: /v1/admin/spaces
+- operation_id: grantMembership
+  method: POST
+  path: /v1/admin/memberships
+- operation_id: rotateCredential
+  method: POST
+  path: /v1/admin/credentials/rotate
+- operation_id: revokeCredential
+  method: POST
+  path: /v1/admin/credentials/revoke

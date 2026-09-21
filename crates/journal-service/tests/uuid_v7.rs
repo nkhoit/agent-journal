@@ -29,11 +29,16 @@ fn record_id_encodes_uuid_v7_timestamp_version_variant_and_random_bits() {
     let db = Database::open(directory.join("journal.db")).unwrap();
     let bootstrap = BootstrapService::new(db.clone());
     let writer = bootstrap
-        .create_principal(&PrincipalCreateRequest {
-            handle: "writer".into(),
-            display_name: "Writer".into(),
-        })
-        .unwrap();
+        .register(
+            &"a".repeat(64),
+            &RegistrationRequest {
+                handle: "writer".into(),
+                display_name: "Writer".into(),
+            },
+        )
+        .unwrap()
+        .receipt
+        .principal;
     bootstrap
         .create_space(&SpaceCreateRequest {
             access: journal_protocol::domain::SpaceAccess::Public,
@@ -50,36 +55,11 @@ fn record_id_encodes_uuid_v7_timestamp_version_variant_and_random_bits() {
             can_admin: false,
         })
         .unwrap();
-    bootstrap
-        .provision_adapter(&AdapterProvisionRequest {
-            principal_id: "writer".into(),
-            adapter_id: "adapter".into(),
-        })
-        .unwrap();
-    let ticket = bootstrap
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: "writer".into(),
-            adapter_id: "adapter".into(),
-            ttl_seconds: 900,
-        })
-        .unwrap();
-    let enrollment = bootstrap
-        .exchange(
-            &ticket.enrollment_ticket.ticket,
-            &EnrollmentExchangeRequest {
-                instance_id: "installation".into(),
-            },
-        )
-        .unwrap();
+    let principal_token = "a".repeat(64);
     let service = BootstrapService::with_sources(db, Arc::new(FixedClock), Arc::new(FixedRandom));
     let input = decode_json(br#"{"kind":"note","content":"hello"}"#).unwrap();
     let result = service
-        .append_record(
-            &enrollment.principal_client_secret.secret,
-            "space",
-            "key",
-            &input,
-        )
+        .append_record(&principal_token, "space", "key", &input)
         .unwrap();
     assert_eq!(result.record.id, "01020304-0506-7fff-bfff-ffffffffffff");
     assert_eq!(result.record.author, writer.id);

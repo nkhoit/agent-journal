@@ -141,7 +141,7 @@ class RecoveryCliTest(unittest.TestCase):
             self.database,
             self.audit,
             approval,
-            "--adapters-quiesced",
+            "--clients-quiesced",
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertTrue(approval.exists())

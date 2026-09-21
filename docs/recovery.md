@@ -1,191 +1,158 @@
 # Protected recovery
 
-Central restore is an offline operation. Close external ingress, stop `journald`,
-and stop every adapter before restoring. The audit's lifetime exclusive lock
-prevents `journal-recover` from running while the daemon or its database workers
-still own that audit. There is no public recovery endpoint, remote administrator
-bearer, or Windows permission fallback.
+Recovery is offline and host-local. Close external ingress, stop `journald`,
+and quiesce principal clients and optional inbox workers. The audit's lifetime
+exclusive lock excludes the operator command while the daemon or its database
+workers still own that audit. There is no public recovery endpoint, remote
+administrator bearer or Windows permission fallback.
 
-## UUID-native compatibility boundary
+## Compatibility and audit ownership
 
-Only the UUID-native current schema is supported. Before any protected startup,
-archive/reset every pre-UUID central database (including empty schema-7 files)
-and every non-current local spool. There is no in-place migration, automatic
-audit adoption for legacy state, or schema downgrade. See
-[`uuid-native-clean-break.md`](uuid-native-clean-break.md) before invoking a
-recovery command.
+Only exact schema 12 central state and its current external snapshot format are
+supported. Older databases, audit formats and legacy spools require explicit
+operator archive/reset. There is no in-place migration, automatic reset or
+adoption of incompatible state. Preserve evidence before an operator reset.
 
-## Recovery units and current-schema operation
+The central `recovery_anchor` holds a random journal identity, monotonic audit
+revision, audit-required marker and inbox cursor epoch. `journald --recovery-audit
+PATH` selects the external audit; the default is a sibling recovery database.
+Its parent must already be private. Audit/lock files are private regular files;
+symlinks, hard-linked audits and unsafe parents are rejected. Never unlink the
+persistent owner lock to bypass a live owner.
 
-The current UUID-native schema includes `recovery_anchor`, containing a random journal identity, a
-monotonic audit revision, and an audit-required marker. First protected startup
-creates a security baseline only for a fresh, unanchored UUID-native database. For an existing deployment,
-stop and inspect the deployment before that first protected initialization: this baseline cannot
-reconstruct security changes lost before audit adoption. Schema downgrade is unsupported; rollback requires a compatible UUID-native
-backup and protected recovery review, never deletion, replay, or editing of historical state.
+Initial protected startup creates an audit only for fresh, unanchored current
+state. It writes a complete private `<audit>.initializing` sibling, syncs,
+publishes and syncs its directory before central adoption. Reserve that name
+and its rollback-journal sidecar. Under the owner lock, an interrupted staging
+file can be rebuilt only when the final audit is absent and the central anchor
+is unrequired at revision zero. A durably published matching revision-zero
+lineage can be adopted after a crash before the central marker commits.
+Required, malformed, foreign, mismatched or closed audits are never replaced.
 
-`journald --recovery-audit "$AUDIT"` selects the external audit. By default,
-`journal.db` uses sibling `journal.recovery.db`. Its parent must be an existing
-private directory. Audit and lock files are mode `0600` on Unix; symlink files,
-hard-linked audit files, and non-private parents are rejected. Keep the persistent
-lock file; never unlink it to bypass a running owner.
+The external audit uses rollback journaling and `synchronous=EXTRA`. A sibling
+is a separate recovery unit, not a separate disk fault domain. Protect and
+replicate it independently; never overwrite it with a central backup.
+Missing required audit, older audit head, foreign journal, unresolved intent or
+closed gate refuses service admission.
 
-First initialization builds the complete audit in a private sibling named
-`<audit>.initializing`, syncs it, renames it to the final audit path, and syncs
-the directory before committing central adoption. Reserve that sibling name and
-its SQLite `-journal` sidecar for initialization. Under the lifetime lock, an
-interrupted staging file can be discarded and rebuilt only when the final audit
-is absent and the central anchor is not audit-required and remains at revision
-zero. If publication was durable but the initializer crashed before that anchor
-update, protected startup read-validates the complete matching revision-zero
-lineage under the audit lock, atomically sets `audit_required`, and reuses the
-same audit bytes. It never creates a replacement or adopts an absent, malformed,
-foreign, mismatched, or closed audit. Required audits are never replaced by this
-retry path.
+## Mutation and retained security state
 
-The audit is a separate SQLite database using rollback journaling and
-`synchronous=EXTRA`. A sibling file is a separate recovery unit, not a separate
-disk fault domain. Protect and replicate it independently. Never overwrite it
-with a central backup. Missing required audit, an older audit head, a different
-journal identity, unresolved intent, or a closed gate refuses startup. Loss of
-the authoritative external audit is not an automatically recoverable condition.
-Keep ingress closed and obtain protected authoritative evidence; do not clear
-the anchor or manufacture a replacement audit.
+Every mutating service transaction durably prepares its proposed security
+snapshot and next revision before committing centrally. The central revision
+commits with the mutation; external completion follows. A crash between these
+commits is uncertain, not rollback. Later operations fail closed.
 
-Every mutating service transaction durably records its proposed security snapshot
-and next revision before committing the central transaction. The central revision
-commits with the mutation; only then is external completion recorded. Read-only
-operations do not advance the revision. Failure or process death between those
-commits is deliberately uncertain, not reported as rollback. Subsequent service
-operations fail closed; unresolved prepared input intents require explicit
-archive/reset rather than reconciliation. Protected read, status,
-and verification gate checks serialize with in-flight audit writers, waiting for
-completion rather than treating transient prepared intents as recovery failures;
-abandoned intents still fail closed. Snapshots include principal
-disablement, spaces, ACLs, installation ownership, registration generations,
-credential and ticket metadata, audit history, relations, and space sequence
-heads. They contain credential digests, not plaintext bearer secrets, and must
-never be published.
+Read/status/verification checks serialize with in-flight audit writers; they
+wait for active completion rather than misclassifying a live prepared intent.
+Abandoned prepared input remains archive/reset-required. Restoring or repeatedly
+approving it cannot manufacture certainty.
 
-Schema 11 snapshots also retain one allocation high-water mark per inbox
-recipient, not per-item receipt metadata. Normal inbox fetch, receipt-status
-reads and repeated acknowledgments do not advance the audit revision. A first
-acknowledgment uses the normal audited mutation boundary; uncertain outcomes
-remain fail-closed. Ordinary retries and restarts preserve the committed first
-timestamp.
+Snapshots retain current principal/profile/name, public-space and membership
+metadata, credential/digest/registration bindings, security history, relations,
+space heads and recipient allocation high-water marks. They never contain
+plaintext bearer secrets. They do not snapshot all inbox receipts.
 
-An intentional older-backup restore retains that backup's acknowledgment state,
-so later acknowledgments may be lost and reminders or downstream handoffs may
-repeat. This is part of the explicit `accepted_record_loss` and complete client
-inventory approval, not silent success or an exactly-once guarantee. Restore
-keeps the greater of backup and audited recipient allocation heads to prevent
-sequence reuse, allowing gaps for lost records, and changes the inbox cursor
-epoch. Clients must restart without a cursor. No full inbox receipt snapshots,
-receipt-delta audit, or replacement recovery approval workflow is introduced.
+Restoration reconciles audited principal and profile state and revokes all
+restored credentials. Audited post-backup credentials and registration receipts
+are retained as revoked, including rotation/recovery descendants. Existing
+identity/digest/receipt bindings must match; conflicting bindings fail closed
+before destination publication. Rotation references may be restored in either
+row order using deferred foreign keys, verified before preparing recovery output.
+Immutable receipt guards are not disabled and history is not replaced/deleted.
 
-Snapshots prioritize a straightforward inspectable recovery representation over
-compactness. Audit growth and serialized mutation overhead must be included in
-deployment capacity measurements. There is no audit pruning or rotation command.
+This retention matters: an old token must not become a new registration because
+its digest was absent from the backup. A clean reset that discards the audit is
+different; unknown token bytes cannot be globally blacklisted without evidence.
+
+## Inbox consequences
+
+Ordinary crashes/retries retain committed first acknowledgment timestamps.
+An intentional older-backup restore retains that backup's receipt state, so
+later acknowledgments can be lost and downstream handoffs can repeat.
+`accepted_record_loss` and complete client reconciliation explicitly approve
+this consequence, not an exactly-once guarantee.
+
+Restore keeps the greater of backup and audited recipient allocation heads.
+Lost records may leave gaps, but recipient sequences are not reused. Restore
+changes the inbox cursor epoch; clients restart without a saved continuation.
+There is no receipt-delta audit or automatic reconstruction of acknowledgments.
 
 ## Backup
 
 The storage online-backup primitive supports concurrent writers. The protected
-operator command additionally records durable backup evidence after all probes;
-it requires the daemon to be stopped because it takes the same lifetime lock.
+operator command records durable evidence after probes and requires the daemon
+stopped because it takes the same lifetime lock.
 
 ```sh
 journal-recover backup "$DATABASE" "$AUDIT" "$BACKUP"
 ```
 
-The destination must not exist and its parent must be private. Backup evidence
-records counts and SHA-256 hashes for every ordinary table, ACL state, per-space
-heads, full SQLite/foreign-key/FTS integrity, exact FTS content, and attention,
-mailbox, and attempt consistency. A timestamp is recorded only after these
-checks succeed. Raw `Database::backup_to` calls have no external audit timestamp.
+The destination must not exist and its parent must be private. Verification
+includes ordinary-table counts/SHA-256 hashes, public-space/membership state,
+space heads, SQLite/foreign-key/FTS integrity, exact FTS content, attention/inbox
+agreement and inbox allocation heads. No attempt/custody inventory exists.
+A durable timestamp follows successful probes; raw `Database::backup_to` alone
+does not create external backup evidence.
 
-## Restore and reconcile
+## Restore, approve and reopen
 
-1. Close external ingress, stop the daemon, and quiesce every known adapter,
-   including replaced, stale, and offline installations. Preserve surviving
-   spools, client checkpoints, and audit evidence. The CLI cannot stop a runtime;
-   `--adapters-quiesced` is an explicit operator attestation, not an RPC.
-2. Restore into a new private path, never over a live database or its WAL files:
+1. Close ingress, stop the daemon, and stop principal clients and optional
+   workers. Preserve append inputs/checkpoints, runtime-native dedupe evidence,
+   published Muse files and hook seen-sets. `--clients-quiesced` is an operator
+   attestation, not an RPC or central consumer registry.
+2. Restore to a new private path, never over live files:
 
    ```sh
-   journal-recover restore "$DATABASE" "$AUDIT" "$BACKUP" "$RESTORED" "$APPROVAL" --adapters-quiesced
+   journal-recover restore "$DATABASE" "$AUDIT" "$BACKUP" "$RESTORED" "$APPROVAL" --clients-quiesced
    ```
 
-   The gate closes before backup validation. Full pre/post-copy hashes must
-   agree. Security snapshots restore current principal, space, ACL, and
-   installation state. All restored credentials are revoked, all tickets
-   invalidated, active claims cancelled, and claimed attempts returned to pending
-   without changing their IDs. Registrations advance beyond the surviving audited
-   generation and become revoked. Historical records, custody receipts, attempts,
-   and telemetry are retained. No custody or runtime result is fabricated.
-3. Review the mode-`0600` approval template. Its prior audited and restored space
-   heads expose rollback. Its installation inventory includes every installation
-   retained in the audit, not merely currently active adapters. Compare every
-   surviving spool, including accepted/compacted tombstones and pending telemetry,
-   against restored records, attempts, receipts, and generations. Compare every
-   client checkpoint and retained append input against restored sequence heads.
-   Record missing records, lost acknowledgements, stale custody, and potential
-   duplicate runtime turns in protected operator evidence.
-4. Do not delete a spool to make reconciliation appear successful. Quarantine
-   old-generation work that cannot authenticate after re-enrollment. Only use
-   explicit protected requeue for a retained eligible mailbox obligation after
-   reviewing duplicate-injection consequences. Reset/replay client checkpoints
-   only after deciding which lost records require republishing. The tool does
-   not automatically rewrite destination-local spools or client checkpoints.
-5. Only after the inventory is demonstrably complete and the rollback and
-   duplicate-delivery consequences are accepted, set `inventory_complete` and
-   `accepted_record_loss` to `true`. Do not edit the hashes, heads, revision, or
-   inventory. Unknown, missing, or unexamined surviving evidence means stay closed.
-6. Re-run probes and reopen the exact reconciled database:
+   The gate closes before validating a resolved backup. Copy hashes must match.
+   Current audited identity/security bindings are reconciled and credentials
+   revoked. Inbox receipt state is retained from the backup.
+3. Review the private approval template's exact hashes, revision, space heads
+   and `reconciled_clients` principal-ID inventory. Account for all client
+   checkpoints, missing posts, lost acks and possible duplicate handoffs. This is
+   operator acknowledgment of restored state, not installation/spool inventory.
+4. Set only `inventory_complete` and `accepted_record_loss` to true when the
+   review is demonstrably complete. Unknown evidence means stay closed. Do not
+   change hashes, heads, revision or client identities to force acceptance.
+5. Re-probe and reopen the exact reconciled database:
 
    ```sh
    journal-recover reopen "$RESTORED" "$AUDIT" "$APPROVAL"
    ```
 
-   A changed database, incomplete inventory, stale approval, active restored
-   authority, or failed probe refuses reopening. Reconciliation advances the audit
-   revision so the former central file cannot reopen accidentally. Restart
-   `journald` using both the restored database and the same surviving audit path.
-   Re-enroll both credential classes through protected Unix administration for
-   each retained installation. Reopen external ingress only after deployment ACL,
-   search, and delivery canaries.
+   Changed state, stale/incomplete approval, live credentials or failed probes
+   refuse reopening. The advanced revision prevents reopening the former file.
+   Restart with the restored path and surviving audit, recover credentials by
+   principal UUID through protected administration, reset volatile cursors and
+   reopen ingress only after deployment checks.
 
-For a closed, resolved input snapshot, stop/quiesce as above and use:
+For a closed resolved input without a backup copy, use:
 
 ```sh
-journal-recover reconcile "$DATABASE" "$AUDIT" "$NEW_APPROVAL" --adapters-quiesced
+journal-recover reconcile "$DATABASE" "$AUDIT" "$APPROVAL" --clients-quiesced
 ```
 
-This is not a success override. It revokes credentials/tickets, advances fencing,
-runs probes, and generates a new unapproved template. An uncertain prepared input
-intent is archive/reset-required: restore and reconcile reject it before durable
-recovery mutation or destination publication, preserve audit evidence, and leave
-service admission closed. Repeated attempts and an approval cannot turn an
-uncertain input into an approved reconciliation. Denying memberships or disabling
-existing principals would not protect public spaces from a newly registered
-principal after reopening, so neither is a recovery fallback.
+It is not a success override. Uncertain prepared input is rejected before
+recovery mutation or destination publication. A completed reconciliation has
+prepared output until reopen; its matching durable reconciliation evidence and
+exact approved client review permit reopening. A crash before that evidence
+exists remains archive/reset-required.
 
-A successfully completed reconciliation has a prepared output head until
-`reopen`; its matching durable reconciliation evidence and exact approved
-inventory still allow reopening. Do not confuse this with an uncertain input
-intent. A crash before that durable evidence exists remains archive/reset-required.
-Ordinary verified committed-snapshot restore remains supported. There is no
-automatic reset, deletion, or migration. An audit older
-than the central revision is rejected rather than replayed. A damaged or failed
-restore stays closed; preserve the failed destination and retry to a fresh path.
+No adapter fencing, generation bump, enrollment ticket, spool reconciliation or
+runtime requeue remains. Never delete local handoff evidence to make an approval
+appear complete. Runtime/hook duplicate consequences remain operator concerns.
 
 ## Evidence and limits
 
-Storage tests use real files, deterministic in-flight writes during backup,
-corrupt FTS/attention cases, incomplete approvals, missing and rolled-back audit,
-exclusive-lock contention, ACL/ownership replay, and retained custody. Child
-processes are killed after external prepare, after central commit, after closure,
-and after reconciliation. Restart remains closed until a fresh verified approval.
-The cross-platform storage tests do not establish Unix filesystem authorization
-or actual daemon/CLI acceptance on Windows; Unix gates require a native Unix
-runner. Deployment spool/client review and private runtime canaries remain
-operator acceptance work, not an automated guarantee.
+Real-file tests cover older backups, post-backup credential lineage, conflicting
+bindings, lost acks, allocation nonreuse, exact approvals, absent/rolled-back
+audit, FTS/attention corruption, locks and process death around prepare/commit
+and reconciliation. Unix CLI tests exercise the protected path. Windows unit
+tests do not prove Unix permissions or deployment ingress.
+
+Snapshot growth and serialized mutation cost require deployment capacity
+measurement. There is no audit pruning/rotation command. Loss of authoritative
+audit requires protected authoritative review, not clearing the anchor or
+manufacturing a replacement. Live runtime and deployment canaries are not claimed.

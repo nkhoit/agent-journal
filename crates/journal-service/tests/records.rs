@@ -7,7 +7,7 @@ struct Fixture {
     db: Database,
     service: BootstrapService,
     token: String,
-    delivery: String,
+    unbound_token: String,
     path: std::path::PathBuf,
 }
 
@@ -103,74 +103,13 @@ fn independently_registered_principals_use_public_spaces_without_memberships() {
             .unwrap(),
         posted
     );
+    let inbox = f.service.inbox(&beta, &InboxQuery::default()).unwrap();
+    assert_eq!(inbox.items.len(), 1);
+    assert_eq!(inbox.items[0].record, posted.record);
     f.service
-        .provision_adapter(&AdapterProvisionRequest {
-            principal_id: "beta".into(),
-            adapter_id: "beta-adapter".into(),
-        })
+        .acknowledge_inbox_item(&beta, &inbox.items[0].inbox_item_id)
         .unwrap();
-    let ticket = f
-        .service
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: "beta".into(),
-            adapter_id: "beta-adapter".into(),
-            ttl_seconds: 900,
-        })
-        .unwrap();
-    let enrolled = f
-        .service
-        .exchange(
-            &ticket.enrollment_ticket.ticket,
-            &EnrollmentExchangeRequest {
-                instance_id: "beta-installation".into(),
-            },
-        )
-        .unwrap();
-    let delivery = &enrolled.delivery_adapter_secret.secret;
-    let registration = f
-        .service
-        .register_adapter(
-            delivery,
-            &AdapterRegisterRequest {
-                instance_id: "beta-installation".into(),
-            },
-        )
-        .unwrap();
-    let claim = f
-        .service
-        .claim_mailbox(
-            delivery,
-            &ClaimRequest {
-                instance_id: "beta-installation".into(),
-                generation: registration.generation,
-                limit: 20,
-                wait_seconds: 0,
-            },
-        )
-        .unwrap();
-    assert_eq!(claim.items.len(), 1);
-    assert_eq!(claim.items[0].record, posted.record);
-    let custody = f
-        .service
-        .commit_custody(
-            delivery,
-            &claim.claim_id,
-            &CommitRequest {
-                generation: registration.generation,
-                items: vec![CommitItem {
-                    mailbox_item_id: claim.items[0].mailbox_item_id.clone(),
-                    attempt_id: claim.items[0].attempt_id.clone(),
-                }],
-            },
-        )
-        .unwrap();
-    assert_eq!(custody.items[0].result, CommitItemResult::Committed);
     assert_eq!(f.count("memberships"), memberships);
-    assert!(matches!(
-        f.service
-            .append_record(delivery, "other", "delivery-cannot-publish", &f.input()),
-        Err(BootstrapError::Unauthorized)
-    ));
     f.db.connect()
         .unwrap()
         .execute(
@@ -210,12 +149,15 @@ impl Fixture {
         ));
         let db = Database::open(&path).unwrap();
         let service = BootstrapService::new(db.clone());
-        for id in ["writer", "reader", "outsider"] {
+        for (index, id) in ["writer", "reader", "outsider"].into_iter().enumerate() {
             service
-                .create_principal(&PrincipalCreateRequest {
-                    handle: id.into(),
-                    display_name: id.into(),
-                })
+                .register(
+                    &format!("{:064x}", index + 1),
+                    &RegistrationRequest {
+                        handle: id.into(),
+                        display_name: id.into(),
+                    },
+                )
                 .unwrap();
         }
         for id in ["space", "other"] {
@@ -238,32 +180,11 @@ impl Fixture {
                 })
                 .unwrap();
         }
-        service
-            .provision_adapter(&AdapterProvisionRequest {
-                principal_id: "writer".into(),
-                adapter_id: "adapter".into(),
-            })
-            .unwrap();
-        let ticket = service
-            .create_ticket(&EnrollmentTicketCreateRequest {
-                principal_id: "writer".into(),
-                adapter_id: "adapter".into(),
-                ttl_seconds: 900,
-            })
-            .unwrap();
-        let enrollment = service
-            .exchange(
-                &ticket.enrollment_ticket.ticket,
-                &EnrollmentExchangeRequest {
-                    instance_id: "installation".into(),
-                },
-            )
-            .unwrap();
         Self {
             db,
             service,
-            token: enrollment.principal_client_secret.secret,
-            delivery: enrollment.delivery_adapter_secret.secret,
+            token: format!("{:064x}", 1),
+            unbound_token: "f".repeat(64),
             path,
         }
     }
@@ -297,30 +218,7 @@ impl Fixture {
     }
 
     fn reader_token(&self) -> String {
-        self.service
-            .provision_adapter(&AdapterProvisionRequest {
-                principal_id: "reader".into(),
-                adapter_id: "reader-adapter".into(),
-            })
-            .unwrap();
-        let ticket = self
-            .service
-            .create_ticket(&EnrollmentTicketCreateRequest {
-                principal_id: "reader".into(),
-                adapter_id: "reader-adapter".into(),
-                ttl_seconds: 900,
-            })
-            .unwrap();
-        self.service
-            .exchange(
-                &ticket.enrollment_ticket.ticket,
-                &EnrollmentExchangeRequest {
-                    instance_id: "reader-installation".into(),
-                },
-            )
-            .unwrap()
-            .principal_client_secret
-            .secret
+        format!("{:064x}", 2)
     }
 
     fn stored_append(&self, key: &str) -> AppendResult {
@@ -494,7 +392,7 @@ fn search_is_authorized_before_scoring_and_cursors_are_scoped() {
         Err(BootstrapError::NotFound)
     ));
     assert!(matches!(
-        f.service.search_records(&f.delivery, "space", &query),
+        f.service.search_records(&f.unbound_token, "space", &query),
         Err(BootstrapError::Unauthorized)
     ));
     query.page.cursor = before.next_cursor;
@@ -587,7 +485,7 @@ fn thread_projects_only_replies_and_binds_cursor_to_anchor() {
     ));
     assert!(matches!(
         f.service
-            .get_thread(&f.delivery, &root.id, &PageQuery::default()),
+            .get_thread(&f.unbound_token, &root.id, &PageQuery::default()),
         Err(BootstrapError::Unauthorized)
     ));
     assert!(matches!(
@@ -816,7 +714,6 @@ fn append_replay_read_and_mailbox_are_durable() {
         "attention",
         "mailbox_items",
         "inbox_sequences",
-        "delivery_attempts",
         "idempotency_keys",
     ] {
         assert_eq!(f.count(table), 1, "{table}");
@@ -977,7 +874,6 @@ fn rollback_at_every_append_boundary() {
             "record_relations",
             "attention",
             "mailbox_items",
-            "delivery_attempts",
             "idempotency_keys",
         ] {
             assert_eq!(
@@ -1002,7 +898,7 @@ fn authorization_recipients_relations_and_utf8_limits() {
     let f = Fixture::new();
     assert!(matches!(
         f.service
-            .append_record(&f.delivery, "space", "key", &f.input()),
+            .append_record(&f.unbound_token, "space", "key", &f.input()),
         Err(BootstrapError::Unauthorized)
     ));
     assert!(matches!(
@@ -1399,13 +1295,7 @@ fn process_termination_rolls_back_or_replays_complete_append() {
         let _ = std::fs::remove_file(marker);
         assert!(reached, "child failed to reach crash boundary");
         let expected = if mode == "before" { 0 } else { 1 };
-        for table in [
-            "records",
-            "attention",
-            "mailbox_items",
-            "delivery_attempts",
-            "idempotency_keys",
-        ] {
+        for table in ["records", "attention", "mailbox_items", "idempotency_keys"] {
             assert_eq!(f.count(table), expected, "{mode}: {table}");
         }
         let mut input = f.input();

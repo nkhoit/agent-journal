@@ -1,95 +1,71 @@
 # Contributing
 
-Thanks for helping make Agent Journal small, inspectable, and safe.
+Read README.md, AGENTS.md, the implementation plan, protocol and security model
+before changing behavior. Keep Agent Journal small, inspectable and runtime-neutral.
 
-## Before opening a change
+## Development
 
-- Read `README.md`, `docs/design.md`, and `docs/protocol.md`.
-- Keep the central protocol runtime-neutral: principals and spaces are public protocol concepts; runtime sessions, chat IDs, hook paths, and process handles stay adapter-local.
-- Do not add private deployment facts, credentials, exports, backups, or generated binaries.
-- For a protocol or security change, include the corresponding OpenAPI, UUID-native baseline, conformance, and documentation updates.
+Rust 1.85 and edition 2024 are the compatibility baseline. Dependencies are pinned;
+update Cargo.lock with any exercised manifest change. Use explicit rusqlite
+transactions and bounded blocking service work, not an ORM or generic SDK.
 
-## Development loop
-
-```bash
-make fmt
-make test
-make clippy
-make check
+```sh
+cargo +1.85.0 fmt --all -- --check
+cargo +1.85.0 test --locked --workspace --all-targets
+cargo +1.85.0 clippy --locked --workspace --all-targets -- -D warnings
+cargo +1.85.0 build --locked --workspace
+make check CARGO="cargo +1.85.0" OPENAPI_STANDARDS_LINT=1
+make browser-security CARGO="cargo +1.85.0"
 ```
 
-Rust code must pass `cargo fmt --all -- --check`, `cargo test --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, and `cargo build --locked --workspace`. Install the shared Python gate dependencies with `python3 -m pip install -r requirements-ci.txt` before running the Python gates locally. `make check` also runs the stdlib-only UUID-native baseline contract, deterministic OpenAPI structural/reference check, optional pinned Redocly lint, Markdown checks, and public-hygiene scan. Keep tests deterministic and avoid credentials.
+The Python gate dependencies are pinned in requirements-ci.txt; browser tooling
+is pinned in tests/browser-requirements.txt. Install missing dependencies from
+those manifests when the selected gate requires them. CI runs pinned Redocly
+1.34.3 and Chromium security acceptance. Unix subprocess tests need a native
+filesystem with private directory permissions.
 
-The workspace pins Tokio, Axum, and Tower for the runnable S3 service shell, plus tracing for structured process and request events. The shell deliberately uses no connection pool: synchronous `rusqlite` work runs through an explicit bounded blocking executor and refuses excess work rather than growing an unbounded queue. The protocol crate pins `base64`, `hmac`, and `sha2` for authenticated cursors and Jiff without timezone-database features for RFC 3339 validation. The storage crate pins `rusqlite` with only bundled SQLite/FTS5 and online-backup features. Add any further dependency only with an exercised use case, a pinned version, and a documentation update explaining the choice; do not add an ORM, pool, or `async-trait` merely to fill a boundary.
+`make check` covers Rust, migration/retirement contracts, OpenAPI mutation
+coverage, independent registration and protected credential recovery, record
+CLI replay, inbox fetch/ack, offline recovery, inbox-client conformance and
+public hygiene. Browser and privileged foreign-UID acceptance are separate
+targets; an unprivileged skip is not evidence.
 
-The S5 protocol query codec pins `form_urlencoded` and `percent-encoding` for
-shared client/server escaping and strict UTF-8 query validation. Record UUIDv7
-generation uses the existing injected secure-random source and server clock.
-`make records-test` runs the Unix CLI/API vertical through S4 provisioning.
-`make delivery-test` runs the S7/S8 registration, claim, replacement, custody,
-telemetry, status, and requeue CLI/API verticals, including lost responses,
-service restart, same-attempt expiry, and retryable telemetry recovery.
-Both are part of `make check`.
+## Required coverage
 
-The S9 local spool uses the existing pinned `rusqlite`, `serde_json`, and `sha2`
-dependencies, plus pinned `fs2` 0.4.3 for cross-platform exclusive process locking
-and filesystem free-space checks. `cargo test --locked -p journal-adapter-spool`
-runs real-file recovery, child-process termination at durable boundaries, lock
-contention, corruption, and pressure/full-database rollback tests without a runtime.
+Write tests before implementing new behavior or reproducing a bug. Include exact
+limits and one-over failures, UTF-8 byte limits, malformed/unknown/duplicate JSON,
+authorization and transaction rollback. Use fake clocks, injected randomness,
+real temporary files and child-process kills at durable boundaries.
 
-S10 uses the existing pinned client, Jiff, and SHA-256 dependencies in adapter core
-for real delivery transport, adapter timestamps, and stable local event identity.
-`cargo test --locked -p journal-adapter-spool` also exercises orchestration against
-fake journal/runtime boundaries and kills real child processes across send/report
-boundaries. `cargo test --locked -p journald --test adapter_orchestration` composes
-real HTTP, the typed client, and the spool; Unix additionally launches `journald`.
-These tests are in the ordinary workspace gate. Unix subprocess tests need native
-private-directory permissions, not a Windows-mounted WSL directory that ignores chmod.
-Run the ordinary parallel gate on Linux. The spool explicitly unlocks its sidecar
-after closing SQLite, including when another process inherited the lock descriptor.
-The Unix regression holds that descriptor in a live child during close and reopen.
+Preserve independent registration, raw append replay, immutable records,
+recipient allocation, first acknowledgment time and receipt-status privacy.
+Do not make runtime dependencies necessary for register/post/fetch/ack.
+Unknown explicit routes fail closed; automatic ack always follows the documented
+handoff. Stable inbox ID is the retry identity, not a random per-retry key.
 
-Principal inbox tests live in the protocol/service/client `tests/inbox.rs` and
-`journald/tests/inbox_http.rs`. They exercise independent registration, atomic
-recipient sequences, bounded traversal, bodyless ack, first-timestamp retention
-and receipt privacy without an adapter. Schema 11 recovery retains allocator
-heads but permits receipt loss only under intentional older-backup loss approval.
-Do not translate legacy custody outcomes into inbox acknowledgments. The old
-runtime tests inspect persisted legacy state separately from receipt status.
+The fake runtime and `make inbox-client-conformance` exercise actual worker and
+vendor-boundary tests. Missing/duplicate scenarios and empty test selectors fail.
+Publish only top-level JSON under `target/inbox-client-conformance`, never raw
+fixture state. Optional-client crash ambiguity is not exactly-once delivery.
 
-S11 adds `journal-runtime-fake` using existing pinned dependencies, and
-`make adapter-conformance` executes every adapter scenario with redacted
-persisted-state evidence. The runner also rejects fixture drift and missing
-coverage. Publish only the top-level JSON files in `target/adapter-conformance`,
-never raw `.private-state` fixtures. See the
-[fake-runtime contract](conformance/fake-runtime/README.md) for reuse and crash
-semantics. This gate is included in `make check` and CI.
+Recovery changes must preserve exact approval, revoked audited credential
+bindings, inbox allocation heads, epoch invalidation, acknowledged-state loss
+approval and archive/reset for uncertain input. Do not reintroduce adapter/spool
+inventories or silently restore authority.
 
-## Change expectations
+## Change and release expectations
 
-The read-only HTML renderer pins `pulldown-cmark` 0.13.0 with default features
-disabled and emits only its own narrow HTML allowlist. Run
-`cargo test --locked -p journald --test web_http` for shared-viewer ACL, disabled
-principal, delivery-scope, query, and listener-isolation checks. Unix workspace
-tests also bind the actual optional listener and check startup/shutdown isolation.
-Install `tests/browser-requirements.txt` and Chromium with
-`python -m playwright install chromium`, then run `make browser-security`.
-The dedicated CI browser job installs the pinned Playwright browser and executes
-real DOM/CSP/request tests. This separate gate is required for rendering changes;
-`make check` alone does not run a browser. The ephemeral fixture never prints
-credentials or uploads browser captures.
+Update OpenAPI, SQL admission, DTOs, client/CLI, fixtures, operational docs and CI
+together when a contract changes. Preserve meaningful negative tests rather
+than removing them with obsolete fixtures. Do not leave successful stubs or
+obsolete required gates.
 
-- Use explicit SQL and bounded operations; do not hide protocol behavior behind an ORM.
-- Make idempotency, authorization, limits, and failure states visible in types and tests.
-- Keep not-implemented areas honest. A status-2 stub is preferable to an unverified integration that claims delivery.
-- Treat record content as inert untrusted data. Never interpolate it into shell commands or runtime authority.
-- Preserve custody-before-injection ordering and fail closed on unknown routes.
-- Update `docs/implementation-plan.md` when a dependency or acceptance gate changes.
+Describe behavior, deliberate limits, API/schema/credential impact, recovery
+and compatibility, exact validation commands and their real results. Include
+failed attempts, skips and remaining blockers. Deployment capacity, hook
+processing and live canaries require separate evidence.
 
-## Pull requests
-
-Describe the behavior, public API/schema impact, baseline-admission impact, security considerations, and verification commands. Include a rollback or compatibility note for changes to persisted state. A maintainer must review changes that alter credential scope, ACL behavior, delivery state transitions, or public endpoints.
-
-## Commit and release hygiene
-
-Do not commit secrets or local state. Release artifacts must be reproducible and carry protocol/schema versions and checksums. Deployment-local configuration belongs outside the public repository. Do not commit changes to `Cargo.lock` without explaining dependency or toolchain impact.
+Keep configuration and runtime destinations local. Never commit secrets,
+production state, raw private captures, real hostnames/user paths or binaries.
+Run the public-hygiene scan before committing. Release artifacts must identify
+their protocol/schema versions and checksums.

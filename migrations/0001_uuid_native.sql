@@ -4,10 +4,10 @@ PRAGMA foreign_keys=ON;
 -- central database; existing database files are never migrated or rewritten.
 CREATE TABLE schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 11),
+    version INTEGER NOT NULL CHECK (version = 12),
     format TEXT NOT NULL CHECK (format = 'uuid-native-v1')
 );
-INSERT INTO schema_contract(singleton, version, format) VALUES (1, 11, 'uuid-native-v1');
+INSERT INTO schema_contract(singleton, version, format) VALUES (1, 12, 'uuid-native-v1');
 
 CREATE TABLE principals (
     id TEXT PRIMARY KEY CHECK (
@@ -21,25 +21,16 @@ CREATE TABLE principals (
     description IS NULL OR length(description) <= 512
 ), profile_revision INTEGER NOT NULL DEFAULT 1
     CHECK (profile_revision >= 1));
-CREATE TABLE adapter_identities (
-    adapter_id TEXT PRIMARY KEY,
-    principal_id TEXT NOT NULL UNIQUE REFERENCES principals(id),
-    created_at TEXT NOT NULL,
-    UNIQUE (adapter_id, principal_id)
-);
 CREATE TABLE credentials (
     id TEXT PRIMARY KEY,
     principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
-    class TEXT NOT NULL CHECK (class IN ('principal-client', 'delivery-adapter')),
+    class TEXT NOT NULL CHECK (class = 'principal-client'),
     token_hash TEXT NOT NULL UNIQUE,
-    adapter_id TEXT,
     created_at TEXT NOT NULL,
     expires_at TEXT,
-    revoked_at TEXT, enrollment_adapter_id TEXT REFERENCES adapter_identities(adapter_id), instance_id TEXT, replacement_credential_id TEXT REFERENCES credentials(id), revocation_reason TEXT,
-    CHECK ((class = 'delivery-adapter' AND adapter_id IS NOT NULL) OR
-           (class = 'principal-client' AND adapter_id IS NULL)),
-    FOREIGN KEY (adapter_id, principal_id)
-        REFERENCES adapter_identities(adapter_id, principal_id)
+    revoked_at TEXT,
+    replacement_credential_id TEXT REFERENCES credentials(id),
+    revocation_reason TEXT
 );
 CREATE TABLE registration_receipts (
     token_hash TEXT PRIMARY KEY REFERENCES credentials(token_hash),
@@ -125,36 +116,6 @@ CREATE TABLE idempotency_keys (
     created_at TEXT NOT NULL,
     PRIMARY KEY (principal_id, method, path, idempotency_key)
 );
-CREATE TABLE adapter_registrations (
-    adapter_id TEXT PRIMARY KEY,
-    principal_id TEXT NOT NULL,
-    instance_id TEXT NOT NULL UNIQUE,
-    generation INTEGER NOT NULL CHECK (generation > 0),
-    status TEXT NOT NULL CHECK (status IN ('active', 'draining', 'revoked')),
-    last_heartbeat_at TEXT NOT NULL,
-    lease_expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (adapter_id, principal_id),
-    UNIQUE (adapter_id, principal_id, instance_id, generation),
-    UNIQUE (adapter_id, instance_id, generation),
-    FOREIGN KEY (adapter_id, principal_id)
-        REFERENCES adapter_identities(adapter_id, principal_id)
-);
-CREATE TABLE enrollment_tickets (
-    ticket_hash TEXT PRIMARY KEY CHECK (length(ticket_hash) = 64),
-    principal_id TEXT NOT NULL,
-    adapter_id TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    consumed_at TEXT, instance_id TEXT, invalidated_at TEXT,
-    FOREIGN KEY (adapter_id, principal_id)
-        REFERENCES adapter_identities(adapter_id, principal_id)
-);
-CREATE TRIGGER enrollment_ticket_consumed_once
-BEFORE UPDATE OF consumed_at ON enrollment_tickets
-WHEN OLD.consumed_at IS NOT NULL OR NEW.consumed_at IS NULL
-BEGIN
-    SELECT RAISE(ABORT, 'enrollment ticket already consumed');
-END;
 CREATE TABLE inbox_sequences (
     recipient_principal_id TEXT PRIMARY KEY REFERENCES principals(id),
     last_seq INTEGER NOT NULL CHECK (typeof(last_seq) = 'integer' AND last_seq > 0)
@@ -170,9 +131,7 @@ CREATE TABLE mailbox_items (
     id TEXT PRIMARY KEY,
     record_id TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
     recipient_principal_id TEXT NOT NULL REFERENCES principals(id),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'host-accepted', 'adapter-reported-runtime-accepted', 'adapter-reported-retryable-failure', 'route-unavailable', 'adapter-reported-terminal-failure', 'suppressed-revoked')),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
     recipient_seq INTEGER NOT NULL CHECK (typeof(recipient_seq) = 'integer' AND recipient_seq > 0),
     acknowledged_at TEXT,
     UNIQUE (recipient_principal_id, recipient_seq),
@@ -193,104 +152,6 @@ BEGIN SELECT RAISE(ABORT, 'first acknowledgment is immutable'); END;
 CREATE TRIGGER inbox_items_are_retained
 BEFORE DELETE ON mailbox_items
 BEGIN SELECT RAISE(ABORT, 'inbox items are retained'); END;
-CREATE INDEX mailbox_pending_by_recipient
-    ON mailbox_items(recipient_principal_id, state, created_at, id);
-CREATE TABLE delivery_attempts (
-    attempt_id TEXT PRIMARY KEY,
-    mailbox_item_id TEXT NOT NULL REFERENCES mailbox_items(id),
-    ordinal INTEGER NOT NULL CHECK (ordinal > 0),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'host-accepted', 'adapter-reported-runtime-accepted', 'adapter-reported-retryable-failure', 'route-unavailable', 'adapter-reported-terminal-failure', 'suppressed-revoked')),
-    detail TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (mailbox_item_id, ordinal),
-    UNIQUE (mailbox_item_id, attempt_id)
-);
-CREATE TRIGGER mailbox_initial_attempt
-AFTER INSERT ON mailbox_items
-BEGIN
-    INSERT INTO delivery_attempts(
-        attempt_id, mailbox_item_id, ordinal, state, created_at, updated_at
-    ) VALUES (
-        'initial-' || NEW.id, NEW.id, 1, 'pending', NEW.created_at, NEW.updated_at
-    );
-END;
-CREATE TABLE claims (
-    id TEXT PRIMARY KEY,
-    adapter_id TEXT NOT NULL,
-    principal_id TEXT NOT NULL REFERENCES principals(id),
-    instance_id TEXT NOT NULL,
-    generation INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('active', 'committed', 'expired', 'cancelled')),
-    lease_expires_at TEXT NOT NULL,
-    closed_at TEXT,
-    created_at TEXT NOT NULL, credential_id TEXT REFERENCES credentials(id),
-    CHECK (generation > 0),
-    FOREIGN KEY (adapter_id, principal_id)
-        REFERENCES adapter_registrations(adapter_id, principal_id)
-);
-CREATE UNIQUE INDEX one_active_claim_per_adapter_generation
-    ON claims(adapter_id, generation)
-    WHERE state = 'active';
-CREATE TRIGGER claim_binding_must_match_registration
-BEFORE INSERT ON claims
-WHEN NOT EXISTS (
-    SELECT 1 FROM adapter_registrations
-    WHERE adapter_id = NEW.adapter_id
-      AND principal_id = NEW.principal_id
-      AND instance_id = NEW.instance_id
-      AND generation = NEW.generation
-      AND status = 'active'
-)
-BEGIN
-    SELECT RAISE(ABORT, 'claim binding does not match active adapter registration');
-END;
-CREATE TRIGGER claim_lifecycle_is_one_way
-BEFORE UPDATE OF state ON claims
-WHEN NOT (
-    NEW.state = OLD.state OR
-    (OLD.state = 'active' AND NEW.state IN ('committed', 'expired', 'cancelled'))
-)
-BEGIN
-    SELECT RAISE(ABORT, 'invalid claim lifecycle transition');
-END;
-CREATE TRIGGER closed_claim_needs_timestamp
-BEFORE INSERT ON claims
-WHEN NEW.state <> 'active' AND NEW.closed_at IS NULL
-BEGIN
-    SELECT RAISE(ABORT, 'closed claim needs closed_at');
-END;
-CREATE TRIGGER closed_claim_update_needs_timestamp
-BEFORE UPDATE OF state ON claims
-WHEN NEW.state <> 'active' AND NEW.closed_at IS NULL
-BEGIN
-    SELECT RAISE(ABORT, 'closed claim needs closed_at');
-END;
-CREATE TABLE claim_items (
-    claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
-    mailbox_item_id TEXT NOT NULL REFERENCES mailbox_items(id),
-    attempt_id TEXT NOT NULL,
-    PRIMARY KEY (claim_id, mailbox_item_id, attempt_id),
-    FOREIGN KEY (mailbox_item_id, attempt_id)
-        REFERENCES delivery_attempts(mailbox_item_id, attempt_id)
-);
-CREATE TRIGGER claim_item_requires_active_claimed_attempt
-BEFORE INSERT ON claim_items
-WHEN NOT EXISTS (
-    SELECT 1
-    FROM claims c
-    JOIN delivery_attempts a ON a.mailbox_item_id = NEW.mailbox_item_id
-                            AND a.attempt_id = NEW.attempt_id
-    JOIN mailbox_items m ON m.id = NEW.mailbox_item_id
-    WHERE c.id = NEW.claim_id
-      AND c.state = 'active'
-      AND c.principal_id = m.recipient_principal_id
-      AND a.state = 'claimed'
-      AND m.state = 'claimed'
-)
-BEGIN
-    SELECT RAISE(ABORT, 'claim item must reference an active claim and claimed attempt');
-END;
 CREATE TABLE audit_events (
     id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
@@ -345,12 +206,6 @@ END;
 CREATE TRIGGER records_fts_delete AFTER DELETE ON records BEGIN
     DELETE FROM records_fts WHERE record_id = OLD.id;
 END;
-CREATE TABLE enrollment_installations (
-    adapter_id TEXT PRIMARY KEY REFERENCES adapter_identities(adapter_id),
-    instance_id TEXT NOT NULL UNIQUE,
-    recovery_authorized INTEGER NOT NULL DEFAULT 0 CHECK (recovery_authorized IN (0, 1)),
-    created_at TEXT NOT NULL
-);
 CREATE TABLE credential_audit (
     id INTEGER PRIMARY KEY,
     credential_id TEXT NOT NULL REFERENCES credentials(id),
@@ -365,105 +220,6 @@ CREATE TABLE journal_secrets (
 CREATE INDEX reply_children
     ON record_relations(target_record_id, source_record_id)
     WHERE relation_type = 'reply-to';
-CREATE TRIGGER claim_requires_credential
-BEFORE INSERT ON claims
-WHEN NOT EXISTS (
-    SELECT 1 FROM credentials c
-    WHERE c.id=NEW.credential_id AND c.class='delivery-adapter'
-      AND c.adapter_id=NEW.adapter_id AND c.principal_id=NEW.principal_id
-      AND c.instance_id=NEW.instance_id AND c.revoked_at IS NULL
-)
-BEGIN
-    SELECT RAISE(ABORT, 'claim requires bound delivery credential');
-END;
-CREATE TABLE host_custody (
-    attempt_id TEXT PRIMARY KEY,
-    mailbox_item_id TEXT NOT NULL,
-    claim_id TEXT NOT NULL,
-    committed_at TEXT NOT NULL,
-    FOREIGN KEY (claim_id, mailbox_item_id, attempt_id)
-        REFERENCES claim_items(claim_id, mailbox_item_id, attempt_id)
-);
-CREATE TRIGGER custody_requires_active_claim
-BEFORE INSERT ON host_custody
-WHEN NOT EXISTS (
-    SELECT 1 FROM claims c
-    JOIN claim_items i ON i.claim_id=c.id
-    JOIN delivery_attempts a ON a.attempt_id=i.attempt_id
-    JOIN mailbox_items m ON m.id=i.mailbox_item_id
-    JOIN adapter_registrations r ON r.adapter_id=c.adapter_id
-    JOIN credentials k ON k.id=c.credential_id
-    WHERE c.id=NEW.claim_id AND i.mailbox_item_id=NEW.mailbox_item_id
-      AND i.attempt_id=NEW.attempt_id AND c.state='active'
-      AND a.state='claimed' AND m.state='claimed'
-      AND a.ordinal=(SELECT max(ordinal) FROM delivery_attempts WHERE mailbox_item_id=m.id)
-      AND c.principal_id=m.recipient_principal_id
-      AND r.instance_id=c.instance_id AND r.generation=c.generation AND r.status='active'
-      AND k.revoked_at IS NULL
-      AND (k.expires_at IS NULL OR julianday(k.expires_at)>julianday(NEW.committed_at))
-      AND julianday(c.lease_expires_at)>julianday(NEW.committed_at)
-      AND julianday(r.lease_expires_at)>julianday(NEW.committed_at)
-)
-BEGIN
-    SELECT RAISE(ABORT, 'custody requires exact active claim');
-END;
-CREATE TRIGGER custody_is_immutable BEFORE UPDATE ON host_custody
-BEGIN SELECT RAISE(ABORT, 'custody is immutable'); END;
-CREATE TRIGGER custody_is_retained BEFORE DELETE ON host_custody
-BEGIN SELECT RAISE(ABORT, 'custody is retained'); END;
-CREATE TABLE delivery_events (
-    event_id TEXT PRIMARY KEY,
-    mailbox_item_id TEXT NOT NULL REFERENCES mailbox_items(id),
-    attempt_id TEXT NOT NULL,
-    adapter_id TEXT NOT NULL REFERENCES adapter_identities(adapter_id),
-    instance_id TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation > 0),
-    state TEXT NOT NULL CHECK (state IN ('adapter-reported-runtime-accepted', 'adapter-reported-retryable-failure', 'route-unavailable', 'adapter-reported-terminal-failure')),
-    detail_json TEXT CHECK (detail_json IS NULL OR (
-        json_valid(detail_json)=1 AND json_type(detail_json)='object'
-        AND length(CAST(detail_json AS BLOB))<=4096)),
-    occurred_at TEXT NOT NULL,
-    received_at TEXT NOT NULL,
-    FOREIGN KEY (mailbox_item_id, attempt_id)
-        REFERENCES delivery_attempts(mailbox_item_id, attempt_id)
-);
-CREATE TRIGGER delivery_event_detail_shape
-BEFORE INSERT ON delivery_events
-WHEN NEW.detail_json IS NOT NULL AND (
-    (SELECT count(*) FROM json_each(NEW.detail_json))>32 OR
-    EXISTS (SELECT 1 FROM json_each(NEW.detail_json)
-        WHERE length(key) NOT BETWEEN 1 AND 128 OR type<>'text' OR length(value)>1024)
-)
-BEGIN SELECT RAISE(ABORT, 'delivery event detail shape invalid'); END;
-CREATE TRIGGER delivery_event_requires_host_accepted_attempt
-BEFORE INSERT ON delivery_events
-WHEN NOT EXISTS (
-    SELECT 1 FROM host_custody h JOIN claims c ON c.id=h.claim_id
-    JOIN delivery_attempts a ON a.attempt_id=h.attempt_id
-    JOIN mailbox_items m ON m.id=h.mailbox_item_id
-    JOIN adapter_registrations r ON r.adapter_id=c.adapter_id
-    WHERE h.attempt_id=NEW.attempt_id AND h.mailbox_item_id=NEW.mailbox_item_id
-      AND c.adapter_id=NEW.adapter_id AND c.instance_id=NEW.instance_id AND c.generation=NEW.generation
-      AND r.instance_id=NEW.instance_id AND r.generation=NEW.generation AND r.status='active'
-      AND r.principal_id=m.recipient_principal_id
-      AND julianday(r.lease_expires_at)>julianday(NEW.received_at)
-      AND a.state IN ('host-accepted','adapter-reported-retryable-failure')
-)
-BEGIN SELECT RAISE(ABORT, 'delivery event requires exact attempt host custody'); END;
-CREATE TRIGGER delivery_event_advances_attempt_state
-AFTER INSERT ON delivery_events
-BEGIN
-    UPDATE delivery_attempts SET state=NEW.state,updated_at=NEW.received_at
-    WHERE attempt_id=NEW.attempt_id;
-    UPDATE mailbox_items SET state=NEW.state,updated_at=NEW.received_at
-    WHERE id=NEW.mailbox_item_id AND NEW.attempt_id=(
-        SELECT attempt_id FROM delivery_attempts WHERE mailbox_item_id=NEW.mailbox_item_id
-        ORDER BY ordinal DESC LIMIT 1);
-END;
-CREATE TRIGGER delivery_events_are_immutable BEFORE UPDATE ON delivery_events
-BEGIN SELECT RAISE(ABORT, 'delivery events are immutable'); END;
-CREATE TRIGGER delivery_events_are_retained BEFORE DELETE ON delivery_events
-BEGIN SELECT RAISE(ABORT, 'delivery events are retained'); END;
 CREATE TABLE recovery_anchor (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     journal_id TEXT NOT NULL,

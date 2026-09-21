@@ -81,14 +81,6 @@ pub(crate) fn verify(connection: &Connection) -> Result<RecoveryVerification, St
           ON h.recipient_principal_id=m.recipient_principal_id
           WHERE h.last_seq IS NULL OR h.last_seq<m.recipient_seq OR m.recipient_seq<=0)
           OR EXISTS(SELECT 1 FROM inbox_sequences WHERE typeof(last_seq)!='integer' OR last_seq<=0)"),
-        ("mailbox attempt probe failed",
-         "SELECT EXISTS(SELECT 1 FROM mailbox_items m WHERE NOT EXISTS(
-          SELECT 1 FROM delivery_attempts a WHERE a.mailbox_item_id=m.id))
-          OR EXISTS(SELECT mailbox_item_id FROM delivery_attempts GROUP BY mailbox_item_id
-          HAVING min(ordinal)!=1 OR max(ordinal)!=count(*))
-          OR EXISTS(SELECT 1 FROM mailbox_items m JOIN delivery_attempts a ON a.mailbox_item_id=m.id
-          WHERE a.ordinal=(SELECT max(ordinal) FROM delivery_attempts WHERE mailbox_item_id=m.id)
-          AND m.state!=a.state)"),
     ] {
         if connection.query_row(sql, [], |row| row.get::<_, bool>(0))? {
             return Err(StorageError::RecoveryClosed(probe));

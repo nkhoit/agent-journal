@@ -1,0 +1,7 @@
+{
+  "public/default": {
+    "key": "default",
+    "runtime_target": "REPLACE_LOCALLY",
+    "enabled": false
+  }
+}

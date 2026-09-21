@@ -26,15 +26,6 @@ fn execute(
     let a = &args[3..];
     let value = match args[2].as_str() {
         "metrics" if a.is_empty() => serde_json::to_value(client.metrics().map_err(|_|"metrics unavailable")?),
-        "mailbox-requeue" if a.len()==1 || a.len()==2 => serde_json::to_value(client.requeue_mailbox_item(
-            &a[0],&RequeueRequest {reason:a.get(1).cloned()}).map_err(|_|"requeue failed or response lost; inspect status before retrying")?),
-        "adapters" if a.len()<=2 => serde_json::to_value(client.list_adapters(
-            &PageQuery {cursor:a.get(1).cloned(),limit:a.first().map(|s|s.parse()).transpose().map_err(|_|"invalid limit")?}).map_err(|_|"adapter listing failed")?),
-        "adapter-replace" if a.len() == 3 || a.len() == 4 => serde_json::to_value(client.replace_adapter(
-            &a[0], &AdapterReplaceRequest { expected_generation:a[1].parse().map_err(|_|"invalid generation")?,
-                new_instance_id:a[2].clone(), reason:a.get(3).cloned() }).map_err(|_|"adapter replacement failed")?),
-        "mailbox-status" if a.len() == 1 => serde_json::to_value(client.admin_mailbox_status(
-            &a[0], &PageQuery { cursor:None,limit:None }).map_err(|_|"mailbox status failed")?),
         "principal-create" if a.len() == 2 => serde_json::to_value(client.create_principal(
             &PrincipalCreateRequest { handle: a[0].clone(), display_name: a[1].clone() })
             .map_err(|_| "principal creation failed")?),
@@ -45,40 +36,22 @@ fn execute(
             &MembershipRequest { space_id: a[0].clone(), principal_id: a[1].clone(),
                 can_read: boolean(&a[2])?, can_append: boolean(&a[3])?, can_admin: boolean(&a[4])? })
             .map_err(|_| "membership update failed")?),
-        "adapter-provision" if a.len() == 2 => serde_json::to_value(client.provision_adapter(
-            &AdapterProvisionRequest { principal_id: a[0].clone(), adapter_id: a[1].clone() })
-            .map_err(|_| "adapter provisioning failed")?),
-        "ticket-create" if a.len() == 4 => {
-            private_file::check_destination(Path::new(&a[3]))
-                .map_err(|_| "invalid private ticket destination")?;
-            let response = client.create_ticket(&EnrollmentTicketCreateRequest {
-                principal_id: a[0].clone(), adapter_id: a[1].clone(),
-                ttl_seconds: a[2].parse().map_err(|_| "invalid ticket TTL")?,
-            }).map_err(|_| "ticket creation failed")?;
-            private_file::write(Path::new(&a[3]), response.enrollment_ticket.ticket.as_bytes())
-                .map_err(|_| {
-                    let _ = writeln!(error, "aj-admin: event=ticket_write_failed server_outcome=committed request_id={} recovery=wait-ticket-expiration",
-                        client.last_request_id().as_deref().unwrap_or("unavailable"));
-                    "ticket file write failed; do not use partial output; the unexchanged ticket expires at its configured TTL"
-                })?;
-            return Ok(());
-        },
         "credential-rotate" if a.len() == 2 || a.len() == 3 => {
             private_file::check_destination(Path::new(&a[1]))
                 .map_err(|_| "invalid private replacement destination")?;
             let response = client.rotate(&CredentialRotateRequest {
                 credential_id: a[0].clone(), reason: a.get(2).cloned(),
             }).map_err(|_| {
-                let _ = writeln!(error, "aj-admin: event=rotation_response_failed server_outcome=unknown request_id={} recovery=enrollment-recover",
+                let _ = writeln!(error, "aj-admin: event=rotation_response_failed server_outcome=unknown request_id={} recovery=principal-recover",
                     client.last_request_id().as_deref().unwrap_or("unavailable"));
-                "rotation failed or response lost; use enrollment-recover with the bound adapter and installation before fresh enrollment"
+                "rotation failed or response lost; repeat principal-recover with the principal UUID"
             })?;
             let encoded = serde_json::to_vec(&response.replacement_secret).map_err(|_| "cannot encode credential")?;
             private_file::write(Path::new(&a[1]), &encoded)
                 .map_err(|_| {
-                    let _ = writeln!(error, "aj-admin: event=credential_write_failed operation=rotation server_outcome=committed request_id={} recovery=enrollment-recover",
+                    let _ = writeln!(error, "aj-admin: event=credential_write_failed operation=rotation server_outcome=committed request_id={} recovery=principal-recover",
                         client.last_request_id().as_deref().unwrap_or("unavailable"));
-                    "replacement credential file write failed; use enrollment-recover with the bound adapter and installation to revoke both credential lineages before fresh enrollment"
+                    "replacement credential file write failed; repeat principal-recover with the principal UUID"
                 })?;
             return Ok(());
         },
@@ -110,13 +83,7 @@ fn execute(
             })?;
             return Ok(());
         },
-        "enrollment-recover" if a.len() == 2 => {
-            client.recover_enrollment(&journal_client::EnrollmentRecoveryRequest {
-                adapter_id: a[0].clone(), instance_id: a[1].clone(),
-            }).map_err(|_| "enrollment recovery failed; do not reuse the ticket or change installation identity")?;
-            return Ok(());
-        },
-        _ => return Err("commands: metrics; principal-create HANDLE DISPLAY_NAME; principal-recover PRINCIPAL_UUID OUTPUT [REASON]; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; adapter-provision PRINCIPAL ADAPTER; adapter-replace ADAPTER GENERATION NEW_INSTANCE [REASON]; adapters [LIMIT [CURSOR]]; mailbox-status PRINCIPAL; mailbox-requeue ITEM [REASON]; ticket-create PRINCIPAL ADAPTER TTL OUTPUT; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]; enrollment-recover ADAPTER INSTANCE"),
+        _ => return Err("commands: metrics; principal-create HANDLE DISPLAY_NAME; principal-recover PRINCIPAL_UUID OUTPUT [REASON]; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]"),
     }.map_err(|_| "cannot encode response")?;
     serde_json::to_writer(&mut *output, &value).map_err(|_| "cannot write response")?;
     writeln!(output).map_err(|_| "cannot write response")

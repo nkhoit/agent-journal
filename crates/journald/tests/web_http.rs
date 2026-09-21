@@ -90,34 +90,25 @@ async fn recovery_gates_web_and_metrics_and_preserves_durable_timestamps() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-fn enroll(service: &BootstrapService, principal: &str) -> EnrollmentExchangeResponse {
+fn register(service: &BootstrapService, principal: &str) -> String {
+    let id = match principal {
+        "author" => 1,
+        "recipient" => 2,
+        "reader" => 3,
+        "outsider" => 4,
+        _ => panic!("unknown fixture principal"),
+    };
+    let token = format!("{id:064x}");
     service
-        .create_principal(&PrincipalCreateRequest {
-            handle: principal.into(),
-            display_name: principal.into(),
-        })
-        .unwrap();
-    service
-        .provision_adapter(&AdapterProvisionRequest {
-            principal_id: principal.into(),
-            adapter_id: format!("adapter-{principal}"),
-        })
-        .unwrap();
-    let ticket = service
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: principal.into(),
-            adapter_id: format!("adapter-{principal}"),
-            ttl_seconds: 900,
-        })
-        .unwrap();
-    service
-        .exchange(
-            &ticket.enrollment_ticket.ticket,
-            &EnrollmentExchangeRequest {
-                instance_id: format!("installation-{principal}"),
+        .register(
+            &token,
+            &RegistrationRequest {
+                handle: principal.into(),
+                display_name: principal.into(),
             },
         )
-        .unwrap()
+        .unwrap();
+    token
 }
 
 async fn get(router: &axum::Router, path: &str, token: Option<&str>, status: StatusCode) -> String {
@@ -161,10 +152,10 @@ async fn web_views_are_authorized_inert_and_bounded() {
     std::fs::create_dir_all(&directory).unwrap();
     let db = Database::open(directory.join("journal.db")).unwrap();
     let service = BootstrapService::new(db.clone());
-    let author = enroll(&service, "author");
-    let _recipient = enroll(&service, "recipient");
-    let reader = enroll(&service, "reader");
-    let _outsider = enroll(&service, "outsider");
+    let author = register(&service, "author");
+    let _recipient = register(&service, "recipient");
+    let reader = register(&service, "reader");
+    let _outsider = register(&service, "outsider");
     service
         .create_space(&SpaceCreateRequest {
             access: journal_protocol::domain::SpaceAccess::Public,
@@ -183,7 +174,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
             })
             .unwrap();
     }
-    let token = &author.principal_client_secret.secret;
+    let token = &author;
     let record = service
         .append_record(
             token,
@@ -284,7 +275,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
     get(
         &reader_router,
         &format!("/web/records/{}/delivery-status", reply.id),
-        Some(&reader.principal_client_secret.secret),
+        Some(&reader),
         StatusCode::NOT_FOUND,
     )
     .await;

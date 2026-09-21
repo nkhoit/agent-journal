@@ -71,7 +71,7 @@ fn service_and_operator_binary_share_lock_and_persistent_gate() {
             .status
             .success()
     );
-    let output = fixture.command("reconcile", &["approval.json", "--adapters-quiesced"]);
+    let output = fixture.command("reconcile", &["approval.json", "--clients-quiesced"]);
     assert!(
         output.status.success(),
         "{}",

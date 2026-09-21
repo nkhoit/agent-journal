@@ -149,14 +149,6 @@ fn recovery_and_revocation_use_only_admin_paths() {
         reason: None,
     })
     .unwrap();
-    Client::new(MutationRecorder {
-        path: "/v1/admin/enrollment/recover",
-    })
-    .recover_enrollment(&journal_client::EnrollmentRecoveryRequest {
-        adapter_id: "adapter-1".into(),
-        instance_id: "installation-1".into(),
-    })
-    .unwrap();
 }
 
 struct PrincipalRecoveryRecorder;
@@ -205,40 +197,27 @@ impl Transport for JsonReply {
 
 #[test]
 fn client_rejects_positional_response_arrays() {
-    let client = Client::new(JsonReply(r#"["adapter-example","principal-example"]"#));
+    let client = Client::new(JsonReply(r#"[[],null]"#));
     assert!(matches!(
-        client.provision_adapter(&AdapterProvisionRequest {
-            adapter_id: "adapter-example".into(),
-            principal_id: "principal-example".into(),
-        }),
+        client.inbox(&"a".repeat(64), &InboxQuery::default()),
         Err(ClientError::Json)
     ));
 }
 
 #[test]
 fn client_rejects_duplicate_response_keys_and_accepts_typed_objects() {
-    let input = AdapterProvisionRequest {
-        adapter_id: "adapter-example".into(),
-        principal_id: "principal-example".into(),
-    };
-    let duplicate = Client::new(JsonReply(
-        r#"{"adapter_id":"adapter-example","adapter_id":"other","principal_id":"principal-example"}"#,
-    ));
-    assert!(matches!(
-        duplicate.provision_adapter(&input),
-        Err(ClientError::Json)
-    ));
-    let duplicate_unknown = Client::new(JsonReply(
-        r#"{"adapter_id":"adapter-example","principal_id":"principal-example","extra":0,"extra":1}"#,
-    ));
-    assert!(matches!(
-        duplicate_unknown.provision_adapter(&input),
-        Err(ClientError::Json)
-    ));
-    let valid = Client::new(JsonReply(
-        r#"{"adapter_id":"adapter-example","principal_id":"principal-example"}"#,
-    ));
-    let response = valid.provision_adapter(&input).unwrap();
-    assert_eq!(response.adapter_id, input.adapter_id);
-    assert_eq!(response.principal_id, input.principal_id);
+    for reply in [
+        r#"{"items":[],"items":[],"next_cursor":null}"#,
+        r#"{"items":[],"next_cursor":null,"extra":0,"extra":1}"#,
+    ] {
+        assert!(matches!(
+            Client::new(JsonReply(reply)).inbox(&"a".repeat(64), &InboxQuery::default()),
+            Err(ClientError::Json)
+        ));
+    }
+    let response = Client::new(JsonReply(r#"{"items":[],"next_cursor":null}"#))
+        .inbox(&"a".repeat(64), &InboxQuery::default())
+        .unwrap();
+    assert!(response.items.is_empty());
+    assert!(response.next_cursor.is_none());
 }

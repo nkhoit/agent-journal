@@ -1,4 +1,4 @@
-use journal_adapter_core::{Envelope, Route, Runtime};
+use journal_inbox_worker::{Envelope, Route, Runtime};
 use journal_runtime_fake::FakeRuntime;
 
 fn delivery() -> (Route, Envelope) {
@@ -9,7 +9,7 @@ fn delivery() -> (Route, Envelope) {
     };
     let envelope = serde_json::from_value(serde_json::json!({
         "record_id": "record", "space_id": "space", "from_principal": "source",
-        "addressed_to": "destination", "mailbox_item_id": "item", "attempt_id": "attempt",
+        "addressed_to": "destination", "mailbox_item_id": "item", "inbox_item_id": "attempt",
         "body": "untrusted\nbody", "source_run": null
     }))
     .unwrap();

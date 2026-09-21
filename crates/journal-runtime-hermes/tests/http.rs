@@ -1,4 +1,4 @@
-use journal_adapter_core::{CoreError, Envelope, Route, Runtime};
+use journal_inbox_worker::{Envelope, Route, Runtime, RuntimeError};
 use journal_runtime_hermes::HermesRuntime;
 use serde_json::{Value, json};
 use std::{
@@ -198,11 +198,10 @@ fn handle_request(
     let _ = stream.write_all(&response_body);
 }
 
-fn envelope(attempt_id: &str) -> Envelope {
+fn envelope(inbox_item_id: &str) -> Envelope {
     Envelope {
         record_id: "record-1".into(),
-        mailbox_item_id: "item-1".into(),
-        attempt_id: attempt_id.into(),
+        inbox_item_id: inbox_item_id.into(),
         space_id: "space".into(),
         from_principal: "source".into(),
         source_run: None,
@@ -227,7 +226,7 @@ fn accepted_run_contains_explicit_session_and_stable_idempotency_key() {
     let runtime = HermesRuntime::new(&server.endpoint, "hermes-secret").expect("preflight");
     assert!(!format!("{runtime:?}").contains("hermes-secret"));
     let receipt = runtime
-        .inject(&route(), &envelope("attempt-42"), "rendered input")
+        .inject(&route(), &envelope("item-42"), "rendered input")
         .expect("accepted run");
     assert_eq!(receipt, "run_abc");
 
@@ -256,7 +255,7 @@ fn accepted_run_contains_explicit_session_and_stable_idempotency_key() {
     );
     assert_eq!(
         requests[3].1.get("idempotency-key"),
-        Some(&"agent-journal:attempt-42".into())
+        Some(&"agent-journal:item-42".into())
     );
 }
 
@@ -264,8 +263,8 @@ fn accepted_run_contains_explicit_session_and_stable_idempotency_key() {
 fn exact_replay_returns_the_same_run_receipt() {
     let server = FakeHermes::new(RunReply::Accepted("run_same"));
     let runtime = HermesRuntime::new(&server.endpoint, "key").expect("preflight");
-    let first = runtime.inject(&route(), &envelope("attempt-replay"), "same input");
-    let second = runtime.inject(&route(), &envelope("attempt-replay"), "same input");
+    let first = runtime.inject(&route(), &envelope("item-replay"), "same input");
+    let second = runtime.inject(&route(), &envelope("item-replay"), "same input");
     assert_eq!(first, second);
     assert_eq!(first.unwrap(), "run_same");
     let requests = server.requests();
@@ -276,7 +275,7 @@ fn exact_replay_returns_the_same_run_receipt() {
     assert_eq!(runs.len(), 2);
     assert_eq!(
         runs[0].1.get("idempotency-key"),
-        Some(&"agent-journal:attempt-replay".into())
+        Some(&"agent-journal:item-replay".into())
     );
     assert_eq!(
         runs[0].1.get("idempotency-key"),
@@ -287,25 +286,25 @@ fn exact_replay_returns_the_same_run_receipt() {
 #[test]
 fn auth_conflict_and_retryable_statuses_map_to_runtime_errors() {
     for (status, expected) in [
-        (401, CoreError::RuntimeRejected),
-        (409, CoreError::RuntimeRejected),
+        (401, RuntimeError::RuntimeRejected),
+        (409, RuntimeError::RuntimeRejected),
         (
             429,
-            CoreError::RuntimeUnavailable("Hermes Runs API temporarily unavailable".into()),
+            RuntimeError::RuntimeUnavailable("Hermes Runs API temporarily unavailable".into()),
         ),
         (
             500,
-            CoreError::RuntimeUnavailable("Hermes Runs API temporarily unavailable".into()),
+            RuntimeError::RuntimeUnavailable("Hermes Runs API temporarily unavailable".into()),
         ),
         (
             503,
-            CoreError::RuntimeUnavailable("Hermes Runs API temporarily unavailable".into()),
+            RuntimeError::RuntimeUnavailable("Hermes Runs API temporarily unavailable".into()),
         ),
     ] {
         let server = FakeHermes::new(RunReply::Status(status));
         let runtime = HermesRuntime::new(&server.endpoint, "key").expect("preflight");
         assert_eq!(
-            runtime.inject(&route(), &envelope("attempt-status"), "input"),
+            runtime.inject(&route(), &envelope("item-status"), "input"),
             Err(expected)
         );
     }
@@ -325,29 +324,45 @@ fn malformed_and_oversized_receipts_are_invalid_responses() {
         let server = FakeHermes::new(RunReply::AcceptedBody(body));
         let runtime = HermesRuntime::new(&server.endpoint, "key").expect("preflight");
         assert_eq!(
-            runtime.inject(&route(), &envelope("attempt-receipt"), "input"),
-            Err(CoreError::InvalidResponse)
+            runtime.inject(&route(), &envelope("item-receipt"), "input"),
+            Err(RuntimeError::InvalidResponse)
         );
     }
 }
 
 #[test]
 fn unsupported_capabilities_are_rejected_before_injection() {
-    let server = FakeHermes::with_capabilities(
-        RunReply::Status(202),
-        json!({
-            "features": {
-                "run_submission": true,
-                "runs_idempotency": {
-                    "supported": true,
-                    "durable": false,
-                    "retention_seconds": 0
-                }
+    let supported = json!({
+        "features": {
+            "run_submission": true,
+            "runs_idempotency": {
+                "supported": true,
+                "durable": true,
+                "retention_seconds": 86400
             }
-        }),
-    );
-    assert!(matches!(
-        HermesRuntime::new(&server.endpoint, "key"),
-        Err(CoreError::RuntimeRejected)
-    ));
+        }
+    });
+    for (field, value) in [
+        ("/features/run_submission", json!(false)),
+        ("/features/runs_idempotency/supported", json!(false)),
+        ("/features/runs_idempotency/durable", json!(false)),
+        ("/features/runs_idempotency/retention_seconds", json!(86399)),
+        ("/features/runs_idempotency/retention_seconds", Value::Null),
+    ] {
+        let mut capabilities = supported.clone();
+        *capabilities.pointer_mut(field).unwrap() = value;
+        let server = FakeHermes::with_capabilities(RunReply::Status(202), capabilities);
+        assert!(matches!(
+            HermesRuntime::new(&server.endpoint, "key"),
+            Err(RuntimeError::RuntimeRejected)
+        ));
+        assert!(
+            !server
+                .requests()
+                .iter()
+                .any(|request| request.0 == "/v1/runs")
+        );
+    }
+    let server = FakeHermes::with_capabilities(RunReply::Status(202), supported);
+    assert!(HermesRuntime::new(&server.endpoint, "key").is_ok());
 }

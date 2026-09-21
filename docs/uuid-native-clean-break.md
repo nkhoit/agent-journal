@@ -1,15 +1,32 @@
-# UUID-native persistence clean break
+# Persisted-state compatibility
 
-The only supported central database contract is `migrations/0001_uuid_native.sql`, schema version 11. It creates the complete UUID-native schema with explicit public-space policy, durable inbox receipts and recipient allocation heads directly; it is not an upgrade sequence. Schema 10 and earlier databases are explicitly incompatible and never rewritten or automatically exposed.
+The supported central contract is exact schema 12, format `uuid-native-v1`,
+with matching current external recovery snapshots. UUID principal/record identity,
+inbox item identity and sequence semantics are retained. Compatibility is not
+inferred from a filename or a subset of tables.
 
-Principals have immutable server-generated UUIDv7 `id` values. `principal_names` holds the active handle plus permanent aliases. A selector is resolved as a name only when a matching persisted row exists; UUID-shaped text is never treated as an id merely because it looks like one. `PATCH /v1/me/profile` changes only the authenticated principal's mutable handle and display profile with an optimistic `profile_revision`; a renamed handle is retained as an alias. Records, credentials, ACLs, adapters, mailboxes, claims, idempotency rows, and recovery state bind to the UUID.
+Older central schemas, including empty initialized older schemas, are rejected
+without rewriting them. There is no in-place migration, schema downgrade,
+automatic reset, audit adoption for incompatible state or conversion of delivery
+spools into inbox clients.
 
-## Operator action for existing state
+The optional executables do not accept `--spool-db`, installation or delivery
+credential options. Their private principal files and runtime-native handoff
+evidence are distinct from retired custody spools. Muse's inbox payload uses
+local version 2 and inbox IDs; old attempt payloads are not converted.
 
-Every database created by an earlier release is incompatible, including an empty schema-7 database. Do not start the new daemon against it, do not attempt an in-place upgrade, and do not edit version rows. Archive the central database together with its recovery audit, sidecars, and local spools, then initialize fresh private paths and reprovision/re-enroll. Schema downgrade is unsupported; restore only a backup made by the same UUID-native schema version through the protected recovery workflow.
+Before an operator-approved clean reset, close ingress and stop all writers and
+consumers. Preserve central files, sidecars, the external audit and private local
+evidence in protected archives. Do not delete or edit files to bypass admission.
+Initialize fresh state only at explicitly selected fresh paths.
 
-A missing adapter spool is initialized at its current exact schema. An existing spool with any non-current schema is likewise incompatible: archive/reset it rather than cutting it over. Current-schema central admission compares every load-bearing SQLite schema object to the direct baseline, and central/spool admission refuses any WAL, SHM, or rollback-journal sidecar before taking custody. On Unix, central files and spools also refuse multiple hard links so copied-audit path aliases cannot acquire independent writer locks. A central owner binds the admitted `(dev, ino)` identity and rechecks that identity plus a single link before and immediately after every writable SQLite open; this catches a stable post-admission hardlink or path replacement before our SQL or pragmas run. This catches accidental/operator aliasing only; hostile same-UID code remains outside the boundary. Current-schema central databases and spools retain protected backup/restore, recovery lineage checks, and PID-bound persistent lock handling.
+For supported backups, use [protected recovery](recovery.md), not manual file
+replacement. Restore revokes credentials while retaining audited digests and
+identity bindings, preserves recipient allocation heads and requires explicit
+loss/client reconciliation approval. Newer acks can be lost. A clean reset that
+discards authoritative audit cannot recognize unknown old token bytes.
 
-Central and spool preflight revalidate file identity after read-only validation and immediately after writable open, before any SQL executes. SQLite opens by path rather than a caller-owned file descriptor, so a hostile writer that can swap a file away and back between both metadata observations cannot be ruled out atomically. The supported boundary is therefore a private, non-symlinked directory: hardlink rejection, identity checks, and the stable sidecar lock reject ordinary alias and substitution races without locking the SQLite database file itself. An actor able to replace files inside that private directory is outside the custody threat model and requires operator intervention.
-
-The reset refusal is intentional and pre-mutation. A legacy central database must not cause audit adoption, audit closure, control/event/anchor/membership changes, lock creation or replacement, or SQLite recovery. A legacy spool must not create or replace its lock inode or rewrite the spool/sidecars.
+Compatibility tests cover exact schema objects, previous-version refusal,
+malformed schemas, hot sidecars, hardlink/path substitution, audit mismatch and
+copy/verification failure. Deployment rollback needs compatible software and
+supported recovery evidence, never rewriting historical state.

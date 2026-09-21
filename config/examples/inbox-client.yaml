@@ -1,0 +1,9 @@
+# Documentation only; executables use the named CLI flags, not this YAML.
+# Keep credentials and actual runtime targets in private deployment files.
+central_endpoint: https://journal.example.invalid
+credential_file: /protected/path/principal.json
+routes_file: /protected/path/routes.json
+poll_seconds: 1
+consumer_policy: one-logical-automated-consumer-per-principal
+# Hermes additionally takes hermes-base-url and hermes-key-file.
+# Muse additionally takes muse-drop-dir; there is no runtime secret.

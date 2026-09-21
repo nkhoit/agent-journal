@@ -1,6 +1,4 @@
-use journal_client::{
-    Client, HttpTransport, journal_protocol::EnrollmentExchangeRequest, private_file,
-};
+use journal_client::{Client, HttpTransport, private_file};
 use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path};
 
@@ -17,16 +15,9 @@ Commands:
   thread --endpoint URL --credential-file PATH --record RECORD_ID [--cursor CURSOR] [--limit N]
   inbox --endpoint URL --credential-file PATH [--state unacknowledged|acknowledged|all] [--cursor CURSOR] [--limit N]
   inbox-ack --endpoint URL --credential-file PATH --item ID
-  adapter-register --endpoint URL --credential-file PATH --instance ID
-  adapter-heartbeat --endpoint URL --credential-file PATH --instance ID --generation N
-  mailbox-claim --endpoint URL --credential-file PATH --instance ID --generation N --limit N
-  mailbox-status --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
-  custody-commit --endpoint URL --credential-file PATH --claim ID --input PATH|-
-  delivery-event --endpoint URL --credential-file PATH --item ID --input PATH|-
   delivery-status --endpoint URL --credential-file PATH --record RECORD_ID [filters]
-  enroll --endpoint URL --ticket-file PATH --instance-id ID --principal-file PATH --delivery-file PATH
 
-Journal reads return compact JSON on stdout; inbox-ack returns no output. Enrollment writes
+Journal reads return compact JSON on stdout; inbox-ack returns no output. Registration writes
 protected files and emits no secret-bearing output. Use `aj --help` for this summary.";
 
 pub fn run(args: &[String], mut error: impl Write) -> i32 {
@@ -43,8 +34,6 @@ pub fn run_with_output(args: &[String], mut output: impl Write, mut error: impl 
     }
     let result = if args.first().is_some_and(|s| s == "register") {
         register(args, &mut output, &mut error)
-    } else if args.first().is_some_and(|s| s == "enroll") {
-        execute(args, &mut error)
     } else {
         journal(args, &mut output)
     };
@@ -238,16 +227,10 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     use std::collections::BTreeMap;
     let Some(command) = args.first().map(String::as_str) else {
         return Err(
-            "expected me, spaces, post, get, list, search, thread, inbox, inbox-ack, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
+            "expected register, me, spaces, post, get, list, search, thread, inbox, inbox-ack, or delivery-status",
         );
     };
     let allowed: &[&str] = match command {
-        "adapter-register" => &["--instance"],
-        "adapter-heartbeat" => &["--instance", "--generation"],
-        "mailbox-claim" => &["--instance", "--generation", "--limit", "--wait-seconds"],
-        "mailbox-status" => &["--cursor", "--limit"],
-        "custody-commit" => &["--claim", "--input"],
-        "delivery-event" => &["--item", "--input"],
         "delivery-status" => &["--record", "--cursor", "--limit"],
         "inbox" => &["--state", "--cursor", "--limit"],
         "inbox-ack" => &["--item"],
@@ -278,7 +261,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
         ],
         _ => {
             return Err(
-                "expected me, spaces, post, get, list, search, thread, inbox, inbox-ack, enroll, adapter-register, adapter-heartbeat, mailbox-claim, mailbox-status, custody-commit, delivery-event, or delivery-status",
+                "expected register, me, spaces, post, get, list, search, thread, inbox, inbox-ack, or delivery-status",
             );
         }
     };
@@ -337,19 +320,7 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
             client.acknowledge_inbox_item(token,required("--item")?).map_err(|_|"acknowledgment failed or response lost; retry the same item")?;
             return Ok(());
         },
-        "custody-commit" => {
-            let input: CommitRequest=decode_json(&read_input(required("--input")?)?).map_err(|_|"invalid commit JSON")?;
-            serde_json::to_value(client.commit_custody(token,required("--claim")?,&input).map_err(|_|"commit failed or response lost; retry the exact claim and attempts")?)
-        },
-        "delivery-event" => {
-            let input: DeliveryEventRequest=decode_json(&read_input(required("--input")?)?).map_err(|_|"invalid event JSON")?;
-            serde_json::to_value(client.record_delivery_event(token,required("--item")?,&input).map_err(|_|"event failed or response lost; retry the exact event")?)
-        },
         "delivery-status" => serde_json::to_value(client.delivery_status(token,required("--record")?,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"status failed")?),
-        "adapter-register" => serde_json::to_value(client.register_adapter(token,&AdapterRegisterRequest { instance_id:required("--instance")?.into() }).map_err(|_|"registration failed")?),
-        "adapter-heartbeat" => serde_json::to_value(client.heartbeat_adapter(token,&AdapterHeartbeatRequest { instance_id:required("--instance")?.into(),generation:required("--generation")?.parse().map_err(|_|"invalid generation")? }).map_err(|_|"heartbeat failed")?),
-        "mailbox-claim" => serde_json::to_value(client.claim_mailbox(token,&ClaimRequest { instance_id:required("--instance")?.into(),generation:required("--generation")?.parse().map_err(|_|"invalid generation")?,limit:required("--limit")?.parse().map_err(|_|"invalid limit")?,wait_seconds:options.get("--wait-seconds").unwrap_or(&"0").parse().map_err(|_|"invalid wait")? }).map_err(|_|"claim failed or response lost; wait for lease expiry before retrying")?),
-        "mailbox-status" => serde_json::to_value(client.mailbox_status(token,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"status failed")?),
         "me" => serde_json::to_value(client.me(token).map_err(|_|"request failed")?),
         "spaces" => serde_json::to_value(client.spaces(token,&PageQuery::from_query(&query).map_err(|_|"invalid pagination")?).map_err(|_|"request failed")?),
         "get" => serde_json::to_value(client.get(token,required("--record")?).map_err(|_|"request failed")?),
@@ -365,56 +336,6 @@ fn journal(args: &[String], output: &mut impl Write) -> Result<(), &'static str>
     }.map_err(|_|"cannot encode response")?;
     serde_json::to_writer(&mut *output, &result).map_err(|_| "cannot write response")?;
     writeln!(output).map_err(|_| "cannot write response")
-}
-
-fn execute(args: &[String], error: &mut impl Write) -> Result<(), &'static str> {
-    if args.len() != 11
-        || args[0] != "enroll"
-        || args[1] != "--endpoint"
-        || args[3] != "--ticket-file"
-        || args[5] != "--instance-id"
-        || args[7] != "--principal-file"
-        || args[9] != "--delivery-file"
-    {
-        return Err(
-            "usage: aj enroll --endpoint URL --ticket-file PATH --instance-id ID --principal-file PATH --delivery-file PATH",
-        );
-    }
-    if args[8] == args[10] {
-        return Err("principal and delivery credentials require separate files");
-    }
-    private_file::check_destination(Path::new(&args[8]))
-        .map_err(|_| "invalid private principal destination")?;
-    private_file::check_destination(Path::new(&args[10]))
-        .map_err(|_| "invalid private delivery destination")?;
-    let ticket =
-        private_file::read(Path::new(&args[4])).map_err(|_| "cannot read private ticket file")?;
-    let transport = HttpTransport::new(&args[2]).map_err(|_| "invalid endpoint")?;
-    let client = Client::new(transport);
-    let response = client.enroll(&ticket, &EnrollmentExchangeRequest {
-        instance_id: args[6].clone(),
-    }).map_err(|_| {
-        let _ = writeln!(error, "aj: event=enrollment_response_failed server_outcome=unknown request_id={} recovery=enrollment-recover",
-            client.last_request_id().as_deref().unwrap_or("unavailable"));
-        "enrollment failed or response lost; use protected local enrollment recovery before retrying"
-    })?;
-    let principal = serde_json::to_vec(&response.principal_client_secret)
-        .map_err(|_| "cannot encode credential")?;
-    let delivery = serde_json::to_vec(&response.delivery_adapter_secret)
-        .map_err(|_| "cannot encode credential")?;
-    if private_file::write(Path::new(&args[8]), &principal).is_err()
-        || private_file::write(Path::new(&args[10]), &delivery).is_err()
-    {
-        let _ = writeln!(
-            error,
-            "aj: event=credential_write_failed operation=enrollment server_outcome=committed request_id={} recovery=enrollment-recover",
-            client.last_request_id().as_deref().unwrap_or("unavailable")
-        );
-        return Err(
-            "credential persistence failed; use protected local enrollment recovery to revoke BOTH credentials; ticket remains consumed",
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
-# Generic journald configuration example
+# Documentation only; journald uses named CLI flags, not this YAML.
 # Deployment-local values must be supplied outside the public repository.
 listen:
-  https: :8443
+  http: 127.0.0.1:8080
   admin_unix_socket: /run/agent-journal/admin.sock
 database:
   path: /var/lib/agent-journal/journal.sqlite3
@@ -10,12 +10,9 @@ database:
   wal_checkpoint_pages: 1000
 limits:
   content_bytes: 65536
-  telemetry_detail_serialized_utf8_bytes: 4096
   relations: 32
   attention_recipients: 16
   page_size: 100
-  claim_batch: 20
-  long_poll_seconds: 30
 security:
   bearer_token_hash_algorithm: sha256
   require_private_ingress: true

@@ -212,8 +212,12 @@ pub fn write(_path: &Path, _contents: &[u8]) -> io::Result<()> {
     ))
 }
 
-#[cfg(unix)]
 pub fn read(path: &Path) -> io::Result<String> {
+    read_with_limit(path, 16_384)
+}
+
+#[cfg(unix)]
+pub fn read_with_limit(path: &Path, max_bytes: u64) -> io::Result<String> {
     use std::{
         fs,
         io::Read,
@@ -234,8 +238,9 @@ pub fn read(path: &Path) -> io::Result<String> {
         return Err(io::Error::other("secret input changed during read"));
     }
     let mut text = String::new();
-    file.take(16_385).read_to_string(&mut text)?;
-    if text.len() > 16_384 {
+    file.take(max_bytes.saturating_add(1))
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > max_bytes {
         return Err(io::Error::other("secret input is too large"));
     }
     Ok(text.trim().to_owned())
@@ -266,7 +271,7 @@ mod tests {
 }
 
 #[cfg(not(unix))]
-pub fn read(_path: &Path) -> io::Result<String> {
+pub fn read_with_limit(_path: &Path, _max_bytes: u64) -> io::Result<String> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "private credential files require Unix",
