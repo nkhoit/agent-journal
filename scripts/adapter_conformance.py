@@ -72,7 +72,7 @@ SCENARIOS = {
         [("central", REPLAY)]),
     "telemetry-cross-principal": (
         "reject_adapter_principal_mismatch", ["recordDeliveryEvent"],
-        [("central", "custody_cross_principal_rotated_credential_and_suppression")]),
+        [("central", "custody_cross_principal_rotated_credential_and_public_policy")]),
     "retryable-telemetry-recovery": (
         "retryable_failure_then_runtime_acceptance_on_same_custodied_attempt",
         ["recordDeliveryEvent", "commitHostCustody"],
@@ -100,8 +100,8 @@ SCENARIOS = {
         ["claimMailbox", "commitHostCustody", "recordDeliveryEvent"],
         [("spool", "ambiguous_runtime_error_does_not_reinject_after_runtime_call")]),
     "revocation": (
-        "suppress_unclaimed_content_without_recall_claim", ["grantMembership", "claimMailbox"],
-        [("central", "revocation_suppresses_without_exposing_content"), ("runtime", HTTP)]),
+        "reject_revoked_credentials_without_recalling_content", ["revokeCredential", "claimMailbox"],
+        [("central", "recipient_isolation_and_credential_revocation"), ("runtime", HTTP)]),
 }
 
 STATES = {

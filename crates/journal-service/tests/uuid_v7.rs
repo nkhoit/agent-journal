@@ -36,6 +36,7 @@ fn record_id_encodes_uuid_v7_timestamp_version_variant_and_random_bits() {
         .unwrap();
     bootstrap
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space".into(),
             name: "Space".into(),
         })

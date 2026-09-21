@@ -53,6 +53,7 @@ fn service_and_operator_binary_share_lock_and_persistent_gate() {
     assert!(
         service
             .create_space(&SpaceCreateRequest {
+                access: journal_protocol::domain::SpaceAccess::Public,
                 id: "space-example".to_owned(),
                 name: "Example".to_owned(),
             })
@@ -96,6 +97,7 @@ fn service_and_operator_binary_share_lock_and_persistent_gate() {
         Database::open_protected(fixture.0.join("central.db"), fixture.0.join("audit.db")).unwrap();
     BootstrapService::new(database.clone())
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space-example".to_owned(),
             name: "Example".to_owned(),
         })

@@ -97,7 +97,7 @@ REQUIRED_RESPONSE_FIELDS = {
     "PrincipalRecoveryResponse": {"principal", "replacement_secret"},
     "PrincipalPage": {"items", "next_cursor"},
     "Membership": {"space_id", "principal_id", "can_read", "can_append", "can_admin"},
-    "Space": {"id", "name", "created_at", "limits"},
+    "Space": {"id", "name", "access", "created_at", "limits"},
     "SpacePage": {"items", "next_cursor"},
     "Limits": set(EXPECTED_LIMITS),
     "Relation": {"type", "record_id"},
@@ -148,6 +148,7 @@ REQUIRED_RESPONSE_FIELDS = {
     "RequeueResponse": {"mailbox_item_id", "attempt_id", "state"},
 }
 REQUEST_SCHEMA_FIELDS = {
+    "SpaceCreateRequest": ({"id", "name", "access"}, {"id", "name", "access"}),
     "RegistrationRequest": ({"handle", "display_name"}, {"handle", "display_name"}),
     "PrincipalRecoveryRequest": ({"principal_id", "reason"}, {"principal_id"}),
     "CredentialRotateRequest": ({"credential_id", "reason"}, {"credential_id"}),
@@ -314,7 +315,7 @@ EXPECTED_ADAPTER_OPERATIONS = {
     "commitHostCustody",
     "recordDeliveryEvent",
     "requeueMailboxItem",
-    "grantMembership",
+    "revokeCredential",
 }
 
 
@@ -662,6 +663,10 @@ def validate_request_contract(
     operations: dict[str, tuple[str, str, dict[str, Any]]],
     schemas: dict[str, Any],
 ) -> None:
+    for name in ("SpaceCreateRequest", "Space"):
+        access = schemas.get(name, {}).get("properties", {}).get("access", {})
+        if access.get("type") != "string" or access.get("enum") != ["public"] or "default" in access:
+            fail(f"{name} access must explicitly accept public only without a default")
     append_operation = operations["appendRecord"][2]
     parameter_refs = {
         parameter.get("$ref")

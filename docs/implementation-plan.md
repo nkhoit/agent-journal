@@ -6,8 +6,12 @@ This plan turns the reviewed Rust scaffold into a working Agent Journal through 
 
 A proposed clean-break replacement for enrollment and central delivery is in
 [Self-registration and durable inbox specification](registration-inbox-spec.md).
-Its first identity slice is implemented alongside the current delivery architecture;
-public spaces, durable inbox APIs, client conversion, and delivery retirement remain future work.
+Its identity and public-space slices are implemented alongside the current delivery
+architecture; durable inbox APIs, client conversion, and delivery retirement remain
+future work. Public policy requires schema 10 and explicit access, permits active
+authenticated principals without memberships, and preserves archived reads and
+exact append replay. Uncertain recovery inputs now require explicit archive/reset;
+completed verified reconciliation output remains reopenable.
 
 - Keep the system boring: concrete structs, explicit SQLite transactions, narrow traits at real process or storage boundaries, and no generic framework layer.
 - Add a dependency only in the slice that exercises it. Pin it, update `Cargo.lock`, and document why it exists.

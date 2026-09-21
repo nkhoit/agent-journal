@@ -15,7 +15,8 @@ const SEARCH_SCORE: &str = "CAST(length(CAST(highlight(records_fts,2,'x','') AS 
 // CROSS JOIN keeps MATCH first so invalid syntax is rejected even in an empty
 // space; authorization and the sequence cursor precede rendering.
 const SEARCH_FROM: &str = "FROM records_fts CROSS JOIN records r ON r.id=records_fts.record_id
-    CROSS JOIN memberships m ON m.space_id=r.space_id AND m.principal_id=?1 AND m.can_read=1
+    CROSS JOIN spaces s ON s.id=r.space_id AND s.access='public'
+    CROSS JOIN principals p ON p.id=?1 AND p.disabled_at IS NULL
     WHERE records_fts MATCH ?2 AND r.space_id=?3
       AND (?4 IS NULL OR r.author_principal_id=?4)
       AND (?5 IS NULL OR EXISTS(SELECT 1 FROM attention a WHERE a.record_id=r.id AND a.recipient_principal_id=?5))
@@ -497,8 +498,8 @@ impl BootstrapService {
             let codec = self.cursor_codec(tx)?;
             let scope = scope(CursorRoute::Spaces, &(&actor,))?;
             let after = identifier_position(&codec, &scope, query)?;
-            let mut stmt = tx.prepare("SELECT s.id FROM spaces s JOIN memberships m ON m.space_id=s.id WHERE m.principal_id=? AND m.can_read=1 AND s.id>? ORDER BY s.id LIMIT ?")?;
-            let ids = stmt.query_map(params![actor,after,(query.effective_limit()+1) as i64], |r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut stmt = tx.prepare("SELECT s.id FROM spaces s WHERE s.access='public' AND s.id>? ORDER BY s.id LIMIT ?")?;
+            let ids = stmt.query_map(params![after,(query.effective_limit()+1) as i64], |r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let items = ids.iter().map(|id|space(tx,id)).collect::<Result<Vec<_>,_>>()?;
             finish_page(items, query, &codec, &scope, |s|CursorPosition::Identifier { id:s.id.clone() })
         })
@@ -516,8 +517,8 @@ impl BootstrapService {
             let codec = self.cursor_codec(tx)?;
             let scope = scope(CursorRoute::Principals, &(&actor,&query.space))?;
             let after = identifier_position(&codec, &scope, &query.page)?;
-            let mut stmt = tx.prepare("SELECT p.id,n.name,p.display_name,p.description,p.profile_revision,p.created_at FROM principals p JOIN principal_names n ON n.principal_id=p.id AND n.kind='current' JOIN memberships m ON m.principal_id=p.id WHERE m.space_id=? AND m.can_read=1 AND p.disabled_at IS NULL AND p.id>? ORDER BY p.id LIMIT ?")?;
-            let items = stmt.query_map(params![query.space,after,(query.page.effective_limit()+1) as i64], |r|Ok(Principal { id:r.get(0)?,handle:r.get(1)?,display_name:r.get(2)?,description:r.get(3)?,profile_revision:r.get(4)?,created_at:r.get(5)?,disabled:false }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut stmt = tx.prepare("SELECT p.id,n.name,p.display_name,p.description,p.profile_revision,p.created_at FROM principals p JOIN principal_names n ON n.principal_id=p.id AND n.kind='current' WHERE p.disabled_at IS NULL AND p.id>? ORDER BY p.id LIMIT ?")?;
+            let items = stmt.query_map(params![after,(query.page.effective_limit()+1) as i64], |r|Ok(Principal { id:r.get(0)?,handle:r.get(1)?,display_name:r.get(2)?,description:r.get(3)?,profile_revision:r.get(4)?,created_at:r.get(5)?,disabled:false }))?.collect::<rusqlite::Result<Vec<_>>>()?;
             finish_page(items, &query.page, &codec, &scope, |p|CursorPosition::Identifier { id:p.id.clone() })
         })
     }
@@ -612,16 +613,16 @@ fn resolve_space_principal(
         return Ok(None);
     };
     // Names win over UUID-shaped selectors. A handle resolves only when the
-    // persisted name and active, readable space membership both authorize it.
+    // persisted name and active principal under the space policy both authorize it.
     let principal = tx
         .query_row(
             "SELECT p.id FROM principal_names n
                JOIN principals p ON p.id=n.principal_id AND p.disabled_at IS NULL
-               JOIN memberships m ON m.principal_id=p.id AND m.space_id=?2 AND m.can_read=1
+               JOIN spaces s ON s.id=?2 AND s.access='public'
              WHERE n.name=?1
              UNION ALL
              SELECT p.id FROM principals p
-               JOIN memberships m ON m.principal_id=p.id AND m.space_id=?2 AND m.can_read=1
+               JOIN spaces s ON s.id=?2 AND s.access='public'
              WHERE p.id=?1 AND p.disabled_at IS NULL
                AND NOT EXISTS(SELECT 1 FROM principal_names WHERE name=?1)
              LIMIT 1",
@@ -718,10 +719,13 @@ fn permitted(
     space: &str,
     append: bool,
 ) -> Result<(), BootstrapError> {
-    let allowed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memberships m JOIN principals p ON p.id=m.principal_id JOIN spaces s ON s.id=m.space_id
-        WHERE m.principal_id=? AND m.space_id=? AND p.disabled_at IS NULL
-        AND ((?=0 AND m.can_read=1) OR (?=1 AND m.can_append=1 AND s.archived_at IS NULL)))",
-        params![principal,space,append,append], |r|r.get(0))?;
+    let allowed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM principals p JOIN spaces s ON s.id=?
+        WHERE p.id=? AND p.disabled_at IS NULL AND s.access='public'
+        AND (?=0 OR s.archived_at IS NULL))",
+        params![space, principal, append],
+        |r| r.get(0),
+    )?;
     if allowed {
         Ok(())
     } else {
@@ -753,7 +757,7 @@ pub(super) fn record(tx: &Transaction<'_>, id: &str) -> Result<Record, Bootstrap
 
 fn space(tx: &Transaction<'_>, id: &str) -> Result<Space, BootstrapError> {
     Ok(tx.query_row(
-        "SELECT id,name,created_at,archived_at FROM spaces WHERE id=?",
+        "SELECT id,name,created_at,archived_at,access FROM spaces WHERE id=?",
         [id],
         |r| {
             Ok(Space {
@@ -761,6 +765,10 @@ fn space(tx: &Transaction<'_>, id: &str) -> Result<Space, BootstrapError> {
                 name: r.get(1)?,
                 created_at: r.get(2)?,
                 archived_at: r.get(3)?,
+                access: match r.get::<_, String>(4)?.as_str() {
+                    "public" => journal_domain::SpaceAccess::Public,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                },
                 limits: default_limits(),
             })
         },
@@ -865,7 +873,7 @@ mod tests {
             .unwrap();
         connection.execute_batch(
             "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000001','Writer','2026-01-01T00:00:00Z');
-             INSERT INTO spaces(id,name,created_at) VALUES ('space','Space','2026-01-01T00:00:00Z');
+             INSERT INTO spaces(id,name,access,created_at) VALUES ('space','Space','public','2026-01-01T00:00:00Z');
              INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES
              ('root','space',1,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z'),
              ('child','space',2,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z'),
@@ -900,7 +908,7 @@ mod tests {
         connection
             .execute_batch(
                 "INSERT INTO principals(id,display_name,created_at) VALUES ('018f1f59-6e90-7000-8000-000000000001','Writer','2026-01-01T00:00:00Z');
-                 INSERT INTO spaces(id,name,created_at) VALUES ('space','Space','2026-01-01T00:00:00Z');
+                 INSERT INTO spaces(id,name,access,created_at) VALUES ('space','Space','public','2026-01-01T00:00:00Z');
                  WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<100000)
                  INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
                  SELECT printf('record-%06d',n),'space',n,'018f1f59-6e90-7000-8000-000000000001','note','hello','2026-01-01T00:00:00Z' FROM seq;",

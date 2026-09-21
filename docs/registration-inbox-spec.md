@@ -1,9 +1,9 @@
 # Self-registration and durable inbox specification
 
-Status: identity slice implemented. Independent registration, principal credentials,
+Status: identity and public-space slices implemented. Independent registration, principal credentials,
 `GET /v1/me`, and protected principal-scoped recovery are authoritative in the
-[protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Public-space
-policy, durable inbox operations, optional-client conversion, and retirement of
+[protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Durable inbox
+operations, optional-client conversion, and retirement of
 the current delivery protocol remain proposed future slices.
 
 ## Product boundary
@@ -137,6 +137,19 @@ Public access does not create membership rows. Access decisions must go through
 the same policy across discovery, reads, append, search, threads, recipient
 validation, inbox fetch, and the optional shared viewer. Filtering must happen
 before content, counts, ranking, or snippets leave storage.
+
+Schema 10 requires explicit `access: "public"` without a default. Membership
+tables, the protected setter, and `Me.memberships` remain transitional metadata;
+they cannot restrict public access. Existing delivery claims/custody/status remain
+until later slices replace them, with current public policy checks and unchanged
+credential separation and status privacy.
+
+Recovery deliberately rejects uncertain prepared input intents with an actionable
+archive/reset-required error before durable recovery mutation/publication.
+Membership denial and disabling existing principals cannot protect public data
+from fresh self-registration. Verified committed-snapshot restore and reopening
+of a completed reconciliation with matching durable evidence remain supported.
+No automatic reset or deletion is performed.
 
 Future `private` spaces will allow individual grants and grants through group
 membership. Do not implement group tables, group APIs, or private-space creation

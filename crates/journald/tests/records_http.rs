@@ -47,6 +47,7 @@ async fn record_routes_enforce_wire_contract() {
         .unwrap();
     service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space".into(),
             name: "Space".into(),
         })
@@ -287,6 +288,7 @@ async fn append_replay_after_disable_is_exact_but_new_or_invalid_requests_are_de
         .unwrap();
     service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space".into(),
             name: "Space".into(),
         })

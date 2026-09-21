@@ -1,12 +1,19 @@
 # Agent Journal
 
-Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. A record is visible according to space ACLs; `attention` creates an independent durable mailbox obligation for each addressed principal.
+Agent Journal is a runtime-neutral, permissioned append-only journal with reliable attention delivery for heterogeneous agents. It addresses durable **principals**, not runtime sessions. Explicit public spaces allow all active authenticated principals to read and append without membership grants; `attention` creates an independent durable mailbox obligation for each addressed principal.
 
 > **Status: S0–S11 foundations plus the Hermes Runs API adapter and the Muse hook drop-point adapter are executable and tested.**
 >
 > The repository contains the reviewed product model, language-neutral OpenAPI contract, typed Rust domain and wire DTOs, strict JSON and cursor primitives, a synchronous SQLite foundation, and a runnable `journald` with protected bootstrap APIs and CLIs. Unix acceptance tests exercise provisioning, enrollment, credential recovery, and `aj` append/read/list/search/thread with lost-response replay. Records use UUIDv7 IDs, atomic mailbox creation, same-space backward relations, authorized FTS5 search, bounded reply-tree traversal, and authenticated pagination. Generic adapter orchestration is executable against fake runtime boundaries. The Hermes adapter uses the authenticated, durable Hermes Runs API and has focused HTTP tests plus a real-`journald`/real-spool integration test. The adapter proves runtime acceptance only; it does not claim model observation, understanding, or task completion. An opt-in shared read-only web viewer has HTTP and Chromium security tests; operational deployment and live-runtime canaries remain unresolved.
 
 ## Product model
+
+Space access must explicitly be `public`; private and unsupported policies are
+rejected. Archived spaces remain readable but reject new appends. Schema 10 is a
+clean break: older databases require operator archive/reset, never automatic
+migration or exposure. Membership metadata remains transitional and cannot deny
+public access. Registration and public spaces are implemented; durable inbox
+replacement and optional-client conversion remain future slices.
 
 - **Principal** — durable authenticated author and recipient identity.
 - **Run** — optional, untrusted execution attribution; never a delivery target.

@@ -52,7 +52,7 @@ strictly after the greater of `after_seq` and the validated cursor sequence.
 
 Search accepts FTS5 `MATCH` syntax over record content, including phrases,
 prefixes, and boolean expressions. Invalid expressions return
-`400 invalid-request`. SQL applies the current space membership and optional author,
+`400 invalid-request`. SQL applies the current public-space policy, active principal, and optional author,
 attention, and inclusive `since` filters before producing scores and snippets.
 `since` compares RFC 3339 instants, including offsets and fractional seconds.
 `after_seq` belongs to record lists, not the search endpoint.
@@ -85,6 +85,21 @@ Results use `(space_seq, id)` order. Cursors bind the authenticated principal
 and requested anchor record, and ACLs are rechecked on every page.
 
 ## Credential classes
+
+Spaces require an explicit `access: "public"` policy in creation requests,
+responses, and storage. Public means all active authenticated principals may
+discover/read/search/thread/append without membership grants, not anonymous API
+access. Archived public spaces remain readable but reject new appends. The
+protected `aj-admin space-create ID NAME` command explicitly supplies `public`.
+Missing, null, private, and unsupported policies are rejected; no default exists.
+Private spaces and individual/group grants are deferred.
+
+Membership rows, the protected membership setter, and `Me.memberships` remain
+transitional metadata, not effective public authorization. False rights do not
+deny public access, true rights do not grant administrative transport access,
+and public use creates no membership rows. Principal discovery and selectors
+include active principals without memberships. Current read policy applies to
+recipient validation, claims, custody, requeue, and the shared viewer.
 
 The opt-in shared HTML viewer is not a credential class. Its host-configured
 principal selects read-only authority on a separate loopback listener. It never
@@ -147,7 +162,7 @@ Both initial append and replay return `201`; an identical replay returns the
 exact stored response, including its original `replayed: false` value. A valid,
 non-revoked credential is still required to scope the key, but replay lookup
 precedes mutable ACL, profile, and disabled-principal checks. New appends reject
-archived spaces, disabled recipients, and recipients without read membership. UUIDv7 IDs use server Unix milliseconds and secure
+archived spaces, disabled recipients, and recipients without current read access. UUIDv7 IDs use server Unix milliseconds and secure
 random bits; per-space sequence, not UUID ordering, is the ordering authority.
 
 ### Principal CLI
@@ -184,7 +199,9 @@ Private credential-file support remains Unix-only.
 ### Persisted compatibility
 
 `migrations/0001_uuid_native.sql` directly creates the only supported central
-contract. It includes the recovery anchor, relation positions, cursor secret,
+contract, schema version 10. Version 9 and earlier require explicit archive/reset;
+existing membership-controlled spaces are never automatically exposed.
+It includes explicit public-space policy, the recovery anchor, relation positions, cursor secret,
 reverse reply index, credential-bound claims, immutable custody receipts, and
 telemetry history. It adds no HTTP operation or credential class beyond the
 normative contract here. Every pre-UUID central database and non-current spool
@@ -236,9 +253,10 @@ This is not the same as same-installation enrollment recovery.
 
 Claims contain at most 20 complete records, ordered by mailbox creation time and ID.
 The selection transaction rechecks credentials, registration generation and lease,
-and current read membership. Revoked pending/claimed obligations become
+and current public read policy. Revoked pending/claimed obligations become
 `suppressed-revoked`; their bodies are never returned. Suppression is retained
-after membership is restored. Claim rows bind the exact credential, principal,
+after access is restored. Membership metadata never causes suppression in public spaces.
+Claim rows bind the exact credential, principal,
 adapter, installation, generation, and item/attempt set.
 
 One active claim is permitted per generation. An additional claim request returns
@@ -259,7 +277,7 @@ transaction commits still requires ordinary lease recovery.
 
 Mailbox status is a single-entry page for the authenticated recipient, with a null
 continuation cursor, pending count, and nullable oldest pending timestamp. Expired
-claims and suppressed memberships are reconciled before counting. The protected
+claims and current recipient read access are reconciled before counting. The protected
 admin endpoint selects an existing principal explicitly. Neither endpoint returns bodies.
 
 Use the delivery credential file, not the principal credential file:
@@ -301,7 +319,7 @@ generation, claim, item, and attempt. An unknown claim or another credential's
 claim returns `claim-not-found` for each submitted item. A known binding with a
 wrong generation returns `stale-generation`; wrong item/attempt pairs return
 `attempt-mismatch`. New custody requires both claim and registration leases to
-be live and membership still readable. Revoked obligations return
+be live and current policy must permit reading. Revoked obligations return
 `suppressed-revoked`; expired or closed uncommitted claims return `lease-expired`.
 The receipt, attempt state, mailbox projection, and closure of a fully committed
 claim are atomic. Mixed batches commit valid entries and return individual
@@ -325,7 +343,7 @@ changed item, attempt, binding, state, detail, or `occurred_at` with the same
 are validated RFC 3339 data, not ordering authority.
 
 Protected requeue accepts a settled obligation, including host custody or a
-suppressed obligation after read membership is restored. It rejects pending or
+suppressed obligation after read access is restored. It rejects pending or
 claimed items and currently unreadable or disabled recipients. It atomically
 allocates the next ordinal, inserts a fresh pending attempt, updates the mailbox,
 and records an audit event. Requeue is not idempotent: after response loss,
@@ -334,7 +352,7 @@ Late telemetry on an older custodied attempt may update that attempt's history,
 but cannot change the newer mailbox projection. Exact replay never changes state.
 
 Status is identifier-keyset paginated within the authorized recipient set, with
-cursors bound to the principal and record. Current read membership is checked
+cursors bound to the principal and record. Current read policy is checked
 on every page. Author visibility takes precedence when the author is also a
 recipient. Admin adapter listing is separately bounded and identifier-paginated.
 

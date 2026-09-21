@@ -48,6 +48,36 @@ where
 }
 
 #[test]
+fn public_space_policy_is_explicit_and_rejects_unsupported_values() {
+    assert_required_fields::<SpaceCreateRequest>(
+        json!({"id":"space","name":"Space","access":"public"}),
+        &["id", "name", "access"],
+    );
+    assert_required_fields::<domain::Space>(
+        wire_example("Space").clone(),
+        &["id", "name", "access", "created_at", "limits"],
+    );
+    for value in [
+        json!("private"),
+        json!("PUBLIC"),
+        json!(""),
+        json!(null),
+        json!(true),
+        json!(1),
+    ] {
+        assert!(
+            decode_json::<SpaceCreateRequest>(
+                &serde_json::to_vec(&json!({"id":"space","name":"Space","access":value})).unwrap()
+            )
+            .is_err()
+        );
+        let mut response = wire_example("Space").clone();
+        response["access"] = value;
+        assert!(decode_json::<domain::Space>(&serde_json::to_vec(&response).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn normative_wire_examples_round_trip_through_typed_dtos() {
     macro_rules! example {
         ($type:ty, $name:literal) => {
@@ -502,7 +532,7 @@ fn response_dtos_require_every_normative_field() {
     );
     assert_required_fields::<domain::Space>(
         json!({
-            "id":"project-alpha","name":"Project Alpha","created_at":"2026-01-01T00:00:00Z",
+            "id":"project-alpha","name":"Project Alpha","access":"public","created_at":"2026-01-01T00:00:00Z",
             "limits":{
                 "content_bytes":65536,"relations":32,"attention_recipients":16,
                 "page_size":100,"claim_batch":20,"long_poll_seconds":30,

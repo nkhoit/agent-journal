@@ -39,7 +39,7 @@ fn execute(
             &PrincipalCreateRequest { handle: a[0].clone(), display_name: a[1].clone() })
             .map_err(|_| "principal creation failed")?),
         "space-create" if a.len() == 2 => serde_json::to_value(client.create_space(
-            &SpaceCreateRequest { id: a[0].clone(), name: a[1].clone() })
+            &SpaceCreateRequest { access: domain::SpaceAccess::Public, id: a[0].clone(), name: a[1].clone() })
             .map_err(|_| "space creation failed")?),
         "membership-set" if a.len() == 5 => serde_json::to_value(client.set_membership(
             &MembershipRequest { space_id: a[0].clone(), principal_id: a[1].clone(),

@@ -167,6 +167,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
     let _outsider = enroll(&service, "outsider");
     service
         .create_space(&SpaceCreateRequest {
+            access: journal_protocol::domain::SpaceAccess::Public,
             id: "space".into(),
             name: "<img src=x>".into(),
         })
@@ -218,12 +219,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
         )
         .unwrap();
     let state = ServiceState::new(db.clone(), 4).unwrap();
-    assert!(
-        service
-            .shared_viewer("outsider")
-            .record(&record.id)
-            .is_err()
-    );
+    assert!(service.shared_viewer("outsider").record(&record.id).is_ok());
     let public = public_router(state.clone(), 1_048_576);
     let router = web_router(state.clone(), "author".into(), 1_048_576);
     let recipient_router = web_router(state.clone(), "recipient".into(), 1_048_576);
@@ -264,14 +260,19 @@ async fn web_views_are_authorized_inert_and_bounded() {
     for path in [
         record_path.clone(),
         format!("{record_path}/thread"),
-        format!("{record_path}/delivery-status"),
         "/web/spaces/space".into(),
         "/web/spaces/space/search?q=administrator".into(),
     ] {
-        let body = get(&outsider_router, &path, Some(token), StatusCode::NOT_FOUND).await;
-        assert!(!body.contains("Forged"));
+        get(&outsider_router, &path, Some(token), StatusCode::OK).await;
     }
     let delivery = format!("{record_path}/delivery-status");
+    get(
+        &outsider_router,
+        &delivery,
+        Some(token),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
     let body = get(&recipient_router, &delivery, Some(token), StatusCode::OK).await;
     assert_eq!(body.matches("<tr>").count(), 2);
     let body = get(&router, &delivery, Some(token), StatusCode::OK).await;
@@ -336,7 +337,7 @@ async fn web_views_are_authorized_inert_and_bounded() {
     let response = outsider_router
         .clone()
         .oneshot(
-            Request::get(&record_path)
+            Request::get(&delivery)
                 .header("x-forwarded-user", "author")
                 .header("tailscale-user-login", "author")
                 .body(Body::empty())
@@ -354,9 +355,9 @@ async fn web_views_are_authorized_inert_and_bounded() {
             can_admin: false,
         })
         .unwrap();
-    assert!(service.shared_viewer("author").record(&record.id).is_err());
-    get(&router, &record_path, Some(token), StatusCode::NOT_FOUND).await;
-    get(&router, &delivery, Some(token), StatusCode::NOT_FOUND).await;
+    assert!(service.shared_viewer("author").record(&record.id).is_ok());
+    get(&router, &record_path, Some(token), StatusCode::OK).await;
+    get(&router, &delivery, Some(token), StatusCode::OK).await;
     db.connect()
         .unwrap()
         .execute(

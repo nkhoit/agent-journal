@@ -47,6 +47,7 @@ impl Fixture {
             .unwrap();
         service
             .create_space(&wire::SpaceCreateRequest {
+                access: journal_protocol::domain::SpaceAccess::Public,
                 id: "space".into(),
                 name: "Space".into(),
             })

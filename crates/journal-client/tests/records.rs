@@ -4,6 +4,43 @@ struct Capture {
     method: &'static str,
     path: &'static str,
 }
+
+#[test]
+fn typed_space_client_sends_and_reads_explicit_public_policy() {
+    struct SpaceTransport;
+    impl Transport for SpaceTransport {
+        fn send(&self, request: Request) -> Result<Response, TransportError> {
+            if request.method == "POST" {
+                assert_eq!(request.path, "/v1/admin/spaces");
+                let body: SpaceCreateRequest = decode_json(&request.body).unwrap();
+                assert_eq!(body.access, domain::SpaceAccess::Public);
+            } else {
+                assert_eq!(request.path, "/v1/spaces/space");
+            }
+            Ok(Response::new(
+                if request.method == "POST" { 201 } else { 200 },
+                serde_json::to_vec(&domain::Space {
+                    id: "space".into(),
+                    name: "Space".into(),
+                    access: domain::SpaceAccess::Public,
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    archived_at: None,
+                    limits: domain::default_limits(),
+                })
+                .unwrap(),
+            ))
+        }
+    }
+    let client = Client::new(SpaceTransport);
+    let created = client
+        .create_space(&SpaceCreateRequest {
+            id: "space".into(),
+            name: "Space".into(),
+            access: domain::SpaceAccess::Public,
+        })
+        .unwrap();
+    assert_eq!(client.space(&"a".repeat(64), "space").unwrap(), created);
+}
 impl Transport for Capture {
     fn send(&self, request: Request) -> Result<Response, TransportError> {
         assert_eq!(request.method, self.method);

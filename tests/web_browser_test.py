@@ -81,7 +81,7 @@ def main():
                     else:
                         assert "recipient" not in page.content()
                 for path in [record, record + "/thread", "/web/spaces/space", "/web/spaces/space/search?q=malicioussnippet"]:
-                    assert page.goto(fixture["outsider"] + path).status == 404
+                    assert page.goto(fixture["outsider"] + path).status == 200
                 assert page.goto(fixture["api"] + record).status == 404
                 assert context.request.post(fixture["viewer"] + record).status == 405
                 assert context.request.get(fixture["viewer"] + "/v1/spaces").status == 404
@@ -91,7 +91,7 @@ def main():
                     data={"kind": "note", "content": "must not publish"},
                 ).status == 401
                 browser.close()
-            print("Browser security: Chromium rendering, CSP, navigation, shared ACLs, delivery and listener isolation passed")
+            print("Browser security: Chromium rendering, CSP, navigation, public policy, delivery and listener isolation passed")
         finally:
             process.terminate()
             process.wait(timeout=15)

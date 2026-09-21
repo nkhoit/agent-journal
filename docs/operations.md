@@ -19,8 +19,9 @@ work; see the status table in [README.md](../README.md).
 
 ## Optional shared read-only web viewer
 
-Create an ordinary principal using protected administration and grant only the
-space-read memberships intended for all browser visitors. No bearer credential
+Create a dedicated ordinary principal using protected administration. Every public
+space is visible to all browser visitors; memberships cannot restrict that view.
+No bearer credential
 or adapter enrollment is needed for this viewer. Enable the separate listener:
 
 ```sh
@@ -39,9 +40,10 @@ reach the loopback port, receives the configured principal's current read view.
 Use a trusted single-user service host and a dedicated least-privilege principal.
 
 The paired flags are required; non-loopback bindings and missing/disabled
-principals are startup errors. Without both flags web remains disabled. Revoke
-memberships or disable the principal to stop subsequent reads; remove the flags
-and restart to remove the listener. Browser requests cannot select a principal
+principals are startup errors. Without both flags web remains disabled. Remove the
+flags and restart to remove the listener. A disabled viewer fails closed on later
+reads; bearer revocation or membership changes do not disable this configured
+identity. Browser requests cannot select a principal
 through headers, cookies, or query parameters. The web port has no JSON API,
 publishing, metrics, or administration routes, and the API port has no HTML views.
 Stable `/web/records/{id}` links still recheck authorization on every request.
@@ -189,6 +191,10 @@ aj enroll --endpoint "$JOURNAL_URL" --ticket-file secrets/ticket \
   --instance-id installation-example \
   --principal-file secrets/principal.json --delivery-file secrets/delivery.json
 ```
+
+The membership command stores transitional metadata only and is unnecessary for
+public-space reads/appends. `space-create` explicitly emits `access: "public"`;
+unsupported access policies are rejected by the protected API.
 
 If a principal credential is lost, use its immutable UUID:
 

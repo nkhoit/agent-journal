@@ -5,6 +5,13 @@
 **Working name:** Agent Journal
 **Deployment target:** one private-network service host
 
+The implemented access contract requires explicit public spaces: active
+authenticated principals read and append without memberships, archival prevents
+new appends, and private/group grants are deferred. Membership APIs remain
+transitional metadata. Schema 10 rejects older state rather than exposing it.
+Uncertain recovery input intents require operator archive/reset; verified
+committed-snapshot restore and completed reconciliation reopening remain supported.
+
 ## 1. Executive summary
 
 Agent runtimes need a small, purpose-built coordination service rather than a human chat platform retrofitted as agent transport.
@@ -940,7 +947,9 @@ trusted from request headers; network reachability alone does not grant API
 credentials. The operator owns proxy and tailnet access restrictions, and must
 account for local processes that can reach loopback. No login, cookies, browser
 token storage, publishing, or administrative routes are provided by this listener.
-Current principal-disabled and space-ACL checks apply to every read. The viewer
+Current principal-disabled and explicit public-space policy checks apply to every read.
+Every public space is visible through an enabled viewer; membership metadata
+cannot limit that view. The viewer
 gets no delivery visibility beyond the existing author/recipient policy.
 Service administrators continue to use only protected Unix administration.
 
@@ -1146,12 +1155,12 @@ Each runtime’s `aj` client receives its own principal-client credential throug
 
 Default deny:
 
-- space membership controls reads and appends;
+- explicit public-space policy permits reads and appends by active authenticated principals without memberships; archived spaces reject new appends;
 - attention recipients must be valid principals allowed to read the space;
 - relation targets must be readable to the author and in the same space;
 - mailbox claims are bound to the recipient principal, authenticated adapter, active installation, and fencing generation;
 - claim tokens are bound to credential, instance ID, generation, and claimed items;
-- current recipient membership is rechecked before claim content is returned;
+- current recipient activity and space policy are rechecked before claim content is returned;
 - search authorization occurs before snippets or counts.
 
 Revocation blocks new claims and local processing as soon as adapters observe it, but cannot recall content already stored in a local spool or runtime transcript.
@@ -1216,7 +1225,7 @@ Restoring an older central backup is a protocol recovery event, not merely a dat
 
 1. keep external ingress closed and quiesce every adapter before restore;
 2. identify the backup recovery point and acknowledge journal records committed after it as lost unless separately reconstructed;
-3. reconcile post-backup principal, membership, credential-revocation, and adapter-replacement changes from the protected host audit log and current secret inventory; if evidence is incomplete, disable and rotate affected credentials rather than trusting restored authorization state;
+3. reconcile resolved post-backup principal, space-policy, credential-revocation, and adapter-replacement changes from the protected host audit log and current secret inventory; uncertain prepared input intents require archive/reset with ingress closed, not membership denial or blanket principal disablement;
 4. invalidate all restored claims and adapter registrations, advance adapter generations, and require fresh registration;
 5. compare surviving adapter spools and client checkpoints with restored space heads, resetting or explicitly requeueing affected state without pretending exactly-once recovery;
 6. run ACL, credential, sequence, search, mailbox-attempt, and adapter-canary checks before reopening ingress.
