@@ -128,16 +128,14 @@ async fn registered_principals_use_inbox_over_real_http() {
     })
     .await
     .unwrap();
-    for table in ["memberships", "adapter_registrations"] {
-        assert_eq!(
-            db.connect()
-                .unwrap()
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
+    assert_eq!(
+        db.connect()
+            .unwrap()
+            .query_row("SELECT count(*) FROM memberships", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     server.abort();
     let _ = server.await;
     drop(db);

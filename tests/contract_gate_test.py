@@ -62,9 +62,9 @@ class ContractGateTest(unittest.TestCase):
         result = self.run_gate()
         output = f"{result.stdout}\n{result.stderr}"
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("35 paths", output)
-        self.assertIn("37 operations", output)
-        self.assertIn("79 fixture mappings", output)
+        self.assertIn("22 paths", output)
+        self.assertIn("23 operations", output)
+        self.assertIn("23 fixture mappings", output)
         self.assertIn("fixture coverage", output.casefold())
 
     def test_rotation_requires_one_time_response(self) -> None:
@@ -89,9 +89,9 @@ class ContractGateTest(unittest.TestCase):
                     self.write_yaml(self.openapi, document)
                     self.assert_gate_rejects(name)
 
-    def test_recovery_must_not_return_content(self) -> None:
+    def test_revocation_must_not_return_content(self) -> None:
         document = self.load_yaml(self.openapi)
-        response = document["paths"]["/v1/admin/enrollment/recover"]["post"]["responses"]["204"]
+        response = document["paths"]["/v1/admin/credentials/revoke"]["post"]["responses"]["204"]
         response["content"] = {"application/json": {"schema": {"type": "object"}}}
         self.write_yaml(self.openapi, document)
         self.assert_gate_rejects("204", "content")
@@ -200,20 +200,20 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("AppendRecordRequest", "type")
 
-    def test_adapter_provision_request_rejects_credential_property(self) -> None:
+    def test_registration_request_rejects_credential_property(self) -> None:
         document = self.load_yaml(self.openapi)
         provision_request = document["components"]["schemas"][
-            "AdapterProvisionRequest"
+            "RegistrationRequest"
         ]
         provision_request["properties"]["credential"] = {"type": "string"}
         self.write_yaml(self.openapi, document)
 
-        self.assert_gate_rejects("AdapterProvisionRequest", "credential")
+        self.assert_gate_rejects("RegistrationRequest", "credential")
 
-    def test_adapter_provision_request_rejects_credential_pattern(self) -> None:
+    def test_registration_request_rejects_credential_pattern(self) -> None:
         document = self.load_yaml(self.openapi)
         provision_request = document["components"]["schemas"][
-            "AdapterProvisionRequest"
+            "RegistrationRequest"
         ]
         provision_request["patternProperties"] = {
             "^credential$": {"type": "string"}
@@ -221,7 +221,7 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects(
-            "AdapterProvisionRequest", "patternProperties"
+            "RegistrationRequest", "patternProperties"
         )
 
     def test_limit_parameter_maximum_is_enforced(self) -> None:
@@ -290,7 +290,7 @@ class ContractGateTest(unittest.TestCase):
         self.assert_gate_rejects("acknowledgeInboxItem", "request body")
 
     def test_expected_envelope_requires_from_principal(self) -> None:
-        envelope_path = self.conformance / "adapter" / "expected-envelope.txt"
+        envelope_path = self.conformance / "inbox-client" / "expected-envelope.txt"
         envelope_lines = envelope_path.read_text(encoding="utf-8").splitlines()
         envelope_path.write_text(
             "\n".join(
@@ -304,23 +304,23 @@ class ContractGateTest(unittest.TestCase):
 
         self.assert_gate_rejects("expected-envelope.txt", "from_principal")
 
-    def test_expected_envelope_requires_stable_attempt_and_quoted_metadata(self) -> None:
-        envelope_path = self.conformance / "adapter" / "expected-envelope.txt"
+    def test_expected_envelope_requires_stable_inbox_identity_and_quoted_metadata(self) -> None:
+        envelope_path = self.conformance / "inbox-client" / "expected-envelope.txt"
         original = envelope_path.read_text(encoding="utf-8")
-        for field in ("mailbox_item_id", "attempt_id"):
+        for field in ("inbox_item_id", "record_id"):
             envelope_path.write_text(
                 "\n".join(line for line in original.splitlines() if not line.startswith(field + ":")) + "\n",
                 encoding="utf-8",
             )
             self.assert_gate_rejects("expected-envelope.txt", field)
         envelope_path.write_text(
-            original.replace('from_principal: "agent-source"', "from_principal: agent-source"),
+            original.replace('from_principal: "author"', "from_principal: author"),
             encoding="utf-8",
         )
         self.assert_gate_rejects("expected-envelope.txt", "JSON quoted")
 
     def test_expected_envelope_rejects_renamed_from_principal(self) -> None:
-        envelope_path = self.conformance / "adapter" / "expected-envelope.txt"
+        envelope_path = self.conformance / "inbox-client" / "expected-envelope.txt"
         envelope = envelope_path.read_text(encoding="utf-8")
         self.assertIn("\nfrom_principal:", envelope)
         envelope_path.write_text(
@@ -358,23 +358,23 @@ class ContractGateTest(unittest.TestCase):
 
     def test_admin_operation_exposed_on_public_https_is_rejected(self) -> None:
         document = self.load_yaml(self.openapi)
-        operation = document["paths"]["/v1/admin/enrollment-tickets"]["post"]
+        operation = document["paths"]["/v1/admin/principals/recover"]["post"]
         operation["x-agent-journal-public-https"] = True
         self.write_yaml(self.openapi, document)
 
-        self.assert_gate_rejects("createEnrollmentTicket", "public HTTPS")
+        self.assert_gate_rejects("recoverPrincipalCredential", "public HTTPS")
 
     def test_admin_operation_without_unix_socket_restriction_is_rejected(self) -> None:
         document = self.load_yaml(self.openapi)
-        operation = document["paths"]["/v1/admin/enrollment-tickets"]["post"]
+        operation = document["paths"]["/v1/admin/principals/recover"]["post"]
         del operation["x-agent-journal-authorization"]
         self.write_yaml(self.openapi, document)
 
-        self.assert_gate_rejects("createEnrollmentTicket", "Unix-socket")
+        self.assert_gate_rejects("recoverPrincipalCredential", "Unix-socket")
 
     def test_admin_operation_rejects_inline_authorization_header(self) -> None:
         document = self.load_yaml(self.openapi)
-        operation = document["paths"]["/v1/admin/enrollment-tickets"]["post"]
+        operation = document["paths"]["/v1/admin/principals/recover"]["post"]
         operation.setdefault("parameters", []).append(
             {
                 "name": "X-Admin-Authorization",
@@ -386,12 +386,12 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects(
-            "createEnrollmentTicket", "X-Admin-Authorization"
+            "recoverPrincipalCredential", "X-Admin-Authorization"
         )
 
     def test_admin_path_item_rejects_inline_authorization_header(self) -> None:
         document = self.load_yaml(self.openapi)
-        path_item = document["paths"]["/v1/admin/adapters"]
+        path_item = document["paths"]["/v1/admin/principals"]
         path_item.setdefault("parameters", []).append(
             {
                 "name": "X-Admin-Authorization",
@@ -403,42 +403,46 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects(
-            "/v1/admin/adapters", "X-Admin-Authorization"
+            "/v1/admin/principals", "X-Admin-Authorization"
         )
 
     def test_private_identifier_in_conformance_data_is_rejected(self) -> None:
-        scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
+        scenarios_path = self.conformance / "inbox-client" / "scenarios.yaml"
         scenarios = self.load_yaml(scenarios_path)
-        private_runtime_path = str(
-            Path("/", "Users", "sample-operator", "runtime-route")
-        )
-        scenarios["cases"][0]["expectation"] = private_runtime_path
+        private_runtime_path = Path("/", "Users", "sample-operator", "runtime-route").as_posix()
+        scenarios["private"] = private_runtime_path
         self.write_yaml(scenarios_path, scenarios)
 
         self.assert_gate_rejects(
-            "private fixture identifier", "adapter/scenarios.yaml"
+            "private fixture identifier", "inbox-client/scenarios.yaml"
         )
 
-    def test_empty_adapter_scenarios_are_rejected(self) -> None:
-        scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
+    def test_empty_inbox_client_scenarios_are_rejected(self) -> None:
+        scenarios_path = self.conformance / "inbox-client" / "scenarios.yaml"
         scenarios = self.load_yaml(scenarios_path)
         scenarios["cases"] = []
         self.write_yaml(scenarios_path, scenarios)
 
-        self.assert_gate_rejects("adapter", "coverage")
+        self.assert_gate_rejects("inbox-client", "coverage")
 
-    def test_adapter_operation_coverage_is_enforced(self) -> None:
-        scenarios_path = self.conformance / "adapter" / "scenarios.yaml"
-        scenarios = self.load_yaml(scenarios_path)
-        for case in scenarios["cases"]:
-            case["operation_ids"] = [
-                operation_id
-                for operation_id in case["operation_ids"]
-                if operation_id != "replaceAdapter"
-            ]
-        self.write_yaml(scenarios_path, scenarios)
+    def test_inbox_client_scenario_coverage_is_enforced(self) -> None:
+        path = self.conformance / "inbox-client" / "scenarios.yaml"
+        scenarios = self.load_yaml(path)
+        scenarios["cases"].remove("hermes-stable-dedupe")
+        self.write_yaml(path, scenarios)
+        self.assert_gate_rejects("inbox-client", "coverage")
 
-        self.assert_gate_rejects("adapter", "coverage", "replaceAdapter")
+    def test_delivery_credential_class_cannot_return(self) -> None:
+        document = self.load_yaml(self.openapi)
+        document["components"]["schemas"]["CredentialMetadata"]["properties"]["class"]["enum"].append("delivery-adapter")
+        self.write_yaml(self.openapi, document)
+        self.assert_gate_rejects("principal-client")
+
+    def test_legacy_runtime_metric_cannot_return(self) -> None:
+        document = self.load_yaml(self.openapi)
+        document["components"]["schemas"]["OperationalMetrics"]["properties"]["runtime_failure_events"] = {"type": "integer"}
+        self.write_yaml(self.openapi, document)
+        self.assert_gate_rejects("OperationalMetrics")
 
 
 if __name__ == "__main__":

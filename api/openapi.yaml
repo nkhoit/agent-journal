@@ -4,8 +4,8 @@ info:
   version: 0.1.0
   description: |
     Runtime-neutral v1 contract for a permissioned append-only journal and
-    reliable attention delivery. This contract is normative; README.md tracks
-    implemented slices. Vendor runtime integrations remain unresolved.
+    durable recipient inboxes. This contract is normative; optional platform
+    clients use ordinary principal credentials and are not required by the service.
 servers:
   - url: https://journal.example.invalid
     description: Documentation placeholder only; deployments choose a private HTTPS origin.
@@ -13,8 +13,7 @@ tags:
   - name: health
   - name: principal
   - name: records
-  - name: delivery
-  - name: adapters
+  - name: inbox
   - name: administration
 x-agent-journal-admin-transport:
   kind: protected-unix-socket
@@ -29,9 +28,6 @@ x-limits:
   relations: 32
   attention_recipients: 16
   page_size: 100
-  claim_batch: 20
-  long_poll_seconds: 30
-  telemetry_detail_serialized_utf8_bytes: 4096
   notes: Rate and mailbox-capacity limits are deployment configuration. The server validates UTF-8 byte limits explicitly; JSON Schema maxLength remains a secondary character bound.
 paths:
   /health/live:
@@ -343,54 +339,6 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-  /v1/admin/enrollment-tickets:
-    post:
-      tags: [administration]
-      operationId: createEnrollmentTicket
-      summary: Create a short-lived one-use adapter enrollment ticket
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/EnrollmentTicketCreateRequest' }
-      responses:
-        '201':
-          description: Ticket plaintext returned once over the protected local admin channel; only its hash is persisted.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/EnrollmentTicketCreateResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/enrollment/exchange:
-    post:
-      tags: [adapters]
-      operationId: exchangeEnrollmentTicket
-      summary: Exchange a one-use enrollment ticket for separately scoped client and adapter credentials
-      description: Consumed tickets never replay. A lost response or failed credential-file write requires protected administrator recovery revoking both credential lineages, then a fresh ticket for the same installation. A different installation cannot take over an existing registration.
-      security: [{ enrollmentTicket: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/EnrollmentExchangeRequest' }
-      responses:
-        '200':
-          description: Bound principal-client and delivery-adapter credentials returned once; the ticket is atomically consumed and secrets are never logged.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/EnrollmentExchangeResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { $ref: '#/components/responses/Conflict' }
   /v1/admin/metrics:
     get:
       tags: [administration]
@@ -415,262 +363,9 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
-  /v1/admin/adapters:
-    post:
-      tags: [administration]
-      operationId: provisionAdapter
-      summary: Provision a delivery adapter identity
-      description: >-
-        Creates only the durable adapter identity bound to principal_id. This
-        operation creates no credentials and no active registration; credentials
-        are issued exactly once by enrollment exchange.
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AdapterProvisionRequest' }
-      responses:
-        '201':
-          description: Adapter identity provisioned; no runtime registration or reusable secret is created by this operation.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AdapterProvisionResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
-
-    get:
-      tags: [administration]
-      operationId: listAdapters
-      summary: List adapter registrations
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: Adapter registration page without credentials.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AdapterPage' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-  /v1/adapters/self/register:
-    post:
-      tags: [adapters]
-      operationId: registerAdapter
-      summary: Register this adapter installation and obtain a fencing generation
-      description: >-
-        Assert the installation bound to the delivery credential and renew its
-        60-second lease without changing generation. An expired lease may be
-        renewed; revoked credentials and different installations cannot register.
-      security: [{ deliveryAdapter: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AdapterRegisterRequest' }
-      responses:
-        '200':
-          description: Active registration.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AdapterRegistration' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/adapters/self/heartbeat:
-    post:
-      tags: [adapters]
-      operationId: heartbeatAdapter
-      summary: Renew adapter heartbeat and fencing lease
-      description: Requires the authenticated installation, current generation, and an unexpired registration lease.
-      security: [{ deliveryAdapter: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AdapterHeartbeatRequest' }
-      responses:
-        '200':
-          description: Heartbeat accepted.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AdapterRegistration' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/admin/adapters/{adapter_id}/replace:
-    post:
-      tags: [administration]
-      operationId: replaceAdapter
-      summary: Fence and replace an adapter installation
-      description: >-
-        Compare the current generation, require a different installation, advance
-        generation, cancel active claims without replacing attempts, revoke both
-        old enrollment credential lineages and outstanding tickets, and transfer
-        enrollment ownership. Fresh enrollment for the new installation is required
-        and advances generation again. Old-generation retries return 409.
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      parameters:
-        - $ref: '#/components/parameters/AdapterID'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AdapterReplaceRequest' }
-      responses:
-        '200':
-          description: Replacement generation.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AdapterRegistration' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/mailbox/claims:
-    post:
-      tags: [delivery]
-      operationId: claimMailbox
-      summary: Claim a bounded batch of attention items
-      description: >-
-        Select only currently authorized records for the authenticated recipient.
-        One active claim per generation; another request, including after a lost
-        response, returns 409 until expiry. Leases last at most 30 seconds and never
-        outlive the registration lease. Expiry preserves attempt IDs. Empty timeout
-        results are closed committed claims with no items or custody. Long polling
-        waits outside transactions and blocking-worker permits.
-      security: [{ deliveryAdapter: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ClaimRequest' }
-      responses:
-        '200':
-          description: Claim and complete payloads for one adapter principal.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ClaimResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { $ref: '#/components/responses/Conflict' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-  /v1/claims/{claim_id}/commit:
-    post:
-      tags: [delivery]
-      operationId: commitHostCustody
-      summary: Confirm durable local host custody for claimed attempts
-      description: >-
-        Commit only after durable local spooling. Each item is checked against
-        the issuing credential, principal, adapter, installation, generation,
-        claim, item, and attempt. Valid entries commit atomically with their
-        receipts while invalid entries return per-item results. Exact receipt
-        replay returns already-committed even after lease expiry, but still
-        requires the original valid credential and current generation.
-      security: [{ deliveryAdapter: [] }]
-      parameters:
-        - $ref: '#/components/parameters/ClaimID'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CommitRequest' }
-      responses:
-        '200':
-          description: Host custody accepted.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/CommitResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/mailbox-items/{item_id}/events:
-    post:
-      tags: [delivery]
-      operationId: recordDeliveryEvent
-      summary: Record delivery or runtime telemetry
-      description: >-
-        The authenticated adapter registration is the only source of adapter,
-        instance, generation, and principal identity. The server rejects any
-        event unless that registration principal exactly matches the mailbox
-        recipient and the exact (mailbox_item_id, attempt_id) is already
-        host-accepted. Runtime telemetry cannot be reported for pending or
-        merely claimed attempts; event_id makes accepted events idempotent.
-        Retryable failure may transition to any telemetry state on the same
-        attempt. Runtime acceptance, route-unavailable, and terminal failure
-        are final except for exact event replay. A new event requires a live
-        registration matching the durable custody installation and generation.
-        Exact replay returns the original received_at; conflicting event_id
-        reuse returns 409. Late old-attempt events never change a newer requeue.
-      security: [{ deliveryAdapter: [] }]
-      parameters:
-        - $ref: '#/components/parameters/MailboxItemID'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/DeliveryEventRequest' }
-      responses:
-        '200':
-          description: Event accepted.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/DeliveryEventResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/mailbox/status:
-    get:
-      tags: [delivery]
-      operationId: getMailboxStatus
-      summary: List the authenticated adapter mailbox status
-      description: One recipient entry and a null cursor, after reconciling expired claims and current recipient read policy; no record bodies.
-      security: [{ deliveryAdapter: [] }]
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: Bounded mailbox status page.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MailboxStatusPage' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/inbox:
     get:
-      tags: [delivery]
+      tags: [inbox]
       operationId: getInbox
       summary: Fetch the authenticated principal's durable inbox
       description: >-
@@ -702,7 +397,7 @@ paths:
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/inbox/{item_id}/ack:
     post:
-      tags: [delivery]
+      tags: [inbox]
       operationId: acknowledgeInboxItem
       summary: End further inbox reminders for one own readable item
       description: >-
@@ -727,7 +422,7 @@ paths:
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/records/{record_id}/delivery-status:
     get:
-      tags: [delivery]
+      tags: [inbox]
       operationId: getRecordDeliveryStatus
       summary: View authorized inbox receipt states for one record
       description: >-
@@ -760,30 +455,6 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-  /v1/admin/mailboxes/{principal}/status:
-    get:
-      tags: [administration]
-      operationId: getAdminMailboxStatus
-      summary: Inspect one principal mailbox as an administrator
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      parameters:
-        - $ref: '#/components/parameters/PrincipalPath'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: Mailbox status page.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MailboxStatusPage' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
   /v1/admin/principals:
     post:
       tags: [administration]
@@ -814,7 +485,7 @@ paths:
       tags: [administration]
       operationId: recoverPrincipalCredential
       summary: Revoke all live authority for a principal UUID and issue one replacement credential
-      description: Atomically revokes every currently valid principal-client and delivery-adapter credential for the principal, invalidates outstanding transitional enrollment authority, and issues one principal-client replacement. Repeating by UUID revokes an inaccessible prior replacement. The principal UUID, profile, records, inbox, and disabled state are preserved.
+      description: Atomically revokes every currently valid principal credential and issues one replacement. Repeating by UUID revokes an inaccessible prior replacement. The principal UUID, profile, records, inbox, and disabled state are preserved.
       security: []
       x-agent-journal-authorization: protected-unix-socket-peer-credentials
       x-agent-journal-public-https: false
@@ -891,7 +562,7 @@ paths:
       tags: [administration]
       operationId: rotateCredential
       summary: Rotate and revoke a credential
-      description: Atomically revoke the old credential immediately and issue a replacement of the same class, binding, and expiration. Write the returned secret atomically to mode-0600 storage without stdout. A lost response or failed post-commit file write requires administrator revocation of the inaccessible replacement; secrets cannot be retrieved again. If its identifier is lost, enrollment recovery revokes both lineages using the known adapter and installation before fresh enrollment.
+      description: Atomically revoke the old principal credential immediately and issue a replacement with the same principal and expiration. Write the returned secret atomically to private storage without stdout. A lost response or failed post-commit file write requires protected principal recovery by UUID to revoke the inaccessible replacement; secrets cannot be retrieved again.
       security: []
       x-agent-journal-authorization: protected-unix-socket-peer-credentials
       x-agent-journal-public-https: false
@@ -934,64 +605,6 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-  /v1/admin/enrollment/recover:
-    post:
-      tags: [administration]
-      operationId: recoverEnrollment
-      summary: Revoke both enrollment credential lineages for the same installation
-      description: Revoke principal-client and delivery-adapter credentials, including replacements. A fresh ticket must be issued separately for the same installation. Consumed tickets never replay and recovery cannot authorize another installation to take over.
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/EnrollmentRecoveryRequest' }
-      responses:
-        '204':
-          description: Both credential lineages revoked; no response body or replacement secrets.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/admin/mailbox-items/{item_id}/requeue:
-    post:
-      tags: [administration]
-      operationId: requeueMailboxItem
-      summary: Explicitly create a fresh delivery attempt
-      description: >-
-        Atomically retain history, allocate the next ordinal and new attempt ID,
-        set the mailbox pending, and audit the requeue. Reject pending or claimed
-        obligations and recipients that are disabled or cannot currently read
-        the space. Suppressed obligations require restored read access. After
-        response loss inspect status before retrying; requeue is not idempotent.
-      security: []
-      x-agent-journal-authorization: protected-unix-socket-peer-credentials
-      x-agent-journal-public-https: false
-      parameters:
-        - $ref: '#/components/parameters/MailboxItemID'
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/RequeueRequest' }
-      responses:
-        '200':
-          description: Requeue result with a new attempt identifier.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/RequeueResponse' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
 components:
   headers:
     XRequestID:
@@ -1008,16 +621,6 @@ components:
       scheme: bearer
       bearerFormat: opaque
       description: Private HTTPS principal credential. Server stores only a hash.
-    deliveryAdapter:
-      type: http
-      scheme: bearer
-      bearerFormat: opaque
-      description: Private HTTPS delivery credential bound to one adapter and principal.
-    enrollmentTicket:
-      type: http
-      scheme: bearer
-      bearerFormat: opaque one-use enrollment ticket
-      description: Short-lived one-use ticket presented only over private HTTPS; server stores only its hash.
   parameters:
     SpacePath:
       name: space
@@ -1029,23 +632,8 @@ components:
       in: query
       required: true
       schema: { type: string, minLength: 1, maxLength: 128 }
-    PrincipalPath:
-      name: principal
-      in: path
-      required: true
-      schema: { type: string, minLength: 1, maxLength: 128 }
     RecordID:
       name: record_id
-      in: path
-      required: true
-      schema: { type: string, minLength: 1, maxLength: 128 }
-    AdapterID:
-      name: adapter_id
-      in: path
-      required: true
-      schema: { type: string, minLength: 1, maxLength: 128 }
-    ClaimID:
-      name: claim_id
       in: path
       required: true
       schema: { type: string, minLength: 1, maxLength: 128 }
@@ -1227,15 +815,24 @@ components:
         next_cursor: { type: [string, 'null'], maxLength: 2048 }
     Limits:
       type: object
-      required: [content_bytes, relations, attention_recipients, page_size, claim_batch, long_poll_seconds, telemetry_detail_serialized_utf8_bytes]
+      required:
+      - content_bytes
+      - relations
+      - attention_recipients
+      - page_size
       properties:
-        content_bytes: { type: integer, const: 65536 }
-        relations: { type: integer, const: 32 }
-        attention_recipients: { type: integer, const: 16 }
-        page_size: { type: integer, const: 100 }
-        claim_batch: { type: integer, const: 20 }
-        long_poll_seconds: { type: integer, const: 30 }
-        telemetry_detail_serialized_utf8_bytes: { type: integer, const: 4096 }
+        content_bytes:
+          type: integer
+          const: 65536
+        relations:
+          type: integer
+          const: 32
+        attention_recipients:
+          type: integer
+          const: 16
+        page_size:
+          type: integer
+          const: 100
     Relation:
       type: object
       required: [type, record_id]
@@ -1317,209 +914,47 @@ components:
     OperationalMetrics:
       type: object
       additionalProperties: false
-      required: [sampled_at, database_bytes, wal_bytes, pending_mailbox_count, oldest_pending_at, outstanding_claims, expired_active_claims, expired_claims, oldest_active_heartbeat_at, stale_registrations_with_pending, runtime_failure_events, last_backup_at, last_verified_restore_at]
+      required:
+      - sampled_at
+      - database_bytes
+      - wal_bytes
+      - unacknowledged_inbox_count
+      - oldest_unacknowledged_at
+      - last_backup_at
+      - last_verified_restore_at
       properties:
-        sampled_at: { type: string, format: date-time }
-        database_bytes: { type: integer, minimum: 0 }
-        wal_bytes: { type: integer, minimum: 0 }
-        pending_mailbox_count: { type: integer, minimum: 0 }
-        oldest_pending_at:
-          type: [string, 'null']
-          format: date-time
-          description: Null when no mailbox item is currently persisted as pending.
-        outstanding_claims:
-          type: integer
-          minimum: 0
-          description: Active claims whose lease is strictly later than sampled_at.
-        expired_active_claims:
-          type: integer
-          minimum: 0
-          description: Active claims with elapsed leases, awaiting normal expiry processing.
-        expired_claims:
-          type: integer
-          minimum: 0
-          description: Retained claims explicitly transitioned to expired.
-        oldest_active_heartbeat_at:
-          type: [string, 'null']
-          format: date-time
-          description: Oldest persisted heartbeat of active registrations, including elapsed leases; null if none.
-        stale_registrations_with_pending:
-          type: integer
-          minimum: 0
-          description: Active registrations with elapsed leases and a persisted pending mailbox item.
-        runtime_failure_events:
-          type: integer
-          minimum: 0
-          description: Retained retryable-failure, terminal-failure, and route-unavailable telemetry events; replay does not increment.
-        last_backup_at:
-          type: [string, 'null']
-          format: date-time
-          description: Successful-backup timestamp from the durable protected external recovery audit; null only when unknown or storage is unprotected, never inferred from file mtime.
-        last_verified_restore_at:
-          type: [string, 'null']
-          format: date-time
-          description: Verified-reopen timestamp from the durable protected external recovery audit; null only when unknown or storage is unprotected.
-
-    AdapterProvisionRequest:
-      type: object
-      required: [principal_id, adapter_id]
-      additionalProperties: false
-      properties:
-        principal_id: { type: string, maxLength: 128 }
-        adapter_id: { type: string, maxLength: 128 }
-    AdapterProvisionResponse:
-      type: object
-      required: [adapter_id, principal_id]
-      properties:
-        adapter_id: { type: string, maxLength: 128 }
-        principal_id: { type: string, maxLength: 128 }
-    AdapterRegisterRequest:
-      type: object
-      required: [instance_id]
-      additionalProperties: false
-      properties:
-        instance_id: { type: string, minLength: 1, maxLength: 128 }
-    AdapterHeartbeatRequest:
-      type: object
-      required: [instance_id, generation]
-      additionalProperties: false
-      properties:
-        instance_id: { type: string, maxLength: 128 }
-        generation: { type: integer, minimum: 1 }
-    AdapterRegistration:
-      type: object
-      required: [adapter_id, principal_id, instance_id, generation, status, lease_expires_at, heartbeat_after_seconds]
-      properties:
-        adapter_id: { type: string, maxLength: 128 }
-        principal_id: { type: string, maxLength: 128 }
-        instance_id: { type: string, maxLength: 128 }
-        generation: { type: integer, minimum: 1 }
-        status: { type: string, enum: [active, draining, revoked] }
-        lease_expires_at: { type: string, format: date-time }
-        heartbeat_after_seconds: { type: integer, minimum: 1, description: Server hint for the next heartbeat; not a lease extension. }
-    AdapterReplaceRequest:
-      type: object
-      required: [expected_generation, new_instance_id]
-      additionalProperties: false
-      properties:
-        expected_generation: { type: integer, minimum: 1 }
-        new_instance_id: { type: string, minLength: 1, maxLength: 128 }
-        reason: { type: string, maxLength: 512 }
-    Adapter:
-      allOf:
-        - $ref: '#/components/schemas/AdapterRegistration'
-        - type: object
-          properties: { created_at: { type: string, format: date-time } }
-    AdapterPage:
-      type: object
-      required: [items, next_cursor]
-      properties:
-        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Adapter' } }
-        next_cursor: { type: [string, 'null'], maxLength: 2048 }
-    ClaimRequest:
-      type: object
-      required: [instance_id, generation, limit]
-      additionalProperties: false
-      properties:
-        instance_id: { type: string, maxLength: 128 }
-        generation: { type: integer, minimum: 1 }
-        limit: { type: integer, minimum: 1, maximum: 20 }
-        wait_seconds: { type: integer, minimum: 0, maximum: 30, default: 0 }
-    ClaimItem:
-      type: object
-      required: [mailbox_item_id, attempt_id, record]
-      properties:
-        mailbox_item_id: { type: string, maxLength: 128 }
-        attempt_id: { type: string, maxLength: 128 }
-        record: { $ref: '#/components/schemas/Record' }
-    ClaimResponse:
-      type: object
-      required: [claim_id, state, lease_expires_at, items]
-      properties:
-        claim_id: { type: string, maxLength: 128 }
-        state: { $ref: '#/components/schemas/ClaimState' }
-        lease_expires_at: { type: string, format: date-time }
-        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/ClaimItem' } }
-    ClaimState:
-      type: string
-      enum: [active, committed, expired, cancelled]
-    CommitRequest:
-      type: object
-      required: [generation, items]
-      additionalProperties: false
-      properties:
-        generation: { type: integer, minimum: 1 }
-        items: { type: array, minItems: 1, maxItems: 20, items: { $ref: '#/components/schemas/CommitItem' } }
-    CommitItem:
-      type: object
-      required: [mailbox_item_id, attempt_id]
-      additionalProperties: false
-      properties:
-        mailbox_item_id: { type: string, minLength: 1, maxLength: 128 }
-        attempt_id: { type: string, minLength: 1, maxLength: 128 }
-    CommitResponse:
-      type: object
-      required: [claim_id, generation, items]
-      properties:
-        claim_id: { type: string, maxLength: 128 }
-        generation: { type: integer, minimum: 1 }
-        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/CommitItemResult' } }
-    CommitItemResult:
-      type: object
-      required: [mailbox_item_id, attempt_id, result]
-      properties:
-        mailbox_item_id: { type: string, maxLength: 128 }
-        attempt_id: { type: string, maxLength: 128 }
-        result: { type: string, enum: [committed, already-committed, claim-not-found, stale-generation, attempt-mismatch, lease-expired, suppressed-revoked] }
-    DeliveryEnvelope:
-      type: object
-      required: [record_id, mailbox_item_id, attempt_id, space_id, from_principal, addressed_to, body]
-      properties:
-        record_id: { type: string, maxLength: 128 }
-        mailbox_item_id: { type: string, maxLength: 128 }
-        attempt_id: { type: string, maxLength: 128 }
-        space_id: { type: string, maxLength: 128 }
-        from_principal: { type: string, maxLength: 128 }
-        source_run: { type: [string, 'null'], maxLength: 128 }
-        reply_to: { type: [string, 'null'], maxLength: 128 }
-        addressed_to: { type: string, maxLength: 128 }
-        routing_key: { type: [string, 'null'], maxLength: 128 }
-        body:
+        sampled_at:
           type: string
-          minLength: 1
-          maxLength: 65536
-          description: Untrusted record content; the server enforces a 65536-byte UTF-8 limit before constructing the envelope.
-          x-agent-journal-max-utf8-bytes: 65536
-    DeliveryEventRequest:
-      type: object
-      required: [event_id, attempt_id, generation, occurred_at, state]
-      additionalProperties: false
-      properties:
-        event_id: { type: string, minLength: 1, maxLength: 128 }
-        attempt_id: { type: string, maxLength: 128 }
-        generation: { type: integer, minimum: 1 }
-        occurred_at: { type: string, format: date-time }
-        state: { $ref: '#/components/schemas/TelemetryState' }
-        detail:
-          type: object
-          description: The server validates the compact serialized JSON object as UTF-8 and rejects it above 4096 bytes. maxLength on values is a secondary character bound.
-          maxProperties: 32
-          propertyNames: { type: string, minLength: 1, maxLength: 128 }
-          x-agent-journal-max-serialized-json-utf8-bytes: 4096
-          additionalProperties: { type: string, maxLength: 1024 }
-    DeliveryEventResponse:
-      type: object
-      required: [event_id, state, received_at]
-      properties:
-        event_id: { type: string, maxLength: 128 }
-        state: { $ref: '#/components/schemas/TelemetryState' }
-        received_at: { type: string, format: date-time }
-    TelemetryState:
-      type: string
-      enum: [adapter-reported-runtime-accepted, adapter-reported-retryable-failure, route-unavailable, adapter-reported-terminal-failure]
-    DeliveryState:
-      type: string
-      enum: [published, pending, claimed, host-accepted, adapter-reported-runtime-accepted, adapter-reported-retryable-failure, route-unavailable, adapter-reported-terminal-failure, suppressed-revoked]
+          format: date-time
+        database_bytes:
+          type: integer
+          minimum: 0
+        wal_bytes:
+          type: integer
+          minimum: 0
+        last_backup_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Successful-backup timestamp from the durable protected external recovery audit; null
+            only when unknown or storage is unprotected, never inferred from file mtime.
+        last_verified_restore_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Verified-reopen timestamp from the durable protected external recovery audit; null only
+            when unknown or storage is unprotected.
+        unacknowledged_inbox_count:
+          type: integer
+          minimum: 0
+        oldest_unacknowledged_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Earliest creation time among inbox items with null acknowledged_at; null when none remain.
     InboxItem:
       type: object
       additionalProperties: false
@@ -1552,20 +987,6 @@ components:
       required: [items, next_cursor]
       properties:
         items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ReceiptSummary' } }
-        next_cursor: { type: [string, 'null'], maxLength: 2048 }
-    MailboxStatus:
-      type: object
-      required: [principal_id, pending, oldest_pending_at]
-      properties:
-        principal_id: { type: string, maxLength: 128 }
-        pending: { type: integer, minimum: 0 }
-        oldest_pending_at: { type: [string, 'null'], format: date-time }
-        paused: { type: boolean }
-    MailboxStatusPage:
-      type: object
-      required: [items, next_cursor]
-      properties:
-        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/MailboxStatus' } }
         next_cursor: { type: [string, 'null'], maxLength: 2048 }
     PrincipalCreateRequest:
       type: object
@@ -1621,13 +1042,28 @@ components:
         replacement_secret: { $ref: '#/components/schemas/OneTimeReplacementSecret' }
     CredentialMetadata:
       type: object
-      required: [credential_id, principal_id, class, rotated_at]
+      required:
+      - credential_id
+      - principal_id
+      - class
+      - rotated_at
       properties:
-        credential_id: { type: string, maxLength: 128 }
-        principal_id: { type: string, maxLength: 128 }
-        class: { type: string, enum: [principal-client, delivery-adapter] }
-        rotated_at: { type: string, format: date-time }
-        replacement_credential_id: { type: string, maxLength: 128 }
+        credential_id:
+          type: string
+          maxLength: 128
+        principal_id:
+          type: string
+          maxLength: 128
+        class:
+          type: string
+          enum:
+          - principal-client
+        rotated_at:
+          type: string
+          format: date-time
+        replacement_credential_id:
+          type: string
+          maxLength: 128
     CredentialRevokeRequest:
       type: object
       required: [credential_id]
@@ -1648,51 +1084,6 @@ components:
       properties:
         credential_id: { type: string, maxLength: 128 }
         secret: { type: string, minLength: 1, maxLength: 512, x-agent-journal-one-time-secret: true }
-    EnrollmentRecoveryRequest:
-      type: object
-      required: [adapter_id, instance_id]
-      additionalProperties: false
-      properties:
-        adapter_id: { type: string, minLength: 1, maxLength: 128 }
-        instance_id: { type: string, minLength: 1, maxLength: 128 }
-    EnrollmentTicketCreateRequest:
-      type: object
-      required: [principal_id, adapter_id, ttl_seconds]
-      additionalProperties: false
-      properties:
-        principal_id: { type: string, minLength: 1, maxLength: 128 }
-        adapter_id: { type: string, minLength: 1, maxLength: 128 }
-        ttl_seconds: { type: integer, minimum: 1, maximum: 900, description: Short lifetime; the server chooses the absolute expiry. }
-    EnrollmentTicketCreateResponse:
-      type: object
-      required: [principal_id, adapter_id, expires_at, enrollment_ticket]
-      properties:
-        principal_id: { type: string, maxLength: 128 }
-        adapter_id: { type: string, maxLength: 128 }
-        expires_at: { type: string, format: date-time }
-        enrollment_ticket: { $ref: '#/components/schemas/OneTimeEnrollmentTicket' }
-    OneTimeEnrollmentTicket:
-      type: object
-      required: [ticket]
-      description: One-time secret response; clients must write it directly to protected storage and never log it.
-      properties:
-        ticket: { type: string, minLength: 1, maxLength: 512, x-agent-journal-one-time-secret: true }
-    EnrollmentExchangeRequest:
-      type: object
-      required: [instance_id]
-      additionalProperties: false
-      properties:
-        instance_id: { type: string, minLength: 1, maxLength: 128 }
-    EnrollmentExchangeResponse:
-      type: object
-      required: [adapter_id, principal_id, instance_id, generation, principal_client_secret, delivery_adapter_secret]
-      properties:
-        adapter_id: { type: string, maxLength: 128 }
-        principal_id: { type: string, maxLength: 128 }
-        instance_id: { type: string, maxLength: 128 }
-        generation: { type: integer, minimum: 1 }
-        principal_client_secret: { $ref: '#/components/schemas/OneTimePrincipalClientSecret' }
-        delivery_adapter_secret: { $ref: '#/components/schemas/OneTimeDeliveryAdapterSecret' }
     OneTimePrincipalClientSecret:
       type: object
       required: [credential_id, secret]
@@ -1700,22 +1091,3 @@ components:
       properties:
         credential_id: { type: string, maxLength: 128 }
         secret: { type: string, minLength: 1, maxLength: 512, x-agent-journal-one-time-secret: true }
-    OneTimeDeliveryAdapterSecret:
-      type: object
-      required: [credential_id, secret]
-      description: One-time delivery-adapter secret response; never log or place in a general response envelope.
-      properties:
-        credential_id: { type: string, maxLength: 128 }
-        secret: { type: string, minLength: 1, maxLength: 512, x-agent-journal-one-time-secret: true }
-    RequeueRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        reason: { type: string, maxLength: 512 }
-    RequeueResponse:
-      type: object
-      required: [mailbox_item_id, attempt_id, state]
-      properties:
-        mailbox_item_id: { type: string, maxLength: 128 }
-        attempt_id: { type: string, maxLength: 128 }
-        state: { type: string, const: pending }

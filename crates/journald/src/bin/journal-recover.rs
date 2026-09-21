@@ -5,7 +5,7 @@ use journal_storage_sqlite::{Database, RecoveryAudit};
 
 fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if arguments.len() < 3 {
-        return Err("usage: journal-recover COMMAND DATABASE AUDIT [PATH ...]; commands: close, backup DESTINATION, restore BACKUP DESTINATION APPROVAL --adapters-quiesced, reconcile APPROVAL --adapters-quiesced, reopen APPROVAL".into());
+        return Err("usage: journal-recover COMMAND DATABASE AUDIT [PATH ...]; commands: close, backup DESTINATION, restore BACKUP DESTINATION APPROVAL --clients-quiesced, reconcile APPROVAL --clients-quiesced, reopen APPROVAL".into());
     }
     let database = Database::open_existing(&arguments[1])?;
     let audit = RecoveryAudit::open(&database, Path::new(&arguments[2]))?;
@@ -15,12 +15,12 @@ fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             audit.backup(&database, Path::new(destination))?;
         }
         ("restore", [backup, destination, approval, quiesced])
-            if quiesced == "--adapters-quiesced" =>
+            if quiesced == "--clients-quiesced" =>
         {
             let evidence = audit.restore(Path::new(backup), Path::new(destination), true)?;
             RecoveryAudit::write_approval(Path::new(approval), &evidence)?;
         }
-        ("reconcile", [approval, quiesced]) if quiesced == "--adapters-quiesced" => {
+        ("reconcile", [approval, quiesced]) if quiesced == "--clients-quiesced" => {
             let evidence = audit.reconcile(&database, true)?;
             RecoveryAudit::write_approval(Path::new(approval), &evidence)?;
         }

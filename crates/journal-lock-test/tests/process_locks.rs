@@ -55,23 +55,6 @@ fn recovery_clone_exec_and_constructor_error_lifecycles_are_safe() {
 }
 
 #[test]
-fn spool_fork_child_drop_never_unlocks_parent_lock() {
-    Fixture::new().run("spool-child-drop");
-}
-
-#[test]
-fn spool_parent_drop_current_schema_and_legacy_preflight_are_safe() {
-    let fixture = Fixture::new();
-    fixture.run("spool-parent-drop");
-    fixture.run("spool-current-legacy");
-}
-
-#[test]
-fn spool_hardlink_alias_is_refused_before_second_writer_opens() {
-    Fixture::new().run("spool-hardlink-alias");
-}
-
-#[test]
 fn central_hardlink_alias_is_refused_in_library_and_child_process() {
     Fixture::new().run("central-hardlink-alias");
 }

@@ -442,8 +442,8 @@ impl BootstrapService {
                     ON CONFLICT(recipient_principal_id) DO UPDATE SET last_seq=last_seq+1", [recipient])?;
                 let recipient_seq: i64 = tx.query_row("SELECT last_seq FROM inbox_sequences WHERE recipient_principal_id=?", [recipient], |r| r.get(0))?;
                 self.checkpoint("append-inbox-sequence")?;
-                tx.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at,recipient_seq) VALUES (?,?,?,'pending',?,?,?)",
-                    params![format!("item-{}", self.secret()?),id,recipient,now,now,recipient_seq])?;
+                tx.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,created_at,recipient_seq) VALUES (?,?,?,?,?)",
+                    params![format!("item-{}", self.secret()?),id,recipient,now,recipient_seq])?;
                 self.checkpoint("append-mailbox")?;
             }
             let result = AppendResult {

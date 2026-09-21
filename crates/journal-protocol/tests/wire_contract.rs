@@ -106,35 +106,15 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(SearchResult, "SearchResult");
     example!(SearchPage, "SearchPage");
     example!(Me, "Me");
-    example!(AdapterProvisionResponse, "AdapterProvisionResponse");
-    example!(AdapterRegistration, "AdapterRegistration");
-    example!(Adapter, "Adapter");
-    example!(AdapterPage, "AdapterPage");
-    example!(ClaimItem, "ClaimItem");
-    example!(ClaimResponse, "ClaimResponse");
-    example!(CommitItemResultEntry, "CommitItemResult");
-    example!(CommitResponse, "CommitResponse");
-    example!(DeliveryEnvelope, "DeliveryEnvelope");
-    example!(DeliveryEventResponse, "DeliveryEventResponse");
     example!(ReceiptSummary, "ReceiptSummary");
     example!(ReceiptStatusPage, "ReceiptStatusPage");
     example!(InboxItem, "InboxItem");
     example!(InboxPage, "InboxPage");
-    example!(MailboxStatus, "MailboxStatus");
-    example!(MailboxStatusPage, "MailboxStatusPage");
-    example!(OneTimeEnrollmentTicket, "OneTimeEnrollmentTicket");
-    example!(
-        EnrollmentTicketCreateResponse,
-        "EnrollmentTicketCreateResponse"
-    );
     example!(OneTimePrincipalClientSecret, "OneTimePrincipalClientSecret");
-    example!(OneTimeDeliveryAdapterSecret, "OneTimeDeliveryAdapterSecret");
-    example!(EnrollmentExchangeResponse, "EnrollmentExchangeResponse");
     example!(CredentialMetadata, "CredentialMetadata");
     example!(CredentialRotationResponse, "CredentialRotationResponse");
     example!(PrincipalRecoveryResponse, "PrincipalRecoveryResponse");
     example!(OneTimeReplacementSecret, "OneTimeReplacementSecret");
-    example!(RequeueResponse, "RequeueResponse");
 }
 
 #[test]
@@ -143,21 +123,6 @@ fn bootstrap_recovery_requests_are_strict_and_rotation_secrets_are_redacted() {
         serde_json::from_value(json!({"credential_id":"credential-1","reason":"recovery"}))
             .unwrap();
     revoke.validate().unwrap();
-    let recovery: EnrollmentRecoveryRequest =
-        serde_json::from_value(json!({"adapter_id":"adapter-1","instance_id":"instance-1"}))
-            .unwrap();
-    recovery.validate().unwrap();
-    assert!(serde_json::from_value::<EnrollmentRecoveryRequest>(
-        json!({"adapter_id":"adapter-1","instance_id":"instance-1","principal_id":"agent-alpha"})
-    ).is_err());
-    assert!(
-        EnrollmentRecoveryRequest {
-            adapter_id: "".into(),
-            instance_id: "instance-1".into(),
-        }
-        .validate()
-        .is_err()
-    );
     assert!(
         CredentialRevokeRequest {
             credential_id: "credential-1".into(),
@@ -215,12 +180,14 @@ fn strict_json_rejects_duplicate_keys_at_any_depth() {
 #[test]
 fn request_bodies_reject_arrays_for_object_shapes() {
     assert!(
-        decode_json::<EnrollmentExchangeRequest>(br#"["instance-1"]"#).is_err(),
+        decode_json::<RegistrationRequest>(br#"["alpha","Alpha"]"#).is_err(),
         "request objects must not accept positional arrays"
     );
     assert!(
-        decode_json::<CommitRequest>(br#"{"generation":1,"items":[["item-1","attempt-1"]]}"#)
-            .is_err(),
+        decode_json::<AppendRecordRequest>(
+            br#"{"kind":"message","content":"x","relations":[["reply-to","record-1"]]}"#
+        )
+        .is_err(),
         "nested request objects must not accept positional arrays"
     );
 }
@@ -238,8 +205,8 @@ fn request_bodies_reject_unknown_fields_and_explicit_null_optionals() {
             .is_err()
     );
     assert!(
-        decode_json::<AdapterReplaceRequest>(
-            br#"{"expected_generation":1,"new_instance_id":"next","reason":null}"#
+        decode_json::<PrincipalRecoveryRequest>(
+            br#"{"principal_id":"018f1f59-6e90-7000-8000-000000000001","reason":null}"#
         )
         .is_err()
     );
@@ -322,29 +289,13 @@ fn append_and_query_limits_use_utf8_bytes_and_exact_boundaries() {
         .validate()
         .is_err()
     );
-    let exact_ticket = EnrollmentTicketCreateRequest {
-        principal_id: "agent-alpha".into(),
-        adapter_id: "adapter-1".into(),
-        ttl_seconds: 900,
-    };
-    assert!(exact_ticket.validate().is_ok());
-    assert!(
-        EnrollmentTicketCreateRequest {
-            ttl_seconds: 901,
-            ..exact_ticket
-        }
-        .validate()
-        .is_err()
-    );
-
-    let exact_reason = AdapterReplaceRequest {
-        expected_generation: 1,
-        new_instance_id: "instance-2".into(),
+    let exact_reason = CredentialRotateRequest {
+        credential_id: "credential-example".into(),
         reason: Some("x".repeat(512)),
     };
     assert!(exact_reason.validate().is_ok());
     assert!(
-        AdapterReplaceRequest {
+        CredentialRotateRequest {
             reason: Some("x".repeat(513)),
             ..exact_reason
         }
@@ -464,14 +415,8 @@ fn response_dtos_require_every_normative_field() {
             "sampled_at",
             "database_bytes",
             "wal_bytes",
-            "pending_mailbox_count",
-            "oldest_pending_at",
-            "outstanding_claims",
-            "expired_active_claims",
-            "expired_claims",
-            "oldest_active_heartbeat_at",
-            "stale_registrations_with_pending",
-            "runtime_failure_events",
+            "unacknowledged_inbox_count",
+            "oldest_unacknowledged_at",
             "last_backup_at",
             "last_verified_restore_at",
         ],
@@ -519,17 +464,14 @@ fn response_dtos_require_every_normative_field() {
     assert_required_fields::<domain::Limits>(
         json!({
             "content_bytes":65536,"relations":32,"attention_recipients":16,
-            "page_size":100,"claim_batch":20,"long_poll_seconds":30,
-            "telemetry_detail_serialized_utf8_bytes":4096
+            "page_size":100,
+
         }),
         &[
             "content_bytes",
             "relations",
             "attention_recipients",
             "page_size",
-            "claim_batch",
-            "long_poll_seconds",
-            "telemetry_detail_serialized_utf8_bytes",
         ],
     );
     assert_required_fields::<domain::Space>(
@@ -537,8 +479,8 @@ fn response_dtos_require_every_normative_field() {
             "id":"project-alpha","name":"Project Alpha","access":"public","created_at":"2026-01-01T00:00:00Z",
             "limits":{
                 "content_bytes":65536,"relations":32,"attention_recipients":16,
-                "page_size":100,"claim_batch":20,"long_poll_seconds":30,
-                "telemetry_detail_serialized_utf8_bytes":4096
+                "page_size":100,
+
             }
         }),
         &["id", "name", "created_at", "limits"],
@@ -612,102 +554,11 @@ fn response_dtos_require_every_normative_field() {
             "memberships":[],
             "limits":{
                 "content_bytes":65536,"relations":32,"attention_recipients":16,
-                "page_size":100,"claim_batch":20,"long_poll_seconds":30,
-                "telemetry_detail_serialized_utf8_bytes":4096
+                "page_size":100,
+
             }
         }),
         &["principal", "memberships", "limits"],
-    );
-    assert_required_fields::<AdapterProvisionResponse>(
-        json!({"adapter_id":"adapter-1","principal_id":"agent-alpha"}),
-        &["adapter_id", "principal_id"],
-    );
-    assert_required_fields::<AdapterRegistration>(
-        json!({
-            "adapter_id":"adapter-1","principal_id":"agent-alpha","instance_id":"instance-1",
-            "generation":1,"status":"active","lease_expires_at":"2026-01-01T00:00:00Z",
-            "heartbeat_after_seconds":10
-        }),
-        &[
-            "adapter_id",
-            "principal_id",
-            "instance_id",
-            "generation",
-            "status",
-            "lease_expires_at",
-            "heartbeat_after_seconds",
-        ],
-    );
-    assert_required_fields::<Adapter>(
-        json!({
-            "adapter_id":"adapter-1","principal_id":"agent-alpha","instance_id":"instance-1",
-            "generation":1,"status":"active","lease_expires_at":"2026-01-01T00:00:00Z",
-            "heartbeat_after_seconds":10
-        }),
-        &[
-            "adapter_id",
-            "principal_id",
-            "instance_id",
-            "generation",
-            "status",
-            "lease_expires_at",
-            "heartbeat_after_seconds",
-        ],
-    );
-    assert_required_fields::<AdapterPage>(
-        json!({"items":[],"next_cursor":null}),
-        &["items", "next_cursor"],
-    );
-    assert_required_fields::<ClaimItem>(
-        json!({
-            "mailbox_item_id":"mailbox-1","attempt_id":"attempt-1",
-            "record":{
-                "id":"record-1","space_id":"project-alpha","seq":1,"author":"agent-alpha",
-                "kind":"message","content":"hello","created_at":"2026-01-01T00:00:00Z",
-                "relations":[]
-            }
-        }),
-        &["mailbox_item_id", "attempt_id", "record"],
-    );
-    assert_required_fields::<ClaimResponse>(
-        json!({
-            "claim_id":"claim-1","state":"active",
-            "lease_expires_at":"2026-01-01T00:00:00Z","items":[]
-        }),
-        &["claim_id", "state", "lease_expires_at", "items"],
-    );
-    assert_required_fields::<CommitItemResultEntry>(
-        json!({
-            "mailbox_item_id":"mailbox-1","attempt_id":"attempt-1","result":"committed"
-        }),
-        &["mailbox_item_id", "attempt_id", "result"],
-    );
-    assert_required_fields::<CommitResponse>(
-        json!({"claim_id":"claim-1","generation":1,"items":[]}),
-        &["claim_id", "generation", "items"],
-    );
-    assert_required_fields::<DeliveryEnvelope>(
-        json!({
-            "record_id":"record-1","mailbox_item_id":"mailbox-1","attempt_id":"attempt-1",
-            "space_id":"project-alpha","from_principal":"agent-alpha",
-            "addressed_to":"agent-beta","body":"hello"
-        }),
-        &[
-            "record_id",
-            "mailbox_item_id",
-            "attempt_id",
-            "space_id",
-            "from_principal",
-            "addressed_to",
-            "body",
-        ],
-    );
-    assert_required_fields::<DeliveryEventResponse>(
-        json!({
-            "event_id":"event-1","state":"route-unavailable",
-            "received_at":"2026-01-01T00:00:00Z"
-        }),
-        &["event_id", "state", "received_at"],
     );
     assert_required_fields::<ReceiptSummary>(
         json!({
@@ -741,53 +592,9 @@ fn response_dtos_require_every_normative_field() {
         json!({"items":[],"next_cursor":null}),
         &["items", "next_cursor"],
     );
-    assert_required_fields::<MailboxStatus>(
-        json!({"principal_id":"agent-alpha","pending":0,"oldest_pending_at":null}),
-        &["principal_id", "pending", "oldest_pending_at"],
-    );
-    assert_required_fields::<MailboxStatusPage>(
-        json!({"items":[],"next_cursor":null}),
-        &["items", "next_cursor"],
-    );
-    assert_required_fields::<OneTimeEnrollmentTicket>(
-        json!({"ticket":"ticket-secret"}),
-        &["ticket"],
-    );
-    assert_required_fields::<EnrollmentTicketCreateResponse>(
-        json!({
-            "principal_id":"agent-alpha","adapter_id":"adapter-1",
-            "expires_at":"2026-01-01T00:00:00Z","enrollment_ticket":{"ticket":"ticket-secret"}
-        }),
-        &[
-            "principal_id",
-            "adapter_id",
-            "expires_at",
-            "enrollment_ticket",
-        ],
-    );
     assert_required_fields::<OneTimePrincipalClientSecret>(
         json!({"credential_id":"principal-credential","secret":"principal-secret"}),
         &["credential_id", "secret"],
-    );
-    assert_required_fields::<OneTimeDeliveryAdapterSecret>(
-        json!({"credential_id":"adapter-credential","secret":"adapter-secret"}),
-        &["credential_id", "secret"],
-    );
-    assert_required_fields::<EnrollmentExchangeResponse>(
-        json!({
-            "adapter_id":"adapter-1","principal_id":"agent-alpha","instance_id":"instance-1",
-            "generation":1,
-            "principal_client_secret":{"credential_id":"principal-credential","secret":"principal-secret"},
-            "delivery_adapter_secret":{"credential_id":"adapter-credential","secret":"adapter-secret"}
-        }),
-        &[
-            "adapter_id",
-            "principal_id",
-            "instance_id",
-            "generation",
-            "principal_client_secret",
-            "delivery_adapter_secret",
-        ],
     );
     assert_required_fields::<CredentialMetadata>(
         json!({
@@ -795,10 +602,6 @@ fn response_dtos_require_every_normative_field() {
             "class":"principal-client","rotated_at":"2026-01-01T00:00:00Z"
         }),
         &["credential_id", "principal_id", "class", "rotated_at"],
-    );
-    assert_required_fields::<RequeueResponse>(
-        json!({"mailbox_item_id":"mailbox-1","attempt_id":"attempt-2","state":"pending"}),
-        &["mailbox_item_id", "attempt_id", "state"],
     );
 }
 
@@ -816,21 +619,18 @@ fn pages_serialize_empty_items_and_null_cursor() {
 
 #[test]
 fn one_time_secrets_are_redacted_from_debug_output() {
-    let response = EnrollmentExchangeResponse {
-        adapter_id: "adapter-1".into(),
-        principal_id: "agent-alpha".into(),
-        instance_id: "instance-1".into(),
-        generation: 1,
-        principal_client_secret: OneTimePrincipalClientSecret {
-            credential_id: "principal-credential".into(),
-            secret: "p-example".into(),
-        },
-        delivery_adapter_secret: OneTimeDeliveryAdapterSecret {
-            credential_id: "adapter-credential".into(),
-            secret: "a-example".into(),
-        },
+    let credential = OneTimePrincipalClientSecret {
+        credential_id: "principal-credential".into(),
+        secret: "p-example".into(),
     };
-    let debug = format!("{response:?}");
-    assert!(!debug.contains("p-example"));
-    assert!(!debug.contains("a-example"));
+    assert!(!format!("{credential:?}").contains("p-example"));
+}
+
+#[test]
+fn retired_credential_class_is_not_a_wire_authority() {
+    assert!(decode_json::<CredentialClass>(br#""delivery-adapter""#).is_err());
+    assert_eq!(
+        decode_json::<CredentialClass>(br#""principal-client""#).unwrap(),
+        CredentialClass::PrincipalClient
+    );
 }

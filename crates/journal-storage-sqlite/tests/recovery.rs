@@ -41,7 +41,7 @@ impl Fixture {
              VALUES ('r','s',1,'018f1f59-6e90-7000-8000-000000000001','note','recovery probe','2026-01-01T00:00:00Z');
              INSERT INTO attention VALUES ('r','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
              INSERT INTO inbox_sequences VALUES ('018f1f59-6e90-7000-8000-000000000001',1);
-             INSERT INTO mailbox_items VALUES ('m','r','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,NULL);"
+             INSERT INTO mailbox_items VALUES ('m','r','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z',1,NULL);"
         ).unwrap();
         database
     }
@@ -231,13 +231,13 @@ fn corrupted_fts_postings_fail_even_when_stored_content_remains() {
 }
 
 #[test]
-fn missing_attempt_history_is_not_a_verified_restore() {
+fn missing_inbox_allocation_head_is_not_a_verified_restore() {
     let fixture = Fixture::new();
     let database = fixture.database();
     database
         .connect()
         .unwrap()
-        .execute("DELETE FROM delivery_attempts", [])
+        .execute_batch("DROP TRIGGER inbox_sequence_is_retained; DELETE FROM inbox_sequences")
         .unwrap();
     assert!(database.recovery_verification().is_err());
 }

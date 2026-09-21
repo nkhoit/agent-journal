@@ -88,16 +88,6 @@ class BootstrapTest(unittest.TestCase):
             self.assertNotIn(secret, " ".join(map(str, args)))
         return result
 
-    def enroll(self, ticket, principal, delivery, endpoint=None, succeeds=True):
-        result = self.cli("aj", "enroll", "--endpoint", endpoint or self.endpoint,
-                         "--ticket-file", self.directory / ticket,
-                         "--instance-id", "installation-example",
-                         "--principal-file", self.directory / principal,
-                         "--delivery-file", self.directory / delivery,
-                         succeeds=succeeds)
-        self.assertEqual(result.stdout, b"")
-        return result
-
     def request(self, path, token=None, method="GET", body=None):
         headers = {"Content-Type": "application/json"} if body is not None else {}
         if token:
@@ -111,19 +101,16 @@ class BootstrapTest(unittest.TestCase):
             return error.code, error.read()
 
     def provision(self):
-        self.admin("principal-create", "principal-example", "Example")
+        receipt = json.loads(self.cli(
+            "aj", "register", "--endpoint", self.endpoint,
+            "--state-file", self.directory / "principal",
+            "--handle", "principal-example", "--display-name", "Example",
+        ).stdout)
+        self.principal_id = receipt["principal"]["id"]
+        self.credential("principal")
         self.admin("space-create", "space-example", "Example")
         self.admin("membership-set", "space-example", "principal-example",
                    "true", "true", "false")
-        self.admin("adapter-provision", "principal-example", "adapter-example")
-
-    def ticket(self, name):
-        result = self.admin("ticket-create", "principal-example", "adapter-example",
-                            "60", str(self.directory / name))
-        self.assertEqual(result.stdout, b"")
-        value = (self.directory / name).read_text()
-        self.secrets.append(value)
-        return value
 
     def credential(self, name):
         path = self.directory / name
@@ -243,7 +230,7 @@ class BootstrapTest(unittest.TestCase):
             self.assertEqual(len(status["items"]), count)
             self.assertNotIn("attempts", status["items"][0])
         connection = sqlite3.connect(self.database)
-        for table in ["memberships", "adapter_registrations", "adapter_identities"]:
+        for table in ["memberships"]:
             self.assertEqual(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
         self.assertEqual(connection.execute("SELECT count(*) FROM mailbox_items").fetchone()[0], 2)
         connection.close()
@@ -251,91 +238,58 @@ class BootstrapTest(unittest.TestCase):
     def test_bootstrap_rotation_auth_and_recovery(self):
         self.provision()
         self.assertEqual(self.socket.stat().st_mode & 0o777, 0o600)
-        ticket = self.ticket("ticket")
-        self.enroll("ticket", "principal", "delivery")
         principal = self.credential("principal")
-        delivery = self.credential("delivery")
-        principal_paths = [("/v1/me", "GET"), ("/v1/principals", "GET"),
-                           ("/v1/spaces", "GET"), ("/v1/spaces/example", "GET"),
-                           ("/v1/spaces/example/records", "GET"),
-                           ("/v1/spaces/example/records", "POST"),
-                           ("/v1/spaces/example/search", "GET"),
-                           ("/v1/records/example", "GET"),
-                           ("/v1/records/example/thread", "GET"),
-                           ("/v1/records/example/delivery-status", "GET"),
-                           ("/v1/inbox", "GET"),
-                           ("/v1/inbox/missing/ack", "POST")]
-        delivery_paths = [("/v1/adapters/self/register", "POST"),
-                          ("/v1/adapters/self/heartbeat", "POST"),
-                          ("/v1/mailbox/claims", "POST"),
-                          ("/v1/claims/example/commit", "POST"),
-                          ("/v1/mailbox-items/example/events", "POST"),
-                          ("/v1/mailbox/status", "GET")]
-        for paths, good, wrong in [(principal_paths, principal, delivery),
-                                    (delivery_paths, delivery, principal)]:
-            for path, method in paths:
-                for token in [None, "malformed", ticket, wrong["secret"]]:
-                    self.assertEqual(self.request(path, token, method)[0], 401)
-                implemented = {
-                    ("/v1/me", "GET"): 200,
-                    ("/v1/principals", "GET"): 400,
-                    ("/v1/spaces", "GET"): 200,
-                    ("/v1/spaces/example", "GET"): 404,
-                    ("/v1/spaces/example/records", "GET"): 404,
-                    ("/v1/spaces/example/records", "POST"): 400,
-                    ("/v1/spaces/example/search", "GET"): 400,
-                    ("/v1/records/example", "GET"): 404,
-                    ("/v1/records/example/thread", "GET"): 404,
-                    ("/v1/records/example/delivery-status", "GET"): 404,
-                    ("/v1/inbox", "GET"): 200,
-                    ("/v1/inbox/missing/ack", "POST"): 404,
-                    ("/v1/adapters/self/register", "POST"): 400,
-                    ("/v1/adapters/self/heartbeat", "POST"): 400,
-                    ("/v1/mailbox/claims", "POST"): 400,
-                    ("/v1/claims/example/commit", "POST"): 400,
-                    ("/v1/mailbox-items/example/events", "POST"): 400,
-                    ("/v1/mailbox/status", "GET"): 200,
-                }
-                self.assertEqual(self.request(path, good["secret"], method)[0],
-                                 implemented[(path, method)])
-        for token in [None, ticket, principal["secret"], delivery["secret"]]:
+        paths = {
+            ("/v1/me", "GET"): 200,
+            ("/v1/principals", "GET"): 400,
+            ("/v1/spaces", "GET"): 200,
+            ("/v1/spaces/missing", "GET"): 404,
+            ("/v1/spaces/missing/records", "GET"): 404,
+            ("/v1/spaces/missing/records", "POST"): 400,
+            ("/v1/spaces/missing/search", "GET"): 400,
+            ("/v1/records/missing", "GET"): 404,
+            ("/v1/records/missing/thread", "GET"): 404,
+            ("/v1/records/missing/delivery-status", "GET"): 404,
+            ("/v1/inbox", "GET"): 200,
+            ("/v1/inbox/missing/ack", "POST"): 404,
+        }
+        for (path, method), expected in paths.items():
+            for token in [None, "malformed", "e" * 64]:
+                self.assertEqual(self.request(path, token, method)[0], 401)
+            self.assertEqual(self.request(path, principal["secret"], method)[0], expected)
+        for token in [None, "e" * 64, principal["secret"]]:
             self.assertEqual(self.request("/v1/admin/principals", token, "POST")[0], 404)
             self.assertEqual(self.request("/v1/admin/metrics", token)[0], 404)
+            for path in ["/v1/enrollment/exchange", "/v1/adapters/self/register",
+                         "/v1/adapters/self/heartbeat", "/v1/mailbox/claims",
+                         "/v1/claims/missing/commit", "/v1/mailbox-items/missing/events"]:
+                self.assertEqual(self.request(path, token, "POST")[0], 404)
+            self.assertEqual(self.request("/v1/mailbox/status", token)[0], 404)
         metrics = json.loads(self.admin("metrics").stdout)
         self.assertGreater(metrics["database_bytes"], 0)
-        self.assertEqual(metrics["pending_mailbox_count"], 0)
-        self.assertIsNone(metrics["oldest_pending_at"])
+        self.assertEqual(metrics["unacknowledged_inbox_count"], 0)
+        self.assertIsNone(metrics["oldest_unacknowledged_at"])
         self.assertIsNone(metrics["last_backup_at"])
         self.assertIsNone(metrics["last_verified_restore_at"])
         self.assertEqual(self.request("/unknown/" + principal["secret"])[0], 404)
-        self.enroll("ticket", "replay-principal", "replay-delivery", succeeds=False)
         result = self.admin("credential-rotate", principal["credential_id"],
-                            str(self.directory / "replacement"))
+                            self.directory / "replacement")
         self.assertEqual(result.stdout, b"")
         replacement = self.credential("replacement")
         self.assertEqual(self.request("/v1/me", principal["secret"])[0], 401)
         self.assertEqual(self.request("/v1/me", replacement["secret"])[0], 200)
         self.admin("credential-revoke", replacement["credential_id"])
         self.assertEqual(self.request("/v1/me", replacement["secret"])[0], 401)
-        self.admin("enrollment-recover", "adapter-example", "other-installation",
-                   succeeds=False)
-        self.admin("enrollment-recover", "adapter-example", "installation-example")
-        self.assertEqual(self.request("/v1/mailbox/status", delivery["secret"])[0], 401)
-        fresh = self.ticket("fresh-ticket")
-        self.enroll("fresh-ticket", "fresh-principal", "fresh-delivery")
-        self.credential("fresh-principal")
-        self.credential("fresh-delivery")
-        connection = sqlite3.connect(self.database)
-        hashes = {row[0] for row in connection.execute("SELECT token_hash FROM credentials")}
-        for secret in self.secrets:
-            if secret not in [ticket, fresh]:
+        self.admin("principal-recover", self.principal_id, self.directory / "recovered")
+        recovered = self.credential("recovered")
+        self.assertEqual(self.request("/v1/me", recovered["secret"])[0], 200)
+        with sqlite3.connect(self.database) as connection:
+            hashes = {row[0] for row in connection.execute("SELECT token_hash FROM credentials")}
+            for secret in self.secrets:
                 self.assertIn(hashlib.sha256(secret.encode()).hexdigest(), hashes)
-        connection.close()
         for path in self.directory.glob("journal.db*"):
             for secret in self.secrets:
                 self.assertNotIn(secret.encode(), path.read_bytes())
-        for secret in self.secrets:
-            self.assertNotIn(secret, self.trace.read_text())
 
     def test_registration_response_loss_retries_the_same_identity(self):
         committed = []
@@ -533,36 +487,8 @@ class BootstrapTest(unittest.TestCase):
         self.assertEqual(self.request("/v1/me", inaccessible[-1]["secret"])[0], 401)
         self.assertEqual(self.request("/v1/me", final["secret"])[0], 200)
 
-    def test_postcommit_enrollment_failures_require_recovery(self):
-        self.provision()
-        for index, failure in enumerate(["lost", "principal", "delivery"]):
-            name = f"ticket-{index}"
-            self.ticket(name)
-            principal, delivery = f"principal-{index}", f"delivery-{index}"
-
-            def committed(payload):
-                value = json.loads(payload)
-                self.secrets.extend([value["principal_client_secret"]["secret"],
-                                     value["delivery_adapter_secret"]["secret"]])
-                if failure != "lost":
-                    (self.directory / (principal if failure == "principal" else delivery)).mkdir()
-
-            endpoint, thread, errors = self.proxy(committed, lose_response=failure == "lost")
-            self.enroll(name, principal, delivery, endpoint=endpoint, succeeds=False)
-            thread.join(timeout=PROCESS_TIMEOUT)
-            self.assertFalse(thread.is_alive())
-            self.assertEqual(errors, [])
-            self.enroll(name, f"replay-p-{index}", f"replay-d-{index}", succeeds=False)
-            self.admin("enrollment-recover", "adapter-example", "installation-example")
-            connection = sqlite3.connect(self.database)
-            self.assertEqual(connection.execute(
-                "SELECT count(*) FROM credentials WHERE revoked_at IS NULL").fetchone()[0], 0)
-            connection.close()
-
     def test_rotation_file_failure_does_not_restore_old_credential(self):
         self.provision()
-        self.ticket("ticket")
-        self.enroll("ticket", "principal", "delivery")
         principal = self.credential("principal")
         replacements = []
 
@@ -587,13 +513,11 @@ class BootstrapTest(unittest.TestCase):
         self.assertIn(rotation["request_id"].encode(), result.stderr)
         self.assertEqual(self.request("/v1/me", principal["secret"])[0], 401)
         self.assertEqual(self.request("/v1/me", replacements[0]["secret"])[0], 200)
-        self.admin("enrollment-recover", "adapter-example", "installation-example")
+        self.admin("principal-recover", self.principal_id, self.directory / "fresh-principal")
         self.assertEqual(self.request("/v1/me", replacements[0]["secret"])[0], 401)
 
     def test_lost_rotation_response_can_be_recovered_without_replacement_id(self):
         self.provision()
-        self.ticket("ticket")
-        self.enroll("ticket", "principal", "delivery")
         principal = self.credential("principal")
         endpoint, thread, errors = self.proxy(lambda _: None, unix=True, lose_response=True)
         self.admin("credential-rotate", principal["credential_id"],
@@ -602,9 +526,7 @@ class BootstrapTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(self.request("/v1/me", principal["secret"])[0], 401)
         self.assertFalse((self.directory / "replacement").exists())
-        self.admin("enrollment-recover", "adapter-example", "installation-example")
-        self.ticket("fresh-ticket")
-        self.enroll("fresh-ticket", "fresh-principal", "fresh-delivery")
+        self.admin("principal-recover", self.principal_id, self.directory / "fresh-principal")
         credential = self.credential("fresh-principal")
         self.assertEqual(self.request("/v1/me", credential["secret"])[0], 200)
 

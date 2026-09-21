@@ -640,55 +640,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "journal-adapter-core"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "journal-client",
- "journal-domain",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "journal-adapter-hermes"
-version = "0.1.0"
-dependencies = [
- "journal-adapter-core",
- "journal-adapter-spool",
- "journal-client",
- "journal-runtime-hermes",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "journal-adapter-muse"
-version = "0.1.0"
-dependencies = [
- "journal-adapter-core",
- "journal-adapter-spool",
- "journal-client",
- "journal-runtime-muse",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "journal-adapter-spool"
-version = "0.1.0"
-dependencies = [
- "fs2",
- "journal-adapter-core",
- "journal-runtime-fake",
- "rusqlite",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "journal-client"
 version = "0.1.0"
 dependencies = [
@@ -710,11 +661,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal-inbox-hermes"
+version = "0.1.0"
+dependencies = [
+ "journal-inbox-worker",
+ "journal-runtime-hermes",
+]
+
+[[package]]
+name = "journal-inbox-muse"
+version = "0.1.0"
+dependencies = [
+ "journal-inbox-worker",
+ "journal-runtime-muse",
+]
+
+[[package]]
+name = "journal-inbox-worker"
+version = "0.1.0"
+dependencies = [
+ "journal-client",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "journal-lock-test"
 version = "0.1.0"
 dependencies = [
  "fs2",
- "journal-adapter-spool",
  "journal-storage-sqlite",
  "libc",
 ]
@@ -739,7 +716,7 @@ dependencies = [
 name = "journal-runtime-fake"
 version = "0.1.0"
 dependencies = [
- "journal-adapter-core",
+ "journal-inbox-worker",
  "serde",
  "serde_json",
 ]
@@ -748,7 +725,7 @@ dependencies = [
 name = "journal-runtime-hermes"
 version = "0.1.0"
 dependencies = [
- "journal-adapter-core",
+ "journal-inbox-worker",
  "reqwest",
  "serde_json",
 ]
@@ -757,7 +734,7 @@ dependencies = [
 name = "journal-runtime-muse"
 version = "0.1.0"
 dependencies = [
- "journal-adapter-core",
+ "journal-inbox-worker",
  "serde",
  "serde_json",
  "sha2",
@@ -797,13 +774,14 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "fs2",
- "journal-adapter-core",
- "journal-adapter-hermes",
- "journal-adapter-muse",
- "journal-adapter-spool",
  "journal-client",
+ "journal-inbox-hermes",
+ "journal-inbox-muse",
+ "journal-inbox-worker",
  "journal-protocol",
  "journal-runtime-fake",
+ "journal-runtime-hermes",
+ "journal-runtime-muse",
  "journal-service",
  "journal-storage-sqlite",
  "pulldown-cmark",

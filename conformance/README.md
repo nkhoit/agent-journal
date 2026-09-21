@@ -1,19 +1,28 @@
-# Conformance fixtures
+# Conformance
 
-This directory contains public-safe, generic fixtures for black-box clients and adapters. The fixtures are intentionally data-only; no live endpoint, credential, runtime target, or private identifier is included.
+`client/requests.yaml` maps every retained OpenAPI operation to method/path and
+selected normative bounds. `client/wire-examples.json` supplies public-safe DTO
+examples compiled by Rust wire tests. The structural validator checks exact
+operation/security/body contracts and rejects missing fixture coverage.
 
-- `adapter/expected-envelope.txt` defines the stable trusted/untrusted envelope shape.
-- `adapter/scenarios.yaml` lists required registration, custody, recovery, routing, telemetry, and failure cases.
-- `client/requests.yaml` lists representative protocol operations and bounded limits.
-- `client/wire-examples.json` contains the public-safe schema examples referenced by OpenAPI and compiled through the S1 Rust DTOs.
-- `fake-runtime/README.md` defines the fake runtime behavior required before vendor canaries.
+`inbox-client/scenarios.yaml` selects the fixed executable acceptance cases.
+`inbox-client/expected-envelope.txt` is checked both structurally and against
+actual rendering, including stable inbox identity, quoted metadata and the
+untrusted-content boundary.
 
-The executable S0 contract gate parses the operation and adapter fixtures and verifies OpenAPI operation coverage. S1 additionally compiles the normative wire examples through the typed Rust DTOs, including required-field deletion checks. Neither gate executes client requests or adapter scenarios. The fake-runtime conformance gate executes adapter behavior with a deterministic runtime; the Hermes vendor adapter has separate HTTP and real-`journald` integration tests. A test may use localhost and generated per-test IDs, but must never commit captured production traces or secrets.
+```sh
+python3 scripts/validate_openapi.py api/openapi.yaml
+python3 -m unittest tests/contract_gate_test.py
+make inbox-client-conformance CARGO="cargo +1.85.0"
+```
 
-The contract covers 35 paths, 37 operations, and 79 fixture mappings, including principal inbox fetch/ack, independent principal registration, protected principal recovery, operational metrics, credential revocation, and transitional enrollment recovery. Record status exposes only inbox receipts. Rotation examples contain a synthetic one-time replacement secret, never a captured credential. Schema validation does not prove transactional or recovery behavior; the protocol/service/client inbox tests and real HTTP inbox test exercise that behavior without adapter enrollment.
+The inbox runner executes exact nonempty Rust test selections. Missing,
+duplicate, unknown, ignored or failed cases do not create a successful completion
+manifest. Cases cover core handoff/ack ordering, fairness/backoff, credentials,
+runtime dedupe/capabilities, real-daemon integration and process termination.
+There is no custody, installation, claim or telemetry conformance model.
 
-S8 central custody, telemetry transition/replay, status visibility, and requeue
-behavior are executed by service and HTTP tests, with the real-process CLI
-vertical in `tests/s7_delivery_test.py`. The adapter scenarios include
-retryable-to-success recovery and late telemetry after requeue. Parsing these
-fixtures still does not prove local spooling or runtime injection.
+Only allowlisted JSON under `target/inbox-client-conformance` is publishable.
+Do not upload raw databases, credentials, routes, drop payloads or runtime ledgers.
+The [fake runtime](fake-runtime/README.md) is test infrastructure, not a vendor
+integration or proof of model processing.

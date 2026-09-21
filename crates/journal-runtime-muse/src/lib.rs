@@ -6,25 +6,25 @@
 //! `inbox`, `ack`, `retain`, `recall`, `get-document`, `memory-status`, …);
 //! there is no chat-injection subcommand, webhook, or socket. The supported
 //! handoff is a private local drop directory watched by a platform hook: the
-//! adapter durably writes one file per delivery attempt, and the operator's
+//! client durably writes one file per inbox item, and the operator's
 //! hook worker picks the file up and calls `chat.send_message`.
 //!
 //! A successful `inject` means the drop file is durably on disk in the watched
-//! directory under a stable attempt-derived name. It does NOT mean the model
+//! directory under a stable item-derived name. It does NOT mean the model
 //! observed, understood, or completed the delivery. The platform offers no
 //! idempotency key, so duplicate chat turns remain possible if the hook worker
 //! redelivers; the drop payload therefore carries a stable `dedupe_key`
-//! (the attempt ID) and the deployment must run a worker that keeps a durable
-//! seen-set on that key. The adapter itself never creates two drop files for
-//! one attempt.
+//! (the inbox item ID) and the deployment must run a worker that keeps a durable
+//! seen-set on that key. Existing identical files replay without rewriting;
+//! consumed files may be recreated after a crash before acknowledgment.
 
-use journal_adapter_core::{CoreError, CoreResult, Envelope, Route, Runtime};
+use journal_inbox_worker::{Envelope, Route, Runtime, RuntimeError, RuntimeResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -50,48 +50,49 @@ impl fmt::Debug for MuseRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MuseRuntime")
-            .field("drop_dir", &self.drop_dir)
+            .field("drop_point_configured", &true)
             .finish()
     }
 }
 
 impl MuseRuntime {
     /// Build a runtime client over an existing private drop directory.
-    pub fn new(drop_dir: &str) -> CoreResult<Self> {
+    pub fn new(drop_dir: &str) -> RuntimeResult<Self> {
         let drop_dir = validate_drop_dir(drop_dir)?;
         Ok(Self { drop_dir })
     }
 }
 
 impl Runtime for MuseRuntime {
-    fn inject(&self, route: &Route, envelope: &Envelope, rendered: &str) -> CoreResult<String> {
+    fn inject(&self, route: &Route, envelope: &Envelope, rendered: &str) -> RuntimeResult<String> {
         if !route.enabled {
-            return Err(CoreError::RuntimeRejected);
+            return Err(RuntimeError::RuntimeRejected);
         }
         validate_chat_id(&route.runtime_target)?;
         // The route target is the private Muse chat id. It is never placed in
-        // the central envelope or telemetry; it is sent only to the local
+        // central records; it is sent only to the local
         // drop point for the hook worker.
         if rendered != envelope.render() {
-            return Err(CoreError::RuntimeRejected);
+            return Err(RuntimeError::RuntimeRejected);
         }
         let payload = DropPayload::new(&route.runtime_target, envelope, rendered);
-        let bytes = serde_json::to_vec(&payload).map_err(|_| CoreError::RuntimeRejected)?;
+        let bytes = serde_json::to_vec(&payload).map_err(|_| RuntimeError::RuntimeRejected)?;
         if bytes.len() > MAX_DROP_BYTES {
-            return Err(CoreError::RuntimeRejected);
+            return Err(RuntimeError::RuntimeRejected);
         }
-        let file_name = drop_file_name(&envelope.attempt_id);
+        let file_name = drop_file_name(&envelope.inbox_item_id);
         let path = self.drop_dir.join(&file_name);
-        match fs::read(&path) {
+        match read_drop_file(&path) {
             Ok(existing) => {
-                // Exact replay: the same attempt already dropped this exact
+                // Exact replay: the same inbox item already dropped this exact
                 // payload. Return the same receipt without touching the file.
                 if existing == bytes {
+                    sync_drop_file(&path)?;
                     Ok(file_name)
                 } else {
-                    // A different payload already occupies this attempt's
+                    // A different payload already occupies this inbox item's
                     // stable name. Fail closed rather than overwrite it.
-                    Err(CoreError::RuntimeRejected)
+                    Err(RuntimeError::RuntimeRejected)
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -100,7 +101,7 @@ impl Runtime for MuseRuntime {
             Err(_) => {
                 // The file exists but cannot be read: its binding is
                 // ambiguous. Never blindly overwrite; fail closed.
-                Err(CoreError::RuntimeRejected)
+                Err(RuntimeError::RuntimeRejected)
             }
         }
     }
@@ -114,8 +115,7 @@ struct DropPayload {
     dedupe_key: String,
     target_chat: String,
     record_id: String,
-    mailbox_item_id: String,
-    attempt_id: String,
+    inbox_item_id: String,
     space_id: String,
     from_principal: String,
     addressed_to: String,
@@ -130,12 +130,11 @@ impl DropPayload {
         hasher.update(rendered.as_bytes());
         let content_sha256 = hex_bytes(&hasher.finalize());
         Self {
-            version: 1,
-            dedupe_key: envelope.attempt_id.clone(),
+            version: 2,
+            dedupe_key: envelope.inbox_item_id.clone(),
             target_chat: target_chat.to_owned(),
             record_id: envelope.record_id.clone(),
-            mailbox_item_id: envelope.mailbox_item_id.clone(),
-            attempt_id: envelope.attempt_id.clone(),
+            inbox_item_id: envelope.inbox_item_id.clone(),
             space_id: envelope.space_id.clone(),
             from_principal: envelope.from_principal.clone(),
             addressed_to: envelope.addressed_to.clone(),
@@ -146,9 +145,9 @@ impl DropPayload {
     }
 }
 
-fn drop_file_name(attempt_id: &str) -> String {
+fn drop_file_name(inbox_item_id: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(attempt_id.as_bytes());
+    hasher.update(inbox_item_id.as_bytes());
     format!(
         "{DROP_FILE_PREFIX}{}{DROP_EXTENSION}",
         hex_bytes(&hasher.finalize())
@@ -163,23 +162,53 @@ fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-fn validate_drop_dir(drop_dir: &str) -> CoreResult<PathBuf> {
+fn read_drop_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_DROP_BYTES as u64
+    {
+        return Err(std::io::Error::other("invalid drop file"));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_DROP_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_DROP_BYTES {
+        return Err(std::io::Error::other("oversized drop file"));
+    }
+    Ok(bytes)
+}
+
+fn sync_drop_file(path: &Path) -> RuntimeResult<()> {
+    let result = (|| -> std::io::Result<()> {
+        fs::File::open(path)?.sync_all()?;
+        fs::File::open(
+            path.parent()
+                .ok_or_else(|| std::io::Error::other("invalid drop path"))?,
+        )?
+        .sync_all()
+    })();
+    result.map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))
+}
+
+fn validate_drop_dir(drop_dir: &str) -> RuntimeResult<PathBuf> {
     if drop_dir.is_empty() || drop_dir.len() > 4096 {
-        return Err(CoreError::RuntimeRejected);
+        return Err(RuntimeError::RuntimeRejected);
     }
     let path = Path::new(drop_dir);
     if path.components().count() == 0 {
-        return Err(CoreError::RuntimeRejected);
+        return Err(RuntimeError::RuntimeRejected);
     }
-    let metadata = fs::symlink_metadata(path).map_err(|_| CoreError::RuntimeRejected)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| RuntimeError::RuntimeRejected)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(CoreError::RuntimeRejected);
+        return Err(RuntimeError::RuntimeRejected);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(CoreError::RuntimeRejected);
+            return Err(RuntimeError::RuntimeRejected);
         }
     }
     Ok(path.to_path_buf())
@@ -189,7 +218,7 @@ fn validate_drop_dir(drop_dir: &str) -> CoreResult<PathBuf> {
 /// They must be path-safe because they are embedded in a local JSON payload
 /// consumed by a shell-adjacent worker; the worker must still treat the value
 /// as data.
-fn validate_chat_id(chat_id: &str) -> CoreResult<()> {
+fn validate_chat_id(chat_id: &str) -> RuntimeResult<()> {
     if chat_id.is_empty()
         || chat_id.len() > 255
         || chat_id.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
@@ -199,36 +228,59 @@ fn validate_chat_id(chat_id: &str) -> CoreResult<()> {
             && chat_id.as_bytes()[0].is_ascii_alphabetic()
             && chat_id.as_bytes()[1] == b':')
     {
-        return Err(CoreError::RuntimeRejected);
+        return Err(RuntimeError::RuntimeRejected);
     }
     Ok(())
 }
 
 /// Durably create the drop file: exclusive create, write, fsync the file,
-/// atomic rename into place, fsync the directory.
-fn write_drop_file(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+/// no-clobber publication, fsync the directory.
+fn write_drop_file(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or(CoreError::RuntimeRejected)?;
+        .ok_or(RuntimeError::RuntimeRejected)?;
     let staging = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(&staging)
-        .map_err(|_| CoreError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+        .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
     let result = (|| {
         file.write_all(bytes)
-            .map_err(|_| CoreError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+            .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
         file.sync_all()
-            .map_err(|_| CoreError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+            .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+        #[cfg(test)]
+        drop_boundary("staged");
         drop(file);
-        fs::rename(&staging, path)
-            .map_err(|_| CoreError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+        match fs::hard_link(&staging, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if read_drop_file(path).map_err(|_| RuntimeError::RuntimeRejected)? != bytes {
+                    return Err(RuntimeError::RuntimeRejected);
+                }
+                sync_drop_file(path)?;
+            }
+            Err(_) => {
+                return Err(RuntimeError::RuntimeUnavailable(
+                    "muse drop point unavailable".into(),
+                ));
+            }
+        }
+        #[cfg(test)]
+        drop_boundary("published");
+        fs::remove_file(&staging)
+            .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
         let dir = fs::File::open(path.parent().unwrap_or(Path::new(".")))
-            .map_err(|_| CoreError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+            .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
         dir.sync_all()
-            .map_err(|_| CoreError::RuntimeUnavailable("muse drop point unavailable".into()))?;
+            .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
         Ok(())
     })();
     if result.is_err() {
@@ -238,14 +290,96 @@ fn write_drop_file(path: &Path, bytes: &[u8]) -> CoreResult<()> {
 }
 
 #[cfg(test)]
+fn drop_boundary(stage: &str) {
+    if std::env::var("MUSE_DROP_STAGE").as_deref() != Ok(stage) {
+        return;
+    }
+    let root = std::env::var("MUSE_CRASH_ROOT").unwrap();
+    let mut marker = fs::File::create(Path::new(&root).join("boundary")).unwrap();
+    marker.write_all(stage.as_bytes()).unwrap();
+    marker.sync_all().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn envelope(attempt_id: &str) -> Envelope {
+    #[cfg(unix)]
+    #[test]
+    fn drop_crash_child() {
+        let Ok(root) = std::env::var("MUSE_CRASH_ROOT") else {
+            return;
+        };
+        let runtime = MuseRuntime::new(Path::new(&root).join("drop").to_str().unwrap()).unwrap();
+        let item = envelope("item-crash");
+        runtime.inject(&route(), &item, &item.render()).unwrap();
+        panic!("child missed the durable boundary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn killed_publication_replays_only_the_stable_durable_drop() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            process::Command,
+            time::{Duration, Instant},
+        };
+        for stage in ["staged", "published"] {
+            let root = std::env::temp_dir().join(format!(
+                "muse-crash-{}-{stage}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let drop_dir = root.join("drop");
+            fs::create_dir_all(&drop_dir).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&drop_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::drop_crash_child", "--nocapture"])
+                .env("MUSE_DROP_STAGE", stage)
+                .env("MUSE_CRASH_ROOT", &root)
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !root.join("boundary").exists() {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "child exited before publication boundary"
+                );
+                if Instant::now() > deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("publication boundary deadline exceeded");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            child.kill().unwrap();
+            assert!(!child.wait().unwrap().success());
+            let path = drop_dir.join(drop_file_name("item-crash"));
+            assert_eq!(path.exists(), stage == "published");
+            let runtime = MuseRuntime::new(drop_dir.to_str().unwrap()).unwrap();
+            let item = envelope("item-crash");
+            let receipt = runtime.inject(&route(), &item, &item.render()).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            assert_eq!(
+                runtime.inject(&route(), &item, &item.render()).unwrap(),
+                receipt
+            );
+            assert_eq!(fs::read(path).unwrap(), bytes);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn envelope(inbox_item_id: &str) -> Envelope {
         Envelope {
             record_id: "record-1".into(),
-            mailbox_item_id: "item-1".into(),
-            attempt_id: attempt_id.into(),
+            inbox_item_id: inbox_item_id.into(),
             space_id: "space".into(),
             from_principal: "source".into(),
             source_run: None,
@@ -266,12 +400,12 @@ mod tests {
 
     #[test]
     fn drop_file_name_is_stable_and_filesystem_safe() {
-        let first = drop_file_name("attempt-42");
-        let second = drop_file_name("attempt-42");
+        let first = drop_file_name("item-42");
+        let second = drop_file_name("item-42");
         assert_eq!(first, second);
         assert!(first.starts_with(DROP_FILE_PREFIX));
         assert!(first.ends_with(DROP_EXTENSION));
-        assert_ne!(first, drop_file_name("attempt-43"));
+        assert_ne!(first, drop_file_name("item-43"));
         // Attempt IDs are never embedded raw: path-unsafe input still yields a
         // safe name.
         let hostile = drop_file_name("../../etc/passwd");
@@ -281,9 +415,9 @@ mod tests {
 
     #[test]
     fn receipts_are_bounded_and_non_secret() {
-        let name = drop_file_name("attempt-1");
+        let name = drop_file_name("item-1");
         assert!(name.len() < 4096);
-        assert!(!name.contains("attempt-1"));
+        assert!(!name.contains("item-1"));
     }
 
     #[test]
@@ -323,23 +457,23 @@ mod tests {
             std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let runtime = MuseRuntime::new(runtime_dir.to_str().unwrap()).unwrap();
-        let body = envelope("attempt-9");
+        let body = envelope("item-9");
         let rendered = body.render();
         let receipt = runtime.inject(&route(), &body, &rendered).expect("inject");
-        assert_eq!(receipt, drop_file_name("attempt-9"));
+        assert_eq!(receipt, drop_file_name("item-9"));
         std::fs::remove_dir_all(&runtime_dir).ok();
     }
 
     #[test]
     fn drop_payload_round_trips_through_documented_json() {
-        let body = envelope("attempt-rt");
+        let body = envelope("item-rt");
         let rendered = body.render();
         let payload = DropPayload::new("main", &body, &rendered);
         let bytes = serde_json::to_vec(&payload).expect("serialize");
         let decoded: DropPayload = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(payload, decoded);
-        assert_eq!(decoded.version, 1);
-        assert_eq!(decoded.dedupe_key, "attempt-rt");
+        assert_eq!(decoded.version, 2);
+        assert_eq!(decoded.dedupe_key, "item-rt");
         assert_eq!(decoded.body, rendered);
     }
 }

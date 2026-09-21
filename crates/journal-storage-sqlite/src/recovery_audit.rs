@@ -13,14 +13,10 @@ const SECURITY_TABLES: &[&str] = &[
     "principals",
     "principal_names",
     "spaces",
-    "adapter_identities",
     "memberships",
-    "enrollment_installations",
-    "adapter_registrations",
     "profile_idempotency_keys",
     "credentials",
     "registration_receipts",
-    "enrollment_tickets",
     "credential_audit",
     "audit_events",
     "record_relations",
@@ -45,6 +41,7 @@ impl Cell {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Snapshot {
+    schema_version: i64,
     tables: Vec<Vec<Vec<Cell>>>,
     space_heads: Vec<(String, i64)>,
     inbox_heads: Vec<(String, i64)>,
@@ -91,8 +88,6 @@ pub struct RecoveryApproval {
     pub verification: RecoveryVerification,
     pub audit_revision: i64,
     pub previous_space_heads: Vec<(String, i64)>,
-    pub quiesced_adapters: Vec<(String, String)>,
-    pub reconciled_spools: Vec<(String, String)>,
     pub reconciled_clients: Vec<String>,
     pub inventory_complete: bool,
     pub accepted_record_loss: bool,
@@ -547,20 +542,22 @@ impl RecoveryAudit {
         &self,
         backup: &Path,
         destination: &Path,
-        adapters_quiesced: bool,
+        clients_quiesced: bool,
     ) -> Result<RecoveryApproval, StorageError> {
         let _guard = self.lock()?;
         self.require_resolved_recovery_input()?;
         self.close()?;
-        if !adapters_quiesced {
+        if !clients_quiesced {
             return Err(StorageError::RecoveryClosed(
-                "adapter quiescence was not attested",
+                "client quiescence was not attested",
             ));
         }
         protect_parent(destination)?;
         Database::verify_backup(backup)?;
         let backup_database = Database::open(backup)?;
         let expected = backup_database.recovery_verification()?;
+        let latest: Snapshot = serde_json::from_str(&head(&self.connection()?)?.1)?;
+        validate_credential_history(&backup_database.connect_read_only()?, &latest)?;
         standalone_current_database(&backup_database)?;
         drop(backup_database);
         Database::restore_backup(backup, destination)?;
@@ -571,7 +568,7 @@ impl RecoveryAudit {
                 "restored hashes differ from backup",
             ));
         }
-        self.reconcile(&restored, adapters_quiesced)
+        self.reconcile(&restored, clients_quiesced)
     }
 
     pub fn write_approval(path: &Path, approval: &RecoveryApproval) -> Result<(), StorageError> {
@@ -605,13 +602,13 @@ impl RecoveryAudit {
     pub fn reconcile(
         &self,
         database: &Database,
-        adapters_quiesced: bool,
+        clients_quiesced: bool,
     ) -> Result<RecoveryApproval, StorageError> {
         self.require_resolved_recovery_input()?;
         self.close()?;
-        if !adapters_quiesced {
+        if !clients_quiesced {
             return Err(StorageError::RecoveryClosed(
-                "adapter quiescence was not attested",
+                "client quiescence was not attested",
             ));
         }
         let audit = self.connection()?;
@@ -639,6 +636,16 @@ impl RecoveryAudit {
             ));
         }
         restore_security(&transaction, &latest)?;
+        let invalid_bindings: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+            [],
+            |row| row.get(0),
+        )?;
+        if invalid_bindings {
+            return Err(StorageError::RecoveryClosed(
+                "restored identity bindings violate foreign keys",
+            ));
+        }
         let revision = revision
             .checked_add(1)
             .ok_or(StorageError::RecoveryClosed("audit revision exhausted"))?;
@@ -652,14 +659,11 @@ impl RecoveryAudit {
         )?;
         transaction.commit()?;
         let verification = database.recovery_verification_unguarded()?;
-        let adapters = installation_inventory(&audit)?;
         let clients = identifiers(&connection, "SELECT id FROM principals ORDER BY id")?;
         let approval = RecoveryApproval {
             verification,
             audit_revision: revision,
             previous_space_heads: latest.space_heads,
-            quiesced_adapters: adapters.clone(),
-            reconciled_spools: adapters,
             reconciled_clients: clients,
             inventory_complete: false,
             accepted_record_loss: false,
@@ -690,7 +694,7 @@ impl RecoveryAudit {
         })
     }
 
-    /// The approval is an operator attestation, not automated spool reconciliation.
+    /// The approval is an operator attestation, not automated client reconciliation.
     /// Its complete inventory and exact post-recovery hashes bind that attestation.
     pub fn reopen(
         &self,
@@ -701,7 +705,6 @@ impl RecoveryAudit {
         let mut audit = self.connection()?;
         let (revision, _, _) = head(&audit)?;
         let connection = database.connect_unchecked()?;
-        let adapters = installation_inventory(&audit)?;
         let clients = identifiers(&connection, "SELECT id FROM principals ORDER BY id")?;
         let anchor: i64 =
             connection.query_row("SELECT revision FROM recovery_anchor", [], |row| row.get(0))?;
@@ -723,8 +726,6 @@ impl RecoveryAudit {
             || revision != anchor
             || approval.verification != verification
             || &recorded != approval
-            || approval.quiesced_adapters != adapters
-            || approval.reconciled_spools != adapters
             || approval.reconciled_clients != clients
         {
             return Err(StorageError::RecoveryClosed(
@@ -732,16 +733,13 @@ impl RecoveryAudit {
             ));
         }
         let live: i64 = connection.query_row(
-            "SELECT (SELECT count(*) FROM credentials WHERE revoked_at IS NULL)
-             +(SELECT count(*) FROM enrollment_tickets WHERE invalidated_at IS NULL)
-             +(SELECT count(*) FROM claims WHERE state='active')
-             +(SELECT count(*) FROM adapter_registrations WHERE status!='revoked')",
+            "SELECT count(*) FROM credentials WHERE revoked_at IS NULL",
             [],
             |row| row.get(0),
         )?;
         if live != 0 {
             return Err(StorageError::RecoveryClosed(
-                "restored authority is not fenced",
+                "restored credentials are not revoked",
             ));
         }
         let transaction = audit.transaction()?;
@@ -803,6 +801,7 @@ fn snapshot(connection: &Connection) -> Result<Snapshot, StorageError> {
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Snapshot {
+        schema_version: crate::CURRENT_SCHEMA_VERSION,
         tables,
         space_heads,
         inbox_heads: connection.prepare("SELECT recipient_principal_id,last_seq FROM inbox_sequences ORDER BY recipient_principal_id")?
@@ -812,24 +811,29 @@ fn snapshot(connection: &Connection) -> Result<Snapshot, StorageError> {
 }
 
 fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<(), StorageError> {
-    if latest.tables.len() != SECURITY_TABLES.len() {
+    if latest.schema_version != crate::CURRENT_SCHEMA_VERSION
+        || latest.tables.len() != SECURITY_TABLES.len()
+    {
         return Err(StorageError::RecoveryClosed(
             "security snapshot shape differs",
         ));
     }
-    // Revocations and ticket invalidation are deliberately stronger than replay.
-    // Historical credentials, claims, receipts and events are never deleted.
+    validate_credential_history(transaction, latest)?;
+    // Restoring identity bindings never restores active credentials.
     transaction.execute_batch(
         "UPDATE credentials SET revoked_at=coalesce(revoked_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
           revocation_reason='central restore';
-         UPDATE enrollment_tickets SET invalidated_at=coalesce(invalidated_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-         UPDATE claims SET state='cancelled',closed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state='active';
-         UPDATE delivery_attempts SET state='pending' WHERE state='claimed';
-         UPDATE mailbox_items SET state='pending' WHERE state='claimed';
          DELETE FROM memberships;",
     )?;
-    for (table, rows) in SECURITY_TABLES.iter().zip(&latest.tables).take(8) {
-        if *table == "principal_names" {
+    for table in [
+        "principals",
+        "principal_names",
+        "spaces",
+        "memberships",
+        "profile_idempotency_keys",
+    ] {
+        let rows = security_rows(latest, table)?;
+        if table == "principal_names" {
             restore_principal_names(transaction, rows)?;
             continue;
         }
@@ -853,14 +857,7 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
         let changes = columns
             .iter()
             .filter(|(_, key)| *key == 0)
-            .map(|(name, _)| {
-                if *table == "adapter_registrations" && name == "generation" {
-                    "generation=max(adapter_registrations.generation,excluded.generation)"
-                        .to_owned()
-                } else {
-                    format!("{name}=excluded.{name}")
-                }
-            })
+            .map(|(name, _)| format!("{name}=excluded.{name}"))
             .collect::<Vec<_>>()
             .join(",");
         let placeholders = vec!["?"; columns.len()].join(",");
@@ -877,21 +874,7 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
             )?;
         }
     }
-    let exhausted: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM adapter_registrations WHERE generation>=9223372036854775807)",
-        [],
-        |row| row.get(0),
-    )?;
-    if exhausted {
-        return Err(StorageError::RecoveryClosed(
-            "registration generation exhausted",
-        ));
-    }
-    transaction.execute_batch(
-        "UPDATE adapter_registrations SET generation=generation+1,status='revoked',
-          lease_expires_at='1970-01-01T00:00:00Z';
-         UPDATE enrollment_installations SET recovery_authorized=1;",
-    )?;
+    restore_credential_history(transaction, latest)?;
     for (recipient, head) in &latest.inbox_heads {
         if *head <= 0 {
             return Err(StorageError::RecoveryClosed(
@@ -903,6 +886,115 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
              ON CONFLICT(recipient_principal_id) DO UPDATE SET last_seq=max(last_seq,excluded.last_seq)",
             params![recipient,head],
         )?;
+    }
+    Ok(())
+}
+
+fn security_rows<'a>(snapshot: &'a Snapshot, table: &str) -> Result<&'a [Vec<Cell>], StorageError> {
+    if snapshot.schema_version != crate::CURRENT_SCHEMA_VERSION
+        || snapshot.tables.len() != SECURITY_TABLES.len()
+    {
+        return Err(StorageError::RecoveryClosed(
+            "security snapshot shape differs",
+        ));
+    }
+    SECURITY_TABLES
+        .iter()
+        .position(|name| *name == table)
+        .and_then(|index| snapshot.tables.get(index))
+        .map(Vec::as_slice)
+        .ok_or(StorageError::RecoveryClosed(
+            "security snapshot table is missing",
+        ))
+}
+
+fn validate_credential_history(
+    connection: &Connection,
+    latest: &Snapshot,
+) -> Result<(), StorageError> {
+    for (table, columns, immutable) in [("credentials", 9, 6), ("registration_receipts", 6, 6)] {
+        let audited = security_rows(latest, table)?;
+        if audited
+            .iter()
+            .any(|row| row.len() != columns || !matches!(row.first(), Some(Cell::Text(_))))
+        {
+            return Err(StorageError::RecoveryClosed(
+                "credential snapshot shape differs",
+            ));
+        }
+        let mut statement = connection.prepare(&format!("SELECT * FROM {table}"))?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let existing = (0..columns)
+                .map(|index| {
+                    Ok(match row.get::<_, Value>(index)? {
+                        Value::Null => Cell::Null,
+                        Value::Integer(value) => Cell::Integer(value),
+                        Value::Text(value) => Cell::Text(value),
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let matching = audited.iter().find(|candidate| candidate[0] == existing[0]);
+            if !matching.is_some_and(|candidate| candidate[..immutable] == existing[..immutable]) {
+                return Err(StorageError::RecoveryClosed(
+                    "credential or registration binding conflicts",
+                ));
+            }
+        }
+        // A digest or principal cannot acquire a second binding under another key.
+        for (index, row) in audited.iter().enumerate() {
+            if audited[..index].iter().any(|prior| {
+                prior[0] == row[0]
+                    || if table == "credentials" {
+                        prior[3] == row[3]
+                    } else {
+                        prior[1] == row[1] || prior[2] == row[2]
+                    }
+            }) {
+                return Err(StorageError::RecoveryClosed(
+                    "credential snapshot contains conflicting bindings",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_credential_history(
+    transaction: &Transaction<'_>,
+    latest: &Snapshot,
+) -> Result<(), StorageError> {
+    // Rotation successors need not sort after predecessors in snapshot order.
+    transaction.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
+    for row in security_rows(latest, "credentials")? {
+        let values = row.iter().map(Cell::value).collect::<Vec<_>>();
+        transaction.execute(
+            "INSERT INTO credentials(
+                id,principal_id,class,token_hash,created_at,expires_at,revoked_at,
+                replacement_credential_id,revocation_reason)
+             VALUES (?1,?2,?3,?4,?5,?6,coalesce(?7,strftime('%Y-%m-%dT%H:%M:%fZ','now')),?8,
+                CASE WHEN ?7 IS NULL THEN 'central restore' ELSE ?9 END)
+             ON CONFLICT(id) DO UPDATE SET revoked_at=excluded.revoked_at,
+                replacement_credential_id=excluded.replacement_credential_id,
+                revocation_reason=excluded.revocation_reason",
+            rusqlite::params_from_iter(values),
+        )?;
+    }
+    for row in security_rows(latest, "registration_receipts")? {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM registration_receipts WHERE token_hash=?)",
+            [row[0].value()],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            transaction.execute(
+                "INSERT INTO registration_receipts(
+                    token_hash,credential_id,principal_id,request_json,response_json,created_at)
+                 VALUES (?,?,?,?,?,?)",
+                rusqlite::params_from_iter(row.iter().map(Cell::value)),
+            )?;
+        }
     }
     Ok(())
 }
@@ -947,6 +1039,17 @@ fn restore_principal_names(
                 if stored_principal == *principal_id
                     && stored_kind == *kind
                     && stored_created == *created_at => {}
+            Some((stored_principal, stored_kind, stored_created))
+                if stored_principal == *principal_id
+                    && stored_kind == "current"
+                    && kind == "alias"
+                    && stored_created == *created_at =>
+            {
+                transaction.execute(
+                    "UPDATE principal_names SET kind='alias' WHERE name=?",
+                    [name],
+                )?;
+            }
             Some(_) => {
                 return Err(StorageError::RecoveryClosed(
                     "principal-name lineage conflicts",
@@ -968,27 +1071,6 @@ fn identifiers(connection: &Connection, sql: &str) -> Result<Vec<String>, Storag
         .prepare(sql)?
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?)
-}
-
-fn installation_inventory(audit: &Connection) -> Result<Vec<(String, String)>, StorageError> {
-    let mut inventory = std::collections::BTreeSet::new();
-    let mut statement = audit.prepare("SELECT snapshot FROM events ORDER BY revision")?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        let snapshot: Snapshot = serde_json::from_str(&row.get::<_, String>(0)?)?;
-        let installations = snapshot.tables.get(5).ok_or(StorageError::RecoveryClosed(
-            "installation inventory is malformed",
-        ))?;
-        for installation in installations {
-            let [Cell::Text(adapter), Cell::Text(instance), ..] = installation.as_slice() else {
-                return Err(StorageError::RecoveryClosed(
-                    "installation inventory is malformed",
-                ));
-            };
-            inventory.insert((adapter.clone(), instance.clone()));
-        }
-    }
-    Ok(inventory.into_iter().collect())
 }
 
 fn audit_connection(path: &Path) -> Result<Connection, StorageError> {
@@ -1155,31 +1237,15 @@ mod tests {
                      VALUES('principal','018f1f59-6e90-7000-8000-000000000001','current','2026-01-01T00:00:00Z');
                  INSERT INTO spaces VALUES ('s','Space','public','2026-01-01T00:00:00Z',NULL);
                  INSERT INTO memberships VALUES('s','018f1f59-6e90-7000-8000-000000000001',1,1,0,'2026-01-01T00:00:00Z');
-                 INSERT INTO adapter_identities VALUES('a','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
-                 INSERT INTO enrollment_installations VALUES('a','installation-example',0,'2026-01-01T00:00:00Z');
-                 INSERT INTO adapter_registrations VALUES('a','018f1f59-6e90-7000-8000-000000000001','installation-example',1,'active',
-                     '2026-01-01T00:00:00Z','2026-01-02T00:00:00Z','2026-01-01T00:00:00Z');
                  INSERT INTO credentials(id,principal_id,class,token_hash,created_at)
                      VALUES('c','018f1f59-6e90-7000-8000-000000000001','principal-client','fixture-digest','2026-01-01T00:00:00Z');
-                 INSERT INTO credentials(id,principal_id,class,token_hash,adapter_id,created_at,instance_id)
-                     VALUES('d','018f1f59-6e90-7000-8000-000000000001','delivery-adapter','fixture-delivery-digest','a','2026-01-01T00:00:00Z','installation-example');
-                 INSERT INTO enrollment_tickets(ticket_hash,principal_id,adapter_id,expires_at)
-                     VALUES(lower(hex(zeroblob(32))),'018f1f59-6e90-7000-8000-000000000001','a','2026-01-02T00:00:00Z');
                  INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
                      VALUES('r1','s',1,'018f1f59-6e90-7000-8000-000000000001','note','pending recovery','2026-01-01T00:00:00Z'),
-                           ('r2','s',2,'018f1f59-6e90-7000-8000-000000000001','note','retained custody','2026-01-01T00:00:00Z');
+                           ('r2','s',2,'018f1f59-6e90-7000-8000-000000000001','note','retained receipt','2026-01-01T00:00:00Z');
                  INSERT INTO attention VALUES('r1','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z'),('r2','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
                  INSERT INTO inbox_sequences VALUES ('018f1f59-6e90-7000-8000-000000000001',2);
-                 INSERT INTO mailbox_items VALUES('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,NULL),
-                     ('m2','r2','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',2,NULL);
-                 UPDATE mailbox_items SET state='claimed';
-                 UPDATE delivery_attempts SET state='claimed';
-                 INSERT INTO claims(id,adapter_id,principal_id,instance_id,generation,state,lease_expires_at,created_at,credential_id)
-                     VALUES('claim','a','018f1f59-6e90-7000-8000-000000000001','installation-example',1,'active','2026-01-02T00:00:00Z','2026-01-01T00:00:00Z','d');
-                 INSERT INTO claim_items VALUES('claim','m1','initial-m1'),('claim','m2','initial-m2');
-                 INSERT INTO host_custody VALUES('initial-m2','m2','claim','2026-01-01T00:00:00Z');
-                 UPDATE mailbox_items SET state='host-accepted' WHERE id='m2';
-                 UPDATE delivery_attempts SET state='host-accepted' WHERE attempt_id='initial-m2';"
+                 INSERT INTO mailbox_items VALUES('m1','r1','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z',1,NULL),
+                     ('m2','r2','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z',2,NULL);"
             ).unwrap();
     }
 
@@ -1520,9 +1586,7 @@ mod tests {
             &database,
             &audit,
             "UPDATE memberships SET can_read=0,can_append=0;
-                 UPDATE principals SET disabled_at='2026-01-02T00:00:00Z';
-                 UPDATE adapter_registrations SET generation=9,instance_id='replacement-example';
-                 UPDATE enrollment_installations SET instance_id='replacement-example';",
+                 UPDATE principals SET disabled_at='2026-01-02T00:00:00Z';",
         );
         let mut approval = audit
             .restore(
@@ -1535,33 +1599,30 @@ mod tests {
         assert!(audit.ensure_open(&restored).is_err());
         assert!(audit.reopen(&restored, &approval).is_err());
         let connection = restored.connect_unchecked().unwrap();
-        let state: (i64, i64, String, bool) = connection
+        let state: (i64, bool, bool) = connection
             .query_row(
-                "SELECT m.can_read,r.generation,r.status,c.revoked_at IS NOT NULL
-                 FROM memberships m,adapter_registrations r,credentials c",
+                "SELECT m.can_read,p.disabled_at IS NOT NULL,c.revoked_at IS NOT NULL
+                 FROM memberships m,principals p,credentials c",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(state, (0, 10, "revoked".to_owned(), true));
+        assert_eq!(state, (0, true, true));
         assert_eq!(
-            approval.reconciled_spools,
-            vec![
-                ("a".to_owned(), "installation-example".to_owned()),
-                ("a".to_owned(), "replacement-example".to_owned()),
-            ]
+            approval.reconciled_clients,
+            vec!["018f1f59-6e90-7000-8000-000000000001".to_owned()]
         );
-        let pending: String = connection
+        let pending: bool = connection
             .query_row(
-                "SELECT state FROM delivery_attempts WHERE attempt_id='initial-m1'",
+                "SELECT acknowledged_at IS NULL FROM mailbox_items WHERE id='m1'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(pending, "pending");
+        assert!(pending);
         let retained: i64 = connection
             .query_row(
-                "SELECT count(*) FROM host_custody WHERE attempt_id='initial-m2'",
+                "SELECT count(*) FROM mailbox_items WHERE id='m2'",
                 [],
                 |row| row.get(0),
             )
@@ -1572,7 +1633,7 @@ mod tests {
         approval.accepted_record_loss = true;
         approval.inventory_complete = true;
         let mut incomplete = approval.clone();
-        incomplete.reconciled_spools.clear();
+        incomplete.reconciled_clients.clear();
         assert!(audit.reopen(&restored, &incomplete).is_err());
         audit.reopen(&restored, &approval).unwrap();
         audit.ensure_open(&restored).unwrap();
@@ -1720,13 +1781,10 @@ mod tests {
                     );
                 }
                 let connection = database.connect_unchecked().unwrap();
-                let adapters = installation_inventory(&audit.connection().unwrap()).unwrap();
                 let forged = RecoveryApproval {
                     verification: database.recovery_verification_unguarded().unwrap(),
                     audit_revision: evidence.0,
                     previous_space_heads: before.space_heads,
-                    quiesced_adapters: adapters.clone(),
-                    reconciled_spools: adapters,
                     reconciled_clients: identifiers(
                         &connection,
                         "SELECT id FROM principals ORDER BY id",

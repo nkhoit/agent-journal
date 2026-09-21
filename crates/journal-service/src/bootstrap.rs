@@ -1,7 +1,7 @@
-//! Host-local provisioning and atomic, one-use enrollment.
+//! Principal registration, authentication and protected administration.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use journal_domain::{Principal, Space, default_limits};
 use journal_protocol::*;
@@ -12,10 +12,6 @@ use thiserror::Error;
 
 use crate::Clock;
 
-#[path = "custody.rs"]
-mod custody;
-#[path = "delivery.rs"]
-mod delivery;
 #[path = "inbox.rs"]
 mod inbox;
 #[path = "records.rs"]
@@ -83,8 +79,6 @@ pub struct AuthenticatedCredential {
     pub credential_id: String,
     pub principal_id: String,
     pub class: CredentialClass,
-    pub adapter_id: Option<String>,
-    pub instance_id: Option<String>,
 }
 
 pub type CredentialRotation = CredentialRotationResponse;
@@ -173,20 +167,14 @@ impl BootstrapService {
         &self,
     ) -> Result<journal_protocol::OperationalMetrics, BootstrapError> {
         let sampled_at = self.now()?;
-        let snapshot = self.database.operational_snapshot(&sampled_at)?;
+        let snapshot = self.database.operational_snapshot()?;
         let recovery = self.database.recovery_status()?;
         Ok(journal_protocol::OperationalMetrics {
             sampled_at,
             database_bytes: snapshot.database_bytes,
             wal_bytes: snapshot.wal_bytes,
-            pending_mailbox_count: snapshot.pending_mailbox_count,
-            oldest_pending_at: snapshot.oldest_pending_at,
-            outstanding_claims: snapshot.outstanding_claims,
-            expired_active_claims: snapshot.expired_active_claims,
-            expired_claims: snapshot.expired_claims,
-            oldest_active_heartbeat_at: snapshot.oldest_active_heartbeat_at,
-            stale_registrations_with_pending: snapshot.stale_registrations_with_pending,
-            runtime_failure_events: snapshot.runtime_failure_events,
+            unacknowledged_inbox_count: snapshot.unacknowledged_inbox_count,
+            oldest_unacknowledged_at: snapshot.oldest_unacknowledged_at,
             last_backup_at: recovery.last_backup_at,
             last_verified_restore_at: recovery.last_verified_restore_at,
         })
@@ -593,122 +581,6 @@ impl BootstrapService {
         })
     }
 
-    pub fn provision_adapter(
-        &self,
-        request: &AdapterProvisionRequest,
-    ) -> Result<AdapterProvisionResponse, BootstrapError> {
-        request.validate()?;
-        let principal_id = self.transaction(|tx| active_principal(tx, &request.principal_id))?;
-        self.transaction(|tx| {
-            tx.execute(
-                "INSERT INTO adapter_identities(adapter_id,principal_id,created_at) VALUES (?,?,?)",
-                params![request.adapter_id, principal_id, self.now()?],
-            )?;
-            Ok(())
-        })?;
-        Ok(AdapterProvisionResponse {
-            adapter_id: request.adapter_id.clone(),
-            principal_id,
-        })
-    }
-
-    pub fn create_ticket(
-        &self,
-        request: &EnrollmentTicketCreateRequest,
-    ) -> Result<EnrollmentTicketCreateResponse, BootstrapError> {
-        request.validate()?;
-        let ticket = self.secret()?;
-        let now = self.clock.now();
-        let expires_at = timestamp(
-            now.checked_add(Duration::from_secs(request.ttl_seconds))
-                .ok_or(BootstrapError::Clock)?,
-        )?;
-        let principal_id = self.transaction(|tx| {
-            let principal_id = active_principal(tx, &request.principal_id)?;
-            let matches: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM adapter_identities WHERE adapter_id=? AND principal_id=?)", params![request.adapter_id, principal_id], |r| r.get(0))?;
-            if !matches { return Err(BootstrapError::NotFound); }
-            let installation: Option<(String, bool)> = tx.query_row("SELECT instance_id,recovery_authorized FROM enrollment_installations WHERE adapter_id=?", [&request.adapter_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if matches!(&installation, Some((_, false))) { return Err(BootstrapError::Conflict); }
-            tx.execute("INSERT INTO enrollment_tickets(ticket_hash,principal_id,adapter_id,expires_at,instance_id) VALUES (?,?,?,?,?)",
-                params![digest(&ticket), principal_id, request.adapter_id, expires_at, installation.map(|i|i.0)])?;
-            Ok(principal_id)
-        })?;
-        Ok(EnrollmentTicketCreateResponse {
-            principal_id,
-            adapter_id: request.adapter_id.clone(),
-            expires_at,
-            enrollment_ticket: OneTimeEnrollmentTicket { ticket },
-        })
-    }
-
-    pub fn exchange(
-        &self,
-        ticket: &str,
-        request: &EnrollmentExchangeRequest,
-    ) -> Result<EnrollmentExchangeResponse, BootstrapError> {
-        request.validate()?;
-        if ticket.len() != 64 {
-            return Err(BootstrapError::Unauthorized);
-        }
-        self.transaction(|tx| {
-            let instant = self.clock.now();
-            let now = timestamp(instant)?;
-            let lease = timestamp(instant.checked_add(Duration::from_secs(60)).ok_or(BootstrapError::Clock)?)?;
-            let binding: Option<(String,String,Option<String>)> = tx.query_row(
-                "SELECT principal_id,adapter_id,instance_id FROM enrollment_tickets WHERE ticket_hash=? AND consumed_at IS NULL AND invalidated_at IS NULL AND julianday(expires_at)>julianday(?)",
-                params![digest(ticket),now], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            let (principal,adapter,bound_instance) = binding.ok_or(BootstrapError::Unauthorized)?;
-            self.checkpoint("ticket-lookup")?;
-            active_principal(tx, &principal).map_err(|error| match error {
-                BootstrapError::NotFound => BootstrapError::Unauthorized,
-                other => other,
-            })?;
-            if bound_instance.as_ref().is_some_and(|id| id != &request.instance_id) { return Err(BootstrapError::Conflict); }
-            let installation: Option<(String,bool)> = tx.query_row("SELECT instance_id,recovery_authorized FROM enrollment_installations WHERE adapter_id=?", [&adapter], |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if let Some((instance,recovery)) = &installation {
-                if instance != &request.instance_id || !recovery { return Err(BootstrapError::Conflict); }
-            }
-            let client = self.issue(tx, &principal, CredentialClass::PrincipalClient, &adapter, &request.instance_id, &now)?;
-            self.checkpoint("principal-credential")?;
-            let delivery = self.issue(tx, &principal, CredentialClass::DeliveryAdapter, &adapter, &request.instance_id, &now)?;
-            self.checkpoint("delivery-credential")?;
-            tx.execute("INSERT INTO enrollment_installations(adapter_id,instance_id,created_at) VALUES (?,?,?)
-                ON CONFLICT(adapter_id) DO UPDATE SET recovery_authorized=0", params![adapter,request.instance_id,now])?;
-            tx.execute("INSERT INTO adapter_registrations(adapter_id,principal_id,instance_id,generation,status,last_heartbeat_at,lease_expires_at,created_at)
-                VALUES (?,?,?,1,'active',?,?,?) ON CONFLICT(adapter_id) DO UPDATE SET
-                generation=generation+1,status='active',last_heartbeat_at=excluded.last_heartbeat_at,lease_expires_at=excluded.lease_expires_at",
-                params![adapter,principal,request.instance_id,now,lease,now])?;
-            self.checkpoint("registration")?;
-            tx.execute("UPDATE enrollment_tickets SET consumed_at=? WHERE ticket_hash=? AND consumed_at IS NULL", params![now,digest(ticket)])?;
-            tx.execute("UPDATE enrollment_tickets SET invalidated_at=? WHERE adapter_id=? AND consumed_at IS NULL AND invalidated_at IS NULL",params![now,adapter])?;
-            self.checkpoint("ticket-consumed")?;
-            let generation = tx.query_row("SELECT generation FROM adapter_registrations WHERE adapter_id=?", [&adapter], |r|r.get(0))?;
-            Ok(EnrollmentExchangeResponse { adapter_id:adapter, principal_id:principal, instance_id:request.instance_id.clone(), generation,
-                principal_client_secret:client, delivery_adapter_secret:OneTimeDeliveryAdapterSecret {credential_id:delivery.credential_id,secret:delivery.secret} })
-        })
-    }
-
-    fn issue(
-        &self,
-        tx: &Transaction<'_>,
-        principal: &str,
-        class: CredentialClass,
-        adapter: &str,
-        instance: &str,
-        now: &str,
-    ) -> Result<OneTimePrincipalClientSecret, BootstrapError> {
-        let credential_id = format!("cred-{}", self.secret()?);
-        let secret = self.secret()?;
-        let delivery_adapter = (class == CredentialClass::DeliveryAdapter).then_some(adapter);
-        tx.execute("INSERT INTO credentials(id,principal_id,class,token_hash,adapter_id,created_at,enrollment_adapter_id,instance_id) VALUES (?,?,?,?,?,?,?,?)",
-            params![credential_id,principal,class_name(class),digest(&secret),delivery_adapter,now,adapter,instance])?;
-        tx.execute("INSERT INTO credential_audit(credential_id,operation,occurred_at) VALUES (?,'issued',?)", params![credential_id,now])?;
-        Ok(OneTimePrincipalClientSecret {
-            credential_id,
-            secret,
-        })
-    }
-
     pub fn authenticate(
         &self,
         secret: &str,
@@ -719,11 +591,10 @@ impl BootstrapService {
         }
         let connection = self.database.connect_read_only()?;
         connection.query_row(
-            "SELECT c.id,c.principal_id,c.adapter_id,c.instance_id FROM credentials c JOIN principals p ON p.id=c.principal_id
+            "SELECT c.id,c.principal_id FROM credentials c JOIN principals p ON p.id=c.principal_id
              WHERE c.token_hash=? AND c.class=? AND c.revoked_at IS NULL AND p.disabled_at IS NULL
-             AND (c.expires_at IS NULL OR julianday(c.expires_at)>julianday(?))
-             AND (c.class='principal-client' OR EXISTS(SELECT 1 FROM adapter_registrations r WHERE r.adapter_id=c.adapter_id AND r.instance_id=c.instance_id AND r.status='active'))",
-            params![digest(secret),class_name(class),self.now()?], |r|Ok(AuthenticatedCredential {credential_id:r.get(0)?,principal_id:r.get(1)?,class,adapter_id:r.get(2)?,instance_id:r.get(3)?}))
+             AND (c.expires_at IS NULL OR julianday(c.expires_at)>julianday(?))",
+            params![digest(secret),class_name(class),self.now()?], |r|Ok(AuthenticatedCredential {credential_id:r.get(0)?,principal_id:r.get(1)?,class}))
             .optional()?.ok_or(BootstrapError::Unauthorized)
     }
 
@@ -740,7 +611,7 @@ impl BootstrapService {
         let connection = self.database.connect_read_only()?;
         connection
             .query_row(
-                "SELECT id,principal_id,adapter_id,instance_id FROM credentials
+                "SELECT id,principal_id FROM credentials
                  WHERE token_hash=? AND class='principal-client' AND revoked_at IS NULL
                  AND (expires_at IS NULL OR julianday(expires_at)>julianday(?))",
                 params![digest(secret), self.now()?],
@@ -749,8 +620,6 @@ impl BootstrapService {
                         credential_id: row.get(0)?,
                         principal_id: row.get(1)?,
                         class: CredentialClass::PrincipalClient,
-                        adapter_id: row.get(2)?,
-                        instance_id: row.get(3)?,
                     })
                 },
             )
@@ -765,13 +634,13 @@ impl BootstrapService {
         request.validate()?;
         let now = self.now()?;
         self.transaction(|tx| {
-            let row:Option<(String,String,String,String,Option<String>)> = tx.query_row("SELECT principal_id,class,enrollment_adapter_id,instance_id,expires_at FROM credentials
+            let row:Option<(String,String,Option<String>)> = tx.query_row("SELECT principal_id,class,expires_at FROM credentials
                 WHERE id=? AND revoked_at IS NULL AND (expires_at IS NULL OR julianday(expires_at)>julianday(?))",
-                params![request.credential_id,now], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-            let (principal,class,adapter,instance,expires_at) = row.ok_or(BootstrapError::NotFound)?;
+                params![request.credential_id,now], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            let (principal,class,expires_at) = row.ok_or(BootstrapError::NotFound)?;
             active_principal(tx,&principal)?;
             let class=parse_class(&class)?;
-            let replacement = self.issue(tx,&principal,class,&adapter,&instance,&now)?;
+            let replacement = self.issue_principal(tx,&principal,&now)?;
             tx.execute("UPDATE credentials SET expires_at=? WHERE id=?", params![expires_at,replacement.credential_id])?;
             self.checkpoint("rotation-issued")?;
             tx.execute("UPDATE credentials SET revoked_at=?,replacement_credential_id=?,revocation_reason=? WHERE id=?",
@@ -805,36 +674,6 @@ impl BootstrapService {
         })
     }
 
-    pub fn recover(
-        &self,
-        adapter_id: &str,
-        instance_id: &str,
-    ) -> Result<AdapterProvisionResponse, BootstrapError> {
-        AdapterPath {
-            adapter_id: adapter_id.into(),
-        }
-        .validate()?;
-        EnrollmentExchangeRequest {
-            instance_id: instance_id.into(),
-        }
-        .validate()?;
-        let now = self.now()?;
-        self.transaction(|tx| {
-            let principal:Option<String> = tx.query_row("SELECT a.principal_id FROM adapter_identities a JOIN enrollment_installations i ON i.adapter_id=a.adapter_id WHERE a.adapter_id=? AND i.instance_id=?",params![adapter_id,instance_id],|r|r.get(0)).optional()?;
-            let principal=principal.ok_or(BootstrapError::NotFound)?;
-            // Recovery revokes the whole enrollment lineage, including rotated replacements.
-            tx.execute("INSERT INTO credential_audit(credential_id,operation,occurred_at) SELECT id,'recovered',? FROM credentials WHERE enrollment_adapter_id=? AND instance_id=? AND revoked_at IS NULL",params![now,adapter_id,instance_id])?;
-            tx.execute("UPDATE credentials SET revoked_at=?,revocation_reason='enrollment recovery' WHERE enrollment_adapter_id=? AND instance_id=? AND revoked_at IS NULL",params![now,adapter_id,instance_id])?;
-            self.checkpoint("recovery-revoked")?;
-            delivery::close_claims(tx, adapter_id, &now, true)?;
-            tx.execute("UPDATE adapter_registrations SET status='revoked' WHERE adapter_id=? AND instance_id=?",params![adapter_id,instance_id])?;
-            tx.execute("UPDATE enrollment_tickets SET invalidated_at=? WHERE adapter_id=? AND consumed_at IS NULL AND invalidated_at IS NULL",params![now,adapter_id])?;
-            tx.execute("UPDATE enrollment_installations SET recovery_authorized=1 WHERE adapter_id=? AND instance_id=?",params![adapter_id,instance_id])?;
-            self.checkpoint("recovery-authorized")?;
-            Ok(AdapterProvisionResponse {adapter_id:adapter_id.into(),principal_id:principal})
-        })
-    }
-
     pub fn recover_principal(
         &self,
         request: &PrincipalRecoveryRequest,
@@ -863,29 +702,6 @@ impl BootstrapService {
                 params![now, request.reason, request.principal_id, now],
             )?;
             self.checkpoint("principal-recovery-revoked")?;
-            tx.execute(
-                "UPDATE enrollment_tickets SET invalidated_at=?
-                 WHERE principal_id=? AND consumed_at IS NULL AND invalidated_at IS NULL",
-                params![now, request.principal_id],
-            )?;
-            tx.execute(
-                "UPDATE enrollment_installations SET recovery_authorized=0
-                 WHERE adapter_id IN (
-                    SELECT adapter_id FROM adapter_identities WHERE principal_id=?
-                 )",
-                [&request.principal_id],
-            )?;
-            let mut adapters = tx.prepare(
-                "SELECT adapter_id FROM adapter_identities WHERE principal_id=? ORDER BY adapter_id",
-            )?;
-            let adapter_ids = adapters
-                .query_map([&request.principal_id], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(adapters);
-            for adapter_id in adapter_ids {
-                delivery::close_claims(tx, &adapter_id, &now, true)?;
-            }
-            self.checkpoint("principal-recovery-authority")?;
             let replacement = self.issue_principal(tx, &request.principal_id, &now)?;
             self.checkpoint("principal-recovery-issued")?;
             tx.execute(
@@ -998,13 +814,11 @@ fn principal_descriptor(
 fn class_name(class: CredentialClass) -> &'static str {
     match class {
         CredentialClass::PrincipalClient => "principal-client",
-        CredentialClass::DeliveryAdapter => "delivery-adapter",
     }
 }
 fn parse_class(class: &str) -> Result<CredentialClass, BootstrapError> {
     match class {
         "principal-client" => Ok(CredentialClass::PrincipalClient),
-        "delivery-adapter" => Ok(CredentialClass::DeliveryAdapter),
         _ => Err(BootstrapError::Unauthorized),
     }
 }

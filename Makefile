@@ -5,7 +5,7 @@ PYTHON_NO_BYTECODE = PYTHONDONTWRITEBYTECODE=1 $(PYTHON)
 OPENAPI_FILE := api/openapi.yaml
 OPENAPI_STANDARDS_LINT ?= 0
 
-.PHONY: all build fmt fmt-check test migration-test contract-test bootstrap-test records-test delivery-test recovery-test adapter-conformance browser-security foreign-uid-test clippy openapi-check redocly-check markdown-check hygiene-check check
+.PHONY: all build fmt fmt-check test migration-test contract-test bootstrap-test records-test inbox-test recovery-test inbox-client-conformance browser-security foreign-uid-test clippy openapi-check redocly-check markdown-check hygiene-check check
 
 all: check
 
@@ -23,6 +23,7 @@ test:
 
 migration-test:
 	$(PYTHON_NO_BYTECODE) tests/migration_contract_test.py
+	$(PYTHON_NO_BYTECODE) tests/delivery_retirement_test.py
 
 contract-test:
 	$(PYTHON_NO_BYTECODE) -m unittest tests/contract_gate_test.py
@@ -33,15 +34,15 @@ bootstrap-test: build
 records-test: build
 	$(PYTHON_NO_BYTECODE) tests/s5_records_test.py
 
-delivery-test: build
-	$(PYTHON_NO_BYTECODE) tests/s7_delivery_test.py
+inbox-test: build
+	$(PYTHON_NO_BYTECODE) -m unittest tests.s4_bootstrap_test.BootstrapTest.test_registered_principal_inbox_cli_without_adapter
 
 recovery-test: build
 	$(PYTHON_NO_BYTECODE) tests/recovery_cli_test.py
 
-adapter-conformance:
-	$(PYTHON_NO_BYTECODE) scripts/test_adapter_conformance.py
-	$(PYTHON_NO_BYTECODE) scripts/adapter_conformance.py
+inbox-client-conformance:
+	$(PYTHON_NO_BYTECODE) scripts/test_inbox_client_conformance.py
+	CARGO="$(CARGO)" $(PYTHON_NO_BYTECODE) scripts/inbox_client_conformance.py
 
 browser-security:
 	$(CARGO) build --locked -p journald --example web_fixture
@@ -70,4 +71,4 @@ markdown-check:
 hygiene-check:
 	$(PYTHON_NO_BYTECODE) scripts/public_hygiene.py
 
-check: fmt-check test clippy build migration-test contract-test bootstrap-test records-test delivery-test recovery-test adapter-conformance openapi-check redocly-check markdown-check hygiene-check
+check: fmt-check test clippy build migration-test contract-test bootstrap-test records-test inbox-test recovery-test inbox-client-conformance openapi-check redocly-check markdown-check hygiene-check

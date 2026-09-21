@@ -12,10 +12,13 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
     let db = Database::open(directory.join("journal.db")).unwrap();
     let service = BootstrapService::new(db.clone());
     service
-        .create_principal(&PrincipalCreateRequest {
-            handle: "writer".into(),
-            display_name: "Writer".into(),
-        })
+        .register(
+            &"a".repeat(64),
+            &RegistrationRequest {
+                handle: "writer".into(),
+                display_name: "Writer".into(),
+            },
+        )
         .unwrap();
     service
         .create_space(&SpaceCreateRequest {
@@ -33,33 +36,13 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
             can_admin: false,
         })
         .unwrap();
-    service
-        .provision_adapter(&AdapterProvisionRequest {
-            principal_id: "writer".into(),
-            adapter_id: "adapter".into(),
-        })
-        .unwrap();
-    let ticket = service
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: "writer".into(),
-            adapter_id: "adapter".into(),
-            ttl_seconds: 900,
-        })
-        .unwrap();
-    let enrolled = service
-        .exchange(
-            &ticket.enrollment_ticket.ticket,
-            &EnrollmentExchangeRequest {
-                instance_id: "installation".into(),
-            },
-        )
-        .unwrap();
+    let principal_token = "a".repeat(64);
     let barrier = Arc::new(Barrier::new(8));
     let results = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 let barrier = barrier.clone();
-                let token = &enrolled.principal_client_secret.secret;
+                let token = &principal_token;
                 let service = &service;
                 scope.spawn(move || {
                     let input =
@@ -79,13 +62,7 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
     });
     assert!(results.iter().all(|result| result == &results[0]));
     let connection = db.connect().unwrap();
-    for table in [
-        "records",
-        "attention",
-        "mailbox_items",
-        "delivery_attempts",
-        "idempotency_keys",
-    ] {
+    for table in ["records", "attention", "mailbox_items", "idempotency_keys"] {
         let count: i64 = connection
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap();

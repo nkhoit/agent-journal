@@ -2,9 +2,9 @@
 
 ## Scope and current status
 
-Agent Journal is a public Rust implementation with a functioning `journald` service, authenticated `aj` client, protected `aj-admin` administration, generic adapter-delivery boundaries, and an executable Hermes Runs API adapter. Muse remains an explicit status-2 stub, and production deployment/runtime acceptance is unresolved. Do not send credentials, enrollment tickets, private topology, production logs, or sensitive journal content in an issue.
+Agent Journal implements independent principal registration, immutable records, durable inbox receipts, protected local administration and optional Hermes/Muse inbox clients. Production deployment, vendor durability and hook processing require separate evidence. Do not send credentials, private topology, production logs or sensitive journal content in an issue.
 
-The implemented security boundary is documented in [`docs/security-model.md`](docs/security-model.md): separate principal-client and delivery-adapter credentials, default-deny space ACLs, protected local admin socket, immutable records, and explicit untrusted-content handling. The repository's Unix, recovery, browser, and adapter-conformance gates exercise these controls; passing them is not a production deployment or vendor-runtime claim.
+The [security model](docs/security-model.md) documents principal credentials, explicit authenticated public-space policy, protected local administration, immutable records, recipient-only acknowledgment and untrusted-content handling. Unix, recovery, browser and inbox-client conformance exercise these controls; passing them is not a production deployment or model-processing claim.
 
 ## Reporting a vulnerability
 
@@ -19,11 +19,11 @@ A maintainer should acknowledge reports within seven days and will coordinate di
 
 ## Safe development rules
 
-- Never commit credentials, token hashes, enrollment tickets, real URLs/hosts/IPs, runtime session IDs, spool databases, or private traces.
+- Never commit credentials, token hashes, real URLs/hosts/IPs, runtime targets, databases, drop payloads or private traces.
 - Treat journal bodies, Markdown, URLs, and runtime metadata as untrusted data.
 - Keep admin mutations on the protected local Unix socket; do not add a remote admin-token fallback without a reviewed security change.
-- Use separate credentials for principal API access and adapter delivery.
-- Preserve honest delivery states; never represent runtime acceptance as model observation or completion.
+- Optional workers hold ordinary principal authority; do not imply a reduced delivery-only scope.
+- Preserve honest receipt semantics; never represent acknowledgment or runtime handoff as observation or completion.
 - Add an authorization and redaction test for every new endpoint or output field.
 - Keep `Cargo.lock` reviewed and dependencies pinned; do not add network-only local gates that are not exercised by the implementation.
 

@@ -12,7 +12,6 @@ pub use canonical::{CanonicalizationError, canonical_append};
 pub use cursor::{CursorCodec, CursorError, CursorOrder, CursorPosition, CursorRoute, CursorScope};
 pub use dto::*;
 pub use journal_domain as domain;
-pub use journal_domain::{DeliveryState, TelemetryState};
 pub use json::{decode_json, encode_json};
 pub use query::*;
 
@@ -97,56 +96,5 @@ mod tests {
             .headers
             .insert("X-Request-ID".into(), "request-1".into());
         assert_eq!(response.headers["X-Request-ID"], "request-1");
-    }
-
-    #[test]
-    fn claim_request_defaults_wait_and_rejects_null_or_unknown_fields() {
-        let request: ClaimRequest =
-            decode_json(br#"{"instance_id":"instance-1","generation":1,"limit":20}"#)
-                .expect("claim request");
-        assert_eq!(request.wait_seconds, 0);
-        assert!(request.validate().is_ok());
-
-        assert!(
-            decode_json::<ClaimRequest>(
-                br#"{"instance_id":"instance-1","generation":1,"limit":20,"wait_seconds":null}"#,
-            )
-            .is_err()
-        );
-        assert!(
-            decode_json::<ClaimRequest>(
-                br#"{"instance_id":"instance-1","generation":1,"limit":20,"extra":true}"#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn delivery_event_body_contains_only_wire_fields() {
-        let request = DeliveryEventRequest {
-            event_id: "event-1".into(),
-            attempt_id: "attempt-1".into(),
-            generation: 1,
-            occurred_at: "2026-01-01T00:00:00Z".into(),
-            state: TelemetryState::RouteUnavailable,
-            detail: BTreeMap::new(),
-        };
-        let value = serde_json::to_value(&request).expect("event request");
-        assert_eq!(value["state"], "route-unavailable");
-        assert!(value.get("mailbox_item_id").is_none());
-        assert!(value.get("adapter_id").is_none());
-        assert!(
-            decode_json::<DeliveryEventRequest>(
-                br#"{
-                    "event_id":"event-1",
-                    "attempt_id":"attempt-1",
-                    "generation":1,
-                    "occurred_at":"2026-01-01T00:00:00Z",
-                    "state":"route-unavailable",
-                    "mailbox_item_id":"not-a-wire-field"
-                }"#,
-            )
-            .is_err()
-        );
     }
 }

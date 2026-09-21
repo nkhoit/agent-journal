@@ -20,10 +20,6 @@ use crate::executor::{BlockingError, BlockingExecutor};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
-#[path = "delivery.rs"]
-mod delivery;
-use delivery::*;
-
 #[path = "web.rs"]
 mod web;
 pub use web::web_router;
@@ -33,14 +29,12 @@ pub(crate) use web::web_router_with_timeout;
 #[derive(Debug, Clone)]
 pub struct ServiceState {
     blocking: BlockingExecutor,
-    mailbox_changes: watch::Sender<u64>,
 }
 
 impl ServiceState {
     pub fn new(database: Database, blocking_limit: usize) -> Result<Self, BlockingError> {
         Ok(Self {
             blocking: BlockingExecutor::new(database, blocking_limit)?,
-            mailbox_changes: watch::channel(0).0,
         })
     }
 
@@ -161,14 +155,7 @@ async fn bootstrap_result<T: Send + 'static>(
         })
         .await
     {
-        Ok(Ok(value)) => {
-            if mutation {
-                state
-                    .mailbox_changes
-                    .send_modify(|version| *version = version.wrapping_add(1));
-            }
-            Ok(value)
-        }
+        Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => {
             let (status, code, message) = match error {
                 BootstrapError::Invalid(_) | BootstrapError::InvalidJournal => (
@@ -373,18 +360,6 @@ admin_handler!(
     |s: BootstrapService, r| s.set_membership(&r)
 );
 admin_handler!(
-    provision_adapter,
-    journal_protocol::AdapterProvisionRequest,
-    CREATED,
-    |s: BootstrapService, r| s.provision_adapter(&r)
-);
-admin_handler!(
-    create_ticket,
-    journal_protocol::EnrollmentTicketCreateRequest,
-    CREATED,
-    |s: BootstrapService, r| s.create_ticket(&r)
-);
-admin_handler!(
     rotate,
     journal_protocol::CredentialRotateRequest,
     OK,
@@ -396,13 +371,6 @@ admin_handler!(
     NO_CONTENT,
     |s: BootstrapService, r: journal_protocol::CredentialRevokeRequest| s
         .revoke(&r.credential_id, r.reason.as_deref())
-);
-admin_handler!(
-    recover,
-    journal_protocol::EnrollmentRecoveryRequest,
-    NO_CONTENT,
-    |s: BootstrapService, r: journal_protocol::EnrollmentRecoveryRequest| s
-        .recover(&r.adapter_id, &r.instance_id)
 );
 admin_handler!(
     recover_principal,
@@ -478,41 +446,6 @@ async fn register_principal(
         ),
         Err(response) => response,
     }
-}
-
-async fn exchange(
-    State(state): State<ServiceState>,
-    Extension(request_id): Extension<RequestId>,
-    headers: axum::http::HeaderMap,
-    request: Request<Body>,
-) -> Response {
-    let Some(ticket) = bearer(&headers) else {
-        malformed_bearer(&request_id);
-        return error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "invalid or expired credential",
-            request_id,
-        );
-    };
-    let Ok(input) = strict_request::<journal_protocol::EnrollmentExchangeRequest>(request).await
-    else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid-request",
-            "invalid request",
-            request_id,
-        );
-    };
-    bootstrap(
-        state,
-        request_id,
-        StatusCode::OK,
-        "enrollment_exchange",
-        true,
-        move |s| s.exchange(&ticket, &input),
-    )
-    .await
 }
 
 async fn me(
@@ -821,7 +754,6 @@ pub(crate) fn public_router_with_timeout(
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/v1/registrations", post(register_principal))
-        .route("/v1/enrollment/exchange", post(exchange))
         .route("/v1/me", get(me))
         .route("/v1/me/profile", patch(update_profile))
         .route("/v1/principals", get(journal_operation))
@@ -840,15 +772,6 @@ pub(crate) fn public_router_with_timeout(
             "/v1/records/{record_id}/delivery-status",
             get(journal_operation),
         )
-        .route("/v1/adapters/self/register", post(register_adapter))
-        .route("/v1/adapters/self/heartbeat", post(heartbeat_adapter))
-        .route("/v1/mailbox/claims", post(claim_mailbox))
-        .route("/v1/claims/{claim_id}/commit", post(commit_custody))
-        .route(
-            "/v1/mailbox-items/{item_id}/events",
-            post(record_delivery_event),
-        )
-        .route("/v1/mailbox/status", get(mailbox_status))
         .fallback(unimplemented_route)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(Extension(shutdown.clone()))
@@ -880,27 +803,9 @@ pub(crate) fn admin_router_with_timeout(
         .route("/v1/admin/principals", post(create_principal))
         .route("/v1/admin/spaces", post(create_space))
         .route("/v1/admin/memberships", post(set_membership))
-        .route(
-            "/v1/admin/adapters",
-            post(provision_adapter).get(list_adapters),
-        )
-        .route("/v1/admin/enrollment-tickets", post(create_ticket))
         .route("/v1/admin/credentials/rotate", post(rotate))
         .route("/v1/admin/credentials/revoke", post(revoke))
-        .route("/v1/admin/enrollment/recover", post(recover))
         .route("/v1/admin/principals/recover", post(recover_principal))
-        .route(
-            "/v1/admin/adapters/{adapter_id}/replace",
-            post(replace_adapter),
-        )
-        .route(
-            "/v1/admin/mailboxes/{principal}/status",
-            get(admin_mailbox_status),
-        )
-        .route(
-            "/v1/admin/mailbox-items/{item_id}/requeue",
-            post(requeue_mailbox_item),
-        )
         .route_layer(middleware::from_fn(require_local_peer))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -1179,7 +1084,7 @@ mod peer_tests {
                 let metrics: journal_protocol::OperationalMetrics =
                     serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
                         .unwrap();
-                assert_eq!(metrics.pending_mailbox_count, 0);
+                assert_eq!(metrics.unacknowledged_inbox_count, 0);
                 assert!(metrics.last_backup_at.is_none());
             }
         }
@@ -1252,12 +1157,6 @@ mod peer_tests {
                 "application/json",
                 r#"["space","principal",true,true,false]"#,
             ),
-            ("adapters", "application/json", r#"["adapter","principal"]"#),
-            (
-                "enrollment-tickets",
-                "application/json",
-                r#"["principal","adapter",60]"#,
-            ),
             (
                 "credentials/rotate",
                 "application/json",
@@ -1269,9 +1168,9 @@ mod peer_tests {
                 r#"["credential","reason"]"#,
             ),
             (
-                "enrollment/recover",
+                "principals/recover",
                 "application/json",
-                r#"["adapter","installation"]"#,
+                r#"["018f1f59-6e90-7000-8000-000000000001","reason"]"#,
             ),
             (
                 "principals",
@@ -1305,14 +1204,7 @@ mod peer_tests {
                     .unwrap();
             assert!(body["error"]["request_id"].is_string());
         }
-        for table in [
-            "principals",
-            "spaces",
-            "memberships",
-            "adapter_identities",
-            "enrollment_tickets",
-            "credentials",
-        ] {
+        for table in ["principals", "spaces", "memberships", "credentials"] {
             let count: i64 = database
                 .connect()
                 .unwrap()

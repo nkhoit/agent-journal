@@ -1,0 +1,19 @@
+fixture_version: 1
+cases:
+  - envelope-boundary
+  - handoff-before-ack
+  - muse-real-journal
+  - route-and-runtime-failure
+  - lost-ack-response
+  - inaccessible-after-handoff
+  - bounded-fair-traversal
+  - central-backoff
+  - runtime-backoff
+  - credential-and-page-boundary
+  - hermes-stable-dedupe
+  - hermes-capabilities
+  - muse-durable-replay
+  - muse-publication-crash
+  - muse-conflict
+  - muse-unsafe-replay
+  - ambiguous-acceptance-restart

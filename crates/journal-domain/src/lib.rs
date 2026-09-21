@@ -1,7 +1,5 @@
 //! Runtime-neutral journal domain types, limits, and validation.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Deserializer, Serialize, de, de::Visitor};
 use thiserror::Error;
 
@@ -9,11 +7,6 @@ pub const MAX_CONTENT_BYTES: usize = 64 * 1024;
 pub const MAX_RELATIONS: usize = 32;
 pub const MAX_ATTENTION_RECIPIENTS: usize = 16;
 pub const MAX_PAGE_SIZE: usize = 100;
-pub const MAX_CLAIM_BATCH: usize = 20;
-pub const MAX_LONG_POLL_SECONDS: u64 = 30;
-pub const MAX_TELEMETRY_DETAIL_BYTES: usize = 4096;
-pub const MAX_TELEMETRY_PROPERTIES: usize = 32;
-pub const MAX_TELEMETRY_VALUE_CHARS: usize = 1024;
 pub const MAX_IDENTIFIER_CHARS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,38 +142,12 @@ pub struct AppendResult {
     pub replayed: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DeliveryState {
-    Published,
-    Pending,
-    Claimed,
-    HostAccepted,
-    AdapterReportedRuntimeAccepted,
-    AdapterReportedRetryableFailure,
-    RouteUnavailable,
-    AdapterReportedTerminalFailure,
-    SuppressedRevoked,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryState {
-    AdapterReportedRuntimeAccepted,
-    AdapterReportedRetryableFailure,
-    RouteUnavailable,
-    AdapterReportedTerminalFailure,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
     pub content_bytes: usize,
     pub relations: usize,
     pub attention_recipients: usize,
     pub page_size: usize,
-    pub claim_batch: usize,
-    pub long_poll_seconds: u64,
-    pub telemetry_detail_serialized_utf8_bytes: usize,
 }
 
 pub fn default_limits() -> Limits {
@@ -189,9 +156,6 @@ pub fn default_limits() -> Limits {
         relations: MAX_RELATIONS,
         attention_recipients: MAX_ATTENTION_RECIPIENTS,
         page_size: MAX_PAGE_SIZE,
-        claim_batch: MAX_CLAIM_BATCH,
-        long_poll_seconds: MAX_LONG_POLL_SECONDS,
-        telemetry_detail_serialized_utf8_bytes: MAX_TELEMETRY_DETAIL_BYTES,
     }
 }
 
@@ -211,22 +175,8 @@ pub enum ValidationError {
     DuplicateAttention { principal: String },
     #[error("relations: at most one {relation_type:?} relation is allowed")]
     MultipleReplyTo { relation_type: RelationType },
-    #[error("detail: exceeds {max} properties")]
-    TooManyTelemetryProperties { max: usize },
-    #[error("detail value {key:?}: exceeds {max} characters")]
-    TelemetryValueTooLong { key: String, max: usize },
-    #[error("detail: serialize: {source}")]
-    TelemetrySerialization { source: serde_json::Error },
-    #[error("detail: serialized JSON exceeds {max} UTF-8 bytes")]
-    TelemetryDetailTooLarge { max: usize },
     #[error("limit: must be between 1 and {max}")]
     InvalidPageSize { max: usize },
-    #[error("claim limit: must be between 1 and {max}")]
-    InvalidClaimLimit { max: usize },
-    #[error("wait_seconds: must be between 0 and {max}")]
-    InvalidLongPoll { max: u64 },
-    #[error("generation: must be at least 1")]
-    InvalidGeneration,
 }
 
 impl RecordInput {
@@ -282,63 +232,9 @@ impl RecordInput {
     }
 }
 
-pub type TelemetryDetail = BTreeMap<String, String>;
-
-/// Validate both structured limits and the normative compact serialized JSON
-/// UTF-8 byte limit. BTreeMap keeps the measured representation deterministic.
-pub fn validate_telemetry_detail(detail: &TelemetryDetail) -> Result<(), ValidationError> {
-    if detail.len() > MAX_TELEMETRY_PROPERTIES {
-        return Err(ValidationError::TooManyTelemetryProperties {
-            max: MAX_TELEMETRY_PROPERTIES,
-        });
-    }
-    for (key, value) in detail {
-        validate_identifier("detail key", key)?;
-        if value.chars().count() > MAX_TELEMETRY_VALUE_CHARS {
-            return Err(ValidationError::TelemetryValueTooLong {
-                key: key.clone(),
-                max: MAX_TELEMETRY_VALUE_CHARS,
-            });
-        }
-    }
-    let serialized = serde_json::to_vec(detail)
-        .map_err(|source| ValidationError::TelemetrySerialization { source })?;
-    if serialized.len() > MAX_TELEMETRY_DETAIL_BYTES {
-        return Err(ValidationError::TelemetryDetailTooLarge {
-            max: MAX_TELEMETRY_DETAIL_BYTES,
-        });
-    }
-    Ok(())
-}
-
 pub fn validate_page_size(size: usize) -> Result<(), ValidationError> {
     if !(1..=MAX_PAGE_SIZE).contains(&size) {
         return Err(ValidationError::InvalidPageSize { max: MAX_PAGE_SIZE });
-    }
-    Ok(())
-}
-
-pub fn validate_claim_limit(limit: usize) -> Result<(), ValidationError> {
-    if !(1..=MAX_CLAIM_BATCH).contains(&limit) {
-        return Err(ValidationError::InvalidClaimLimit {
-            max: MAX_CLAIM_BATCH,
-        });
-    }
-    Ok(())
-}
-
-pub fn validate_long_poll_seconds(seconds: u64) -> Result<(), ValidationError> {
-    if seconds > MAX_LONG_POLL_SECONDS {
-        return Err(ValidationError::InvalidLongPoll {
-            max: MAX_LONG_POLL_SECONDS,
-        });
-    }
-    Ok(())
-}
-
-pub fn validate_generation(generation: i64) -> Result<(), ValidationError> {
-    if generation < 1 {
-        return Err(ValidationError::InvalidGeneration);
     }
     Ok(())
 }
@@ -495,59 +391,10 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_detail_uses_serialized_utf8_byte_limit() {
-        let base = "界".repeat(MAX_TELEMETRY_VALUE_CHARS);
-        let mut largest = None;
-        let mut oversized = None;
-        for padding_length in 0.. {
-            let mut candidate = TelemetryDetail::new();
-            candidate.insert("base".into(), base.clone());
-            candidate.insert("padding".into(), "a".repeat(padding_length));
-            if validate_telemetry_detail(&candidate).is_err() {
-                oversized = Some(candidate);
-                break;
-            }
-            largest = Some(candidate);
-        }
-        assert!(largest.is_some() && oversized.is_some());
-        assert!(validate_telemetry_detail(&largest.expect("largest")).is_ok());
-        let error = validate_telemetry_detail(&oversized.expect("oversized")).expect_err("limit");
-        assert!(error.to_string().contains("4096 UTF-8 bytes"));
-    }
-
-    #[test]
     fn validates_page_size_boundaries() {
         assert!(validate_page_size(0).is_err());
         assert!(validate_page_size(MAX_PAGE_SIZE + 1).is_err());
         assert!(validate_page_size(MAX_PAGE_SIZE).is_ok());
-        assert!(validate_claim_limit(0).is_err());
-        assert!(validate_claim_limit(MAX_CLAIM_BATCH).is_ok());
-        assert!(validate_long_poll_seconds(MAX_LONG_POLL_SECONDS + 1).is_err());
-        assert!(validate_long_poll_seconds(MAX_LONG_POLL_SECONDS).is_ok());
-        assert!(validate_generation(0).is_err());
-        assert!(validate_generation(1).is_ok());
-    }
-
-    #[test]
-    fn telemetry_states_match_the_wire_contract() {
-        let cases = [
-            (
-                TelemetryState::AdapterReportedRuntimeAccepted,
-                "\"adapter-reported-runtime-accepted\"",
-            ),
-            (
-                TelemetryState::AdapterReportedRetryableFailure,
-                "\"adapter-reported-retryable-failure\"",
-            ),
-            (TelemetryState::RouteUnavailable, "\"route-unavailable\""),
-            (
-                TelemetryState::AdapterReportedTerminalFailure,
-                "\"adapter-reported-terminal-failure\"",
-            ),
-        ];
-        for (state, expected) in cases {
-            assert_eq!(serde_json::to_string(&state).expect("serialize"), expected);
-        }
     }
 
     #[test]

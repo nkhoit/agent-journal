@@ -107,9 +107,9 @@ fn operational_snapshot_tracks_pending_rows_and_wal_without_checkpointing() {
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM records;")
         .unwrap();
-    let before = database.operational_snapshot(NOW).unwrap();
-    assert_eq!(before.pending_mailbox_count, 0);
-    assert_eq!(before.oldest_pending_at, None);
+    let before = database.operational_snapshot().unwrap();
+    assert_eq!(before.unacknowledged_inbox_count, 0);
+    assert_eq!(before.oldest_unacknowledged_at, None);
     for sequence in 1..=20 {
         insert_record(
             &writer,
@@ -124,19 +124,27 @@ fn operational_snapshot_tracks_pending_rows_and_wal_without_checkpointing() {
             [],
         )
         .unwrap();
-    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at,recipient_seq) VALUES ('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending',?1,?1,1)", [NOW]).unwrap();
-    let after = database.operational_snapshot(NOW).unwrap();
-    assert_eq!(after.pending_mailbox_count, 1);
-    assert_eq!(after.oldest_pending_at.as_deref(), Some(NOW));
+    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,created_at,recipient_seq) VALUES ('m1','r1','018f1f59-6e90-7000-8000-000000000001',?1,1)", [NOW]).unwrap();
+    let after = database.operational_snapshot().unwrap();
+    assert_eq!(after.unacknowledged_inbox_count, 1);
+    assert_eq!(after.oldest_unacknowledged_at.as_deref(), Some(NOW));
     assert!(after.database_bytes > 0);
     assert!(after.wal_bytes > before.wal_bytes);
-    assert_eq!(after.runtime_failure_events, 0);
-    assert_eq!(after.oldest_active_heartbeat_at, None);
+    writer
+        .execute("UPDATE mailbox_items SET acknowledged_at=?1", [NOW])
+        .unwrap();
+    assert_eq!(
+        database
+            .operational_snapshot()
+            .unwrap()
+            .unacknowledged_inbox_count,
+        0
+    );
     reader.execute_batch("ROLLBACK").unwrap();
     writer
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .unwrap();
-    assert_eq!(database.operational_snapshot(NOW).unwrap().wal_bytes, 0);
+    assert_eq!(database.operational_snapshot().unwrap().wal_bytes, 0);
 }
 
 #[test]
@@ -203,11 +211,7 @@ fn empty_path_initializes_directly_to_the_uuid_native_baseline() {
     }
 
     let indexes = schema_object_names(&connection, "index");
-    assert!(
-        indexes
-            .iter()
-            .any(|index| index == "mailbox_pending_by_recipient")
-    );
+    assert!(indexes.iter().any(|index| index == "inbox_unacknowledged"));
     let triggers = schema_object_names(&connection, "trigger");
     for expected in [
         "records_are_immutable",

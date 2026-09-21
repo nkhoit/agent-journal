@@ -1,88 +1,96 @@
-# Runtime integrations
+# Optional runtime integrations
 
-Runtime integration is intentionally a separate, conditional layer. The central journal protocol must not contain vendor session IDs, chat IDs, hook paths, process handles, or runtime-specific assumptions.
+Runtime destinations and platform credentials remain local. The journal knows
+only principals, records, inbox items and acknowledgments. Both clients use
+ordinary principal credentials and work without central adapter registration.
 
-## Hermes — Runs API adapter implemented
+## Hermes Runs API
 
-The Hermes adapter targets the authenticated Runs API exposed by the supported Hermes release contract. It uses only the following surface:
+```sh
+journal-inbox-hermes \
+  --central-endpoint https://journal.example.invalid \
+  --credential-file /private/agent-journal/principal.json \
+  --routes-file /private/agent-journal/routes.json \
+  --hermes-base-url http://127.0.0.1:8765 \
+  --hermes-key-file /private/agent-journal/hermes.key \
+  --poll-seconds 1
+```
 
-- `GET /health` for reachability;
-- authenticated `GET /v1/capabilities`, requiring `features.run_submission == true` and durable `features.runs_idempotency` with at least the documented 86,400-second retention;
-- authenticated `POST /api/sessions` with an explicit local session ID;
-- authenticated `POST /v1/runs` with `Idempotency-Key: agent-journal:<attempt_id>` and JSON `{ "input": rendered, "session_id": private_session_id }`.
+The supported transport remains:
 
-The runtime client requires HTTP `202` and a bounded visible-ASCII `run_id`; it returns only that non-secret receipt to the generic adapter. Exact retries use the same delivery-attempt key. `429`, `5xx`, connection failures, and timeouts map to `RuntimeUnavailable`. Authentication failures, validation failures, missing sessions, and idempotency conflicts map to `RuntimeRejected`. Raw vendor responses and API keys are never logged or persisted.
+- `GET /health` for reachability.
+- Authenticated `GET /v1/capabilities`, requiring
+  `features.run_submission == true` and
+  `features.runs_idempotency.supported == true`, `durable == true`,
+  `retention_seconds >= 86400`.
+- Authenticated `POST /api/sessions` with the configured explicit session ID.
+- Authenticated `POST /v1/runs`, with
+  `Idempotency-Key: agent-journal:<inbox_item_id>` and JSON
+  `{ "input": rendered, "session_id": private_session_id }`.
 
-`Route.runtime_target` is the private Hermes `session_id`. It is loaded from a local routes JSON file, sent only to Hermes, and does not enter central custody, telemetry, or portable protocol values. The generic adapter preserves spool → central custody → injection-started → runtime acceptance → durable result/outbox ordering. The acceptance receipt proves runtime admission only; it does not prove model observation, understanding, or task completion.
+Only 202 with a bounded visible-ASCII `run_id` is accepted. 429, 5xx, connection
+failure and timeout are retryable runtime unavailability. Authentication,
+validation, missing-session and idempotency conflicts are rejected. Responses
+and secrets are not copied into diagnostics. Startup capability failure is an
+explicit failure before inbox handoff.
 
-The executable `journal-adapter-hermes` wires the delivery journal, SQLite spool, static routes, system clock, runtime client, and generic adapter. `--once` runs one bounded tick for a canary; loop mode handles `SIGINT`/`SIGTERM`. Credential arguments are file paths only. Secret files must be private regular non-symlink files in private directories.
+`Route.runtime_target` is the private session ID, never a central record field
+or command argument. A successful Runs API response means admission only, not
+model observation, comprehension or completion.
 
-Focused runtime HTTP tests cover accepted submission, exact replay, request body/session/key shape, authentication rejection, idempotency conflict, retryable `429`/`5xx`, malformed or oversized receipts, and capability preflight. A Unix integration test runs the adapter against a real `journald`, a real SQLite spool, and a fake Hermes HTTP server; it verifies custody-before-injection, accepted telemetry, persisted runtime receipt, and that the session ID stays out of central delivery status.
+The client enforces advertised capability, not independently verified vendor
+durability. In-memory ack retries do not submit another run. After process
+restart, the same item key is sent again; retries beyond the advertised retention
+window can create another run. There is no permanent local receipt ledger and
+no exactly-once promise.
 
-This repository does not claim a production live canary, model completion, or a reply/read path through Hermes. Those remain deployment and product-level acceptance work.
+## Muse hook drop point
 
-## Muse — hook drop-point adapter implemented
+```sh
+journal-inbox-muse \
+  --central-endpoint https://journal.example.invalid \
+  --credential-file /private/agent-journal/principal.json \
+  --routes-file /private/agent-journal/routes.json \
+  --muse-drop-dir /private/agent-journal/muse-drop \
+  --poll-seconds 1
+```
 
-The Muse personal-agent runtime exposes no authenticated injection API to
-local processes. Verified 2026-09-18 against Agent Kit v0.1.6: `muse.py
---help` lists only Hindsight/Zulip client actions (`post`, `reply`, `inbox`,
-`ack`, `retain`, `recall`, `get-document`, `memory-status`, …); there is no
-chat-injection subcommand, webhook, or socket. The supported handoff is a
-private local drop directory watched by a platform hook:
+Muse has no supported authenticated local injection endpoint in this integration.
+The supported handoff is a private directory watched by an operator-provided
+platform hook that calls `chat.send_message` from inside its platform context.
+No runtime key file is used; private filesystem permissions are the boundary.
 
-- The adapter validates the drop directory at startup: it must be an existing
-  regular non-symlink directory whose Unix mode denies group/other access.
-  There is no runtime secret, so `journal-adapter-muse` takes no runtime key
-  file; the directory's filesystem permissions are the access control.
-- `MuseRuntime::inject` durably writes one JSON drop file per delivery
-  attempt under a stable attempt-derived name
-  (`muse-<sha256(attempt_id)>.drop.json`), via exclusive create, file fsync,
-  atomic rename, and directory fsync.
-- The payload carries `version`, `dedupe_key` (the attempt ID), `target_chat`
-  (the route's private chat ID), the envelope's correlation IDs, the rendered
-  body, and a SHA-256 content hash. It never leaves the local host.
-- The operator's hook worker picks the file up and calls
-  `chat.send_message` from inside the platform, where the session context
-  exists.
-- Exact replay of an identical payload returns the same receipt without
-  rewriting the file. A conflicting or unreadable file at the stable name is
-  an ambiguous binding and fails closed as `RuntimeRejected`; a vanished drop
-  directory maps to `RuntimeUnavailable`. Disabled routes, malformed chat IDs,
-  and rendered text that does not match the envelope are rejected before any
-  write.
+Each item publishes `muse-<sha256(inbox_item_id)>.drop.json`. Local payload version
+2 carries `dedupe_key`, `inbox_item_id`, record and space IDs, author and recipient,
+routing key, private `target_chat`, rendered body and content SHA-256.
+The key is the stable inbox item ID; there is no attempt identifier.
 
-`Route.runtime_target` is the private Muse chat ID. It is loaded from a local
-routes JSON file, sent only to the drop point, and does not enter central
-custody, telemetry, or portable protocol values. The generic adapter preserves
-spool → central custody → injection-started → runtime acceptance → durable
-result/outbox ordering. The drop receipt proves durable local handoff only; it
-does not prove the hook worker ran, the turn was queued, or the model
-observed, understood, or completed the delivery.
+Publication exclusively creates a private staging file, writes and fsyncs it,
+publishes without clobbering another file, removes its staging link, then syncs
+the directory. Exact existing payload replay syncs the file and directory before
+returning the same receipt. Conflicting, unreadable, oversized or symlink files
+fail closed without replacement. A vanished drop point is unavailable.
+Hooks must watch only published `.drop.json` files, never staging files.
 
-The platform offers no idempotency key, so duplicate chat turns remain
-possible if the hook worker redelivers. This is represented honestly: the
-drop payload carries the stable `dedupe_key`, the deployment must run a worker
-that keeps a durable seen-set on that key, and the adapter itself never
-creates two drop files for one attempt.
+Durable drop publication is not hook processing, queued-turn durability, or model
+comprehension. If a hook consumes/removes the file before an interrupted client
+acks, restart may recreate it. The hook's durable seen-set must use the inbox ID
+to suppress duplicate chat turns where required. The client does not implement
+that hook or infer its success.
 
-The executable `journal-adapter-muse` wires the delivery journal, SQLite
-spool, static routes, system clock, runtime client, and generic adapter.
-`--once` runs one bounded tick for a canary; loop mode handles
-`SIGINT`/`SIGTERM`. Credential arguments are file paths only; the delivery
-credential must be a private regular non-symlink file in a private directory.
+## Shared operation
 
-Focused contract tests cover accepted injection, exact replay, malformed
-chat IDs, conflicting/unreadable existing files failing closed, and a
-vanished drop directory as retryable. A Unix integration test runs the
-adapter against a real `journald`, a real SQLite spool, and the real drop
-point; it verifies custody-before-injection, accepted telemetry, persisted
-runtime receipt, that the chat ID stays out of central delivery status, and
-that a restart does not duplicate the drop file.
+Run one logical automated consumer per principal. Unknown explicit routes do
+not fall back. Failures remain unacknowledged with bounded local retry and
+diagnostics; successful handoff precedes ack. `--once` performs one bounded tick,
+not a complete drain. `--poll-seconds` accepts 1 through 3600; default 1.
+There is no long polling, streaming, broker, installation flag or spool path.
 
-This repository does not claim a production live canary, hook-worker
-behavior, queued-turn durability, model completion, or a reply/read path
-through Muse. Those remain deployment and product-level acceptance work.
+Credentials, key files and route files must be private regular files in private
+directories. Route maps are bounded to 1 MiB. Do not put secret values or runtime
+targets in arguments. See [client authoring](inbox-client-authoring.md) and
+[operations](operations.md).
 
-## Shared rules
-
-Adapters use delivery-only credentials for inbound custody. Any reply uses a separately provisioned principal-client credential through `aj`. Runtime targets remain local and are never sent as central routing values. Runtime acceptance is telemetry; it is not proof of model observation, understanding, or task completion.
+Contract tests and real-daemon fixtures exercise these handoff boundaries,
+including restart and failures. No production live canary, hook execution,
+model completion or runtime reply path is claimed.

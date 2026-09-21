@@ -29,12 +29,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-journal-adapter-core = { path = "../journal-adapter-core" }
-journal-adapter-hermes = { path = "../journal-adapter-hermes" }
-journal-adapter-muse = { path = "../journal-adapter-muse" }
-journal-adapter-spool = { path = "../journal-adapter-spool" }
+journal-inbox-hermes = { path = "../journal-inbox-hermes" }
+journal-inbox-muse = { path = "../journal-inbox-muse" }
+journal-inbox-worker = { path = "../journal-inbox-worker" }
 journal-client = { path = "../journal-client" }
 journal-runtime-fake = { path = "../journal-runtime-fake" }
+journal-runtime-hermes = { path = "../journal-runtime-hermes" }
+journal-runtime-muse = { path = "../journal-runtime-muse" }
 rusqlite.workspace = true
 
 [lints]

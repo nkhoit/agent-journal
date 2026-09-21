@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 fs2.workspace = true
-journal-adapter-spool = { path = "../journal-adapter-spool" }
 journal-storage-sqlite = { path = "../journal-storage-sqlite" }
 libc = "=0.2.189"
 

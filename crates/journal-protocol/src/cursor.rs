@@ -21,10 +21,7 @@ pub enum CursorRoute {
     Records,
     Search,
     RecordThread,
-    Adapters,
-    MailboxStatus,
     RecordDeliveryStatus,
-    AdminMailboxStatus,
     Inbox,
 }
 
@@ -34,7 +31,6 @@ pub enum CursorOrder {
     Identifier,
     Sequence,
     Rank,
-    UpdatedAt,
     BoundedSequence,
 }
 
@@ -44,7 +40,6 @@ pub enum CursorPosition {
     Identifier { id: String },
     Sequence { sequence: u64, id: String },
     Rank { score_bits: u64, id: String },
-    UpdatedAt { timestamp: String, id: String },
     BoundedSequence { sequence: u64, upper_bound: u64 },
 }
 
@@ -55,7 +50,6 @@ impl CursorPosition {
             (CursorOrder::Identifier, Self::Identifier { .. })
                 | (CursorOrder::Sequence, Self::Sequence { .. })
                 | (CursorOrder::Rank, Self::Rank { .. })
-                | (CursorOrder::UpdatedAt, Self::UpdatedAt { .. })
                 | (CursorOrder::BoundedSequence, Self::BoundedSequence { .. })
         )
     }

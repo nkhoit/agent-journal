@@ -39,11 +39,14 @@ async fn record_routes_enforce_wire_contract() {
     std::fs::create_dir_all(&directory).unwrap();
     let db = Database::open(directory.join("journal.db")).unwrap();
     let service = BootstrapService::new(db.clone());
-    service
-        .create_principal(&PrincipalCreateRequest {
-            handle: "writer".into(),
-            display_name: "Writer".into(),
-        })
+    let _registered = service
+        .register(
+            &"a".repeat(64),
+            &RegistrationRequest {
+                handle: "writer".into(),
+                display_name: "Writer".into(),
+            },
+        )
         .unwrap();
     service
         .create_space(&SpaceCreateRequest {
@@ -61,28 +64,7 @@ async fn record_routes_enforce_wire_contract() {
             can_admin: false,
         })
         .unwrap();
-    service
-        .provision_adapter(&AdapterProvisionRequest {
-            principal_id: "writer".into(),
-            adapter_id: "adapter".into(),
-        })
-        .unwrap();
-    let ticket = service
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: "writer".into(),
-            adapter_id: "adapter".into(),
-            ttl_seconds: 900,
-        })
-        .unwrap();
-    let enrolled = service
-        .exchange(
-            &ticket.enrollment_ticket.ticket,
-            &EnrollmentExchangeRequest {
-                instance_id: "installation".into(),
-            },
-        )
-        .unwrap();
-    let token = enrolled.principal_client_secret.secret;
+    let token = "a".repeat(64);
     let router = public_router(ServiceState::new(db, 4).unwrap(), 1_048_576);
     let mut first = None;
     for (body, key, status) in [
@@ -255,7 +237,10 @@ async fn record_routes_enforce_wire_contract() {
         format!("/v1/records/{id}/thread"),
         "/v1/spaces/space/search?q=hello".into(),
     ] {
-        for credential in [None, Some(enrolled.delivery_adapter_secret.secret.as_str())] {
+        for credential in [
+            None,
+            Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        ] {
             let mut request = Request::get(&path);
             if let Some(token) = credential {
                 request = request.header("authorization", format!("Bearer {token}"));
@@ -280,12 +265,16 @@ async fn append_replay_after_disable_is_exact_but_new_or_invalid_requests_are_de
     std::fs::create_dir_all(&directory).unwrap();
     let db = Database::open(directory.join("journal.db")).unwrap();
     let service = BootstrapService::new(db.clone());
-    let writer = service
-        .create_principal(&PrincipalCreateRequest {
-            handle: "writer".into(),
-            display_name: "Writer".into(),
-        })
+    let registered = service
+        .register(
+            &"a".repeat(64),
+            &RegistrationRequest {
+                handle: "writer".into(),
+                display_name: "Writer".into(),
+            },
+        )
         .unwrap();
+    let writer = registered.receipt.principal.clone();
     service
         .create_space(&SpaceCreateRequest {
             access: journal_protocol::domain::SpaceAccess::Public,
@@ -302,28 +291,7 @@ async fn append_replay_after_disable_is_exact_but_new_or_invalid_requests_are_de
             can_admin: false,
         })
         .unwrap();
-    service
-        .provision_adapter(&AdapterProvisionRequest {
-            principal_id: writer.id.clone(),
-            adapter_id: "adapter".into(),
-        })
-        .unwrap();
-    let ticket = service
-        .create_ticket(&EnrollmentTicketCreateRequest {
-            principal_id: writer.id.clone(),
-            adapter_id: "adapter".into(),
-            ttl_seconds: 900,
-        })
-        .unwrap();
-    let enrolled = service
-        .exchange(
-            &ticket.enrollment_ticket.ticket,
-            &EnrollmentExchangeRequest {
-                instance_id: "installation".into(),
-            },
-        )
-        .unwrap();
-    let token = enrolled.principal_client_secret.secret;
+    let token = "a".repeat(64);
     let router = public_router(ServiceState::new(db.clone(), 4).unwrap(), 1_048_576);
     let body = r#"{"kind":"note","content":"durable"}"#;
 
@@ -373,7 +341,7 @@ async fn append_replay_after_disable_is_exact_but_new_or_invalid_requests_are_de
         .unwrap()
         .execute(
             "UPDATE credentials SET revoked_at='2026-01-01T00:00:00Z' WHERE id=?1",
-            [&enrolled.principal_client_secret.credential_id],
+            [&registered.receipt.credential_id],
         )
         .unwrap();
     let (status, _) = append(&router, &token, "exact", body).await;

@@ -17,16 +17,9 @@ pub struct OperationalMetrics {
     pub sampled_at: String,
     pub database_bytes: u64,
     pub wal_bytes: u64,
-    pub pending_mailbox_count: u64,
+    pub unacknowledged_inbox_count: u64,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub oldest_pending_at: Option<String>,
-    pub outstanding_claims: u64,
-    pub expired_active_claims: u64,
-    pub expired_claims: u64,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub oldest_active_heartbeat_at: Option<String>,
-    pub stale_registrations_with_pending: u64,
-    pub runtime_failure_events: u64,
+    pub oldest_unacknowledged_at: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub last_backup_at: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -248,254 +241,6 @@ pub struct SearchPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AdapterProvisionRequest {
-    pub principal_id: String,
-    pub adapter_id: String,
-}
-
-impl AdapterProvisionRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("principal_id", &self.principal_id)?;
-        validate_identifier("adapter_id", &self.adapter_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdapterProvisionResponse {
-    pub adapter_id: String,
-    pub principal_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterRegisterRequest {
-    pub instance_id: String,
-}
-
-impl AdapterRegisterRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("instance_id", &self.instance_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterHeartbeatRequest {
-    pub instance_id: String,
-    pub generation: i64,
-}
-
-impl AdapterHeartbeatRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("instance_id", &self.instance_id)?;
-        domain::validate_generation(self.generation)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterReplaceRequest {
-    pub expected_generation: i64,
-    pub new_instance_id: String,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub reason: Option<String>,
-}
-
-impl AdapterReplaceRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        domain::validate_generation(self.expected_generation)?;
-        validate_identifier("new_instance_id", &self.new_instance_id)?;
-        if let Some(reason) = &self.reason {
-            validate_chars("reason", reason, 0, 512)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AdapterStatus {
-    Active,
-    Draining,
-    Revoked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdapterRegistration {
-    pub adapter_id: String,
-    pub principal_id: String,
-    pub instance_id: String,
-    pub generation: i64,
-    pub status: AdapterStatus,
-    pub lease_expires_at: String,
-    pub heartbeat_after_seconds: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Adapter {
-    #[serde(flatten)]
-    pub registration: AdapterRegistration,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-}
-
-pub type AdapterPage = Page<Adapter>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClaimRequest {
-    pub instance_id: String,
-    pub generation: i64,
-    pub limit: usize,
-    #[serde(default)]
-    pub wait_seconds: u64,
-}
-
-impl ClaimRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("instance_id", &self.instance_id)?;
-        domain::validate_generation(self.generation)?;
-        domain::validate_claim_limit(self.limit)?;
-        domain::validate_long_poll_seconds(self.wait_seconds)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimItem {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub record: domain::Record,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ClaimState {
-    Active,
-    Committed,
-    Expired,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimResponse {
-    pub claim_id: String,
-    pub state: ClaimState,
-    pub lease_expires_at: String,
-    pub items: Vec<ClaimItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitItem {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitRequest {
-    pub generation: i64,
-    pub items: Vec<CommitItem>,
-}
-
-impl CommitRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        domain::validate_generation(self.generation)?;
-        if self.items.is_empty() || self.items.len() > domain::MAX_CLAIM_BATCH {
-            return Err(domain::ValidationError::InvalidClaimLimit {
-                max: domain::MAX_CLAIM_BATCH,
-            }
-            .into());
-        }
-        for item in &self.items {
-            validate_identifier("mailbox_item_id", &item.mailbox_item_id)?;
-            validate_identifier("attempt_id", &item.attempt_id)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CommitItemResult {
-    Committed,
-    AlreadyCommitted,
-    ClaimNotFound,
-    StaleGeneration,
-    AttemptMismatch,
-    LeaseExpired,
-    SuppressedRevoked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitItemResultEntry {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub result: CommitItemResult,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitResponse {
-    pub claim_id: String,
-    pub generation: i64,
-    pub items: Vec<CommitItemResultEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryEnvelope {
-    pub record_id: String,
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub space_id: String,
-    pub from_principal: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_run: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_to: Option<String>,
-    pub addressed_to: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_key: Option<String>,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeliveryEventRequest {
-    pub event_id: String,
-    pub attempt_id: String,
-    pub generation: i64,
-    pub occurred_at: String,
-    pub state: domain::TelemetryState,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub detail: domain::TelemetryDetail,
-}
-
-impl DeliveryEventRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("event_id", &self.event_id)?;
-        validate_identifier("attempt_id", &self.attempt_id)?;
-        domain::validate_generation(self.generation)?;
-        validate_rfc3339("occurred_at", &self.occurred_at)?;
-        domain::validate_telemetry_detail(&self.detail)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryEventResponse {
-    pub event_id: String,
-    pub state: domain::TelemetryState,
-    pub received_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReceiptSummary {
     pub inbox_item_id: String,
     pub recipient: String,
@@ -558,18 +303,6 @@ pub struct InboxItem {
 }
 
 pub type InboxPage = Page<InboxItem>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MailboxStatus {
-    pub principal_id: String,
-    pub pending: u64,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub oldest_pending_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paused: Option<bool>,
-}
-
-pub type MailboxStatusPage = Page<MailboxStatus>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -695,7 +428,6 @@ impl MembershipRequest {
 #[serde(rename_all = "kebab-case")]
 pub enum CredentialClass {
     PrincipalClient,
-    DeliveryAdapter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,77 +486,6 @@ impl fmt::Debug for OneTimeReplacementSecret {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnrollmentRecoveryRequest {
-    pub adapter_id: String,
-    pub instance_id: String,
-}
-
-impl EnrollmentRecoveryRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("adapter_id", &self.adapter_id)?;
-        validate_identifier("instance_id", &self.instance_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnrollmentTicketCreateRequest {
-    pub principal_id: String,
-    pub adapter_id: String,
-    pub ttl_seconds: u64,
-}
-
-impl EnrollmentTicketCreateRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("principal_id", &self.principal_id)?;
-        validate_identifier("adapter_id", &self.adapter_id)?;
-        if !(1..=900).contains(&self.ttl_seconds) {
-            return Err(WireValidationError::Range {
-                field: "ttl_seconds",
-                min: 1,
-                max: 900,
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OneTimeEnrollmentTicket {
-    pub ticket: String,
-}
-
-impl fmt::Debug for OneTimeEnrollmentTicket {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OneTimeEnrollmentTicket")
-            .field("ticket", &"[REDACTED]")
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollmentTicketCreateResponse {
-    pub principal_id: String,
-    pub adapter_id: String,
-    pub expires_at: String,
-    pub enrollment_ticket: OneTimeEnrollmentTicket,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnrollmentExchangeRequest {
-    pub instance_id: String,
-}
-
-impl EnrollmentExchangeRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("instance_id", &self.instance_id)
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OneTimePrincipalClientSecret {
     pub credential_id: String,
@@ -839,65 +500,6 @@ impl fmt::Debug for OneTimePrincipalClientSecret {
             .field("secret", &"[REDACTED]")
             .finish()
     }
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OneTimeDeliveryAdapterSecret {
-    pub credential_id: String,
-    pub secret: String,
-}
-
-impl fmt::Debug for OneTimeDeliveryAdapterSecret {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OneTimeDeliveryAdapterSecret")
-            .field("credential_id", &self.credential_id)
-            .field("secret", &"[REDACTED]")
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnrollmentExchangeResponse {
-    pub adapter_id: String,
-    pub principal_id: String,
-    pub instance_id: String,
-    pub generation: i64,
-    pub principal_client_secret: OneTimePrincipalClientSecret,
-    pub delivery_adapter_secret: OneTimeDeliveryAdapterSecret,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RequeueRequest {
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub reason: Option<String>,
-}
-
-impl RequeueRequest {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        if let Some(reason) = &self.reason {
-            validate_chars("reason", reason, 0, 512)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RequeueState {
-    Pending,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequeueResponse {
-    pub mailbox_item_id: String,
-    pub attempt_id: String,
-    pub state: RequeueState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -932,26 +534,6 @@ impl RecordPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdapterPath {
-    pub adapter_id: String,
-}
-impl AdapterPath {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("adapter_id", &self.adapter_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimPath {
-    pub claim_id: String,
-}
-impl ClaimPath {
-    pub fn validate(&self) -> Result<(), WireValidationError> {
-        validate_identifier("claim_id", &self.claim_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxItemPath {
     pub item_id: String,
 }
@@ -982,18 +564,6 @@ pub struct ResponseHeaders {
 pub struct PrincipalContext {
     pub principal_id: String,
     pub credential_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryAdapterContext {
-    pub principal_id: String,
-    pub adapter_id: String,
-    pub credential_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnrollmentContext {
-    pub ticket_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

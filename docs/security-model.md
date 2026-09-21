@@ -1,177 +1,145 @@
 # Security model
 
-Agent Journal is a transport of untrusted coordination data, not an authority broker. A successful transport operation never authorizes commands, secrets, or external actions.
+Agent Journal transports untrusted coordination data, not authority to execute
+commands, disclose secrets or act on external systems.
 
-## Authentication classes
+## Authentication and authorization
 
-- **Principal client:** bearer credential stored as a server-side hash; reads and appends only in permitted spaces.
-- **Principal inbox:** the same principal credential fetches and acknowledges only its own currently readable items; no adapter credential or registration is required.
-- **Delivery adapter:** separately provisioned bearer credential bound to exactly one principal/adapter pair; claims, commits, and reports events for that mailbox only.
-- **Service administrator:** local Unix-socket access controlled by socket ownership and filesystem permissions; administers identities, memberships, credentials, adapter replacement, requeue, and recovery.
+Principal clients use digest-only bearer credentials for permitted records,
+posting and their own inbox. Independent registration accepts a client-generated
+256-bit token after durable private preparation; the server retains its digest,
+identity binding and exact registration receipt. Known revoked, expired,
+rotated or recovered tokens cannot create a new identity. Names are never
+ownership proof.
 
-Independent registration uses a client-generated 256-bit token only for the
-registration attempt and resulting principal-client authority. The client
-persists the token, endpoint, and exact body privately before networking; the
-server persists only its SHA-256 digest and a retained registration receipt.
-Known credential digests never become fresh identities after revocation,
-expiration, rotation, recovery, or principal disablement.
+Service administration is protected local Unix-socket access, authorized by
+filesystem ownership/mode and kernel peer identity. Public HTTPS never registers
+admin routes. There is no remote admin bearer, delivery credential, enrollment
+ticket, installation identity or runtime credential class.
 
-The service must not accept adapter credentials as principal-client credentials. Enrollment is a one-use ticket exchange: the plaintext ticket and newly issued credential are each returned once only through their protected transport, never printed or logged, and the UUID-native baseline stores only the ticket hash plus binding/lifecycle metadata.
+Anonymous, invalid, revoked, expired or disabled ordinary callers fail closed.
+Explicit public-space policy permits active authenticated principals to read
+and append without membership rows. Archive rejects new appends, not reads.
+Private/unknown policy is rejected. Membership metadata neither denies public
+access nor grants local administrative authority.
 
-### Shared read-only browser access
+Attention recipients must be active and able to read the space. Relations are
+same-space and backward-only. Current policy is applied before search ranking,
+snippets, counts, threads or inbox content leave storage.
 
-The optional HTML listener uses one existing principal configured by the service
-operator, not a browser credential or an asserted visitor identity. Everyone who
-can reach it sees that principal's permitted records, including any delivery
-summaries that principal may see. The daemon does not verify Tailscale membership.
-Operators must expose this loopback-only listener exclusively through their
-protected Tailscale proxy and restrict tailnet access accordingly. Local processes
-can also reach loopback; this is not isolation from other users on the service host.
-Do not enable it on an untrusted multi-user host.
+Exact immutable append replay is the documented exception to a later principal
+disablement: an otherwise valid credential may recover its already-committed
+response. It grants no new append or ordinary read.
 
-Both `--web-listen` and `--web-viewer` are required to opt in. Missing, invalid,
-non-loopback, nonexistent-principal, or disabled-principal startup configuration
-fails closed. Without the flags no HTML listener exists. The public API and
-administrative routers never mount these views. Request bearer credentials,
-cookies, query parameters, and identity/forwarding headers cannot select or
-override the configured viewer. There is no browser login, token URL, browser
-storage, publishing endpoint, or administrative authority on this listener.
+Inbox identity/recipient/sequence are immutable. Fetch does not reserve or ack.
+Bodyless ack rechecks active recipient and current space access even on repeat.
+Missing, foreign and inaccessible items return 404 without existence signals.
+The first server acknowledgment timestamp is retained, not updated by retries.
 
-The read-only service interface checks the principal remains active and applies
-current space policy in each read transaction. It cannot be used for append, credential,
-mailbox-claim, or administrative operations. Delivery summaries retain the same
-author/recipient-only policy as the principal API. Use a dedicated minimally
-privileged viewer principal for delivery-summary scope. Every public space is
-visible to every visitor allowed through the proxy; membership metadata cannot
-restrict this. Disabling the viewer prevents future responses, not
-bytes already rendered or copied.
+Record receipt visibility is narrower than record visibility. An authorized
+author sees all recipients, an addressed recipient only itself, other readers
+receive 404. The projection contains acknowledgment receipts only, not runtime
+attempts or processing outcomes. Disabling a principal prevents future central
+access, not recall of content already fetched or handed off.
 
-Responses, including errors, carry `Cache-Control: no-store`, a no-referrer policy,
-MIME-sniffing protection, and a CSP forbidding scripts, styles, images, frames,
-plugins, external connections, and embedding. Forms submit only to the same
-origin. Markdown is parsed with pinned `pulldown-cmark` and rendered through a
-small explicit tag allowlist; raw HTML is discarded. Only absolute HTTPS links
-are clickable, with no-referrer/noopener/nofollow attributes. Images become inert
-alt text. Snippets and metadata are HTML-escaped, never interpreted as markup.
-Content headings cannot mint page-level metadata, and bodies sit within a
-labelled untrusted-content boundary separate from authenticated author metadata.
+## Shared read-only browser access
 
-## Authorization
+The optional HTML listener uses one existing host-configured principal, not a
+visitor credential or asserted identity. Everyone who can reach it sees that
+principal's records and permitted receipt summaries. Every public space is
+visible to those visitors; membership metadata cannot restrict it.
 
-Default deny for anonymous, invalid, revoked, expired, wrong-class, or disabled
-ordinary callers. Explicit public-space policy permits all active authenticated
-principals to read and append without membership rows. Archived spaces reject
-new appends, not reads. Unsupported policies including private are rejected.
-Membership rights remain transitional metadata, never public deny overrides.
-An attention recipient must be active and permitted to read the space. Relation
-targets must be readable and same-space. Search filters policy inside SQL before
-ranking, snippets, counts, or facets are produced. Mailbox claims recheck current
-policy before exposing content. Claims bind credential, principal, adapter,
-installation ID, generation, and item set. Telemetry additionally requires the
-authenticated adapter principal to equal the exact mailbox recipient and exact
-host custody. The documented immutable append replay exception still permits a
-valid credential to replay after a later principal disablement; it grants no new
-write or ordinary read.
+Both `--web-listen` and `--web-viewer` are required. Non-loopback, malformed,
+missing or disabled viewer configuration fails closed. Without the flags no
+HTML listener exists. Public API and admin routers do not mount the views.
+Bearer headers, cookies, identity/forwarding headers and query parameters cannot
+select the viewer. There is no browser login, token URL, browser storage,
+publishing or administrative authority.
 
-Record delivery-status visibility is deliberately narrower than space visibility: an addressed recipient sees only its own recipient entry; the record author sees all recipient-scoped entries only while still authorized to read the record; other space readers receive a non-leaking `404`; service administrators use only the protected Unix-socket admin interface. The concrete service checks current public policy, authorship, and recipient identity in the same transaction before selecting status rows; the `Authorizer.can_read_delivery_status` port expresses the same policy for future integrations.
+The daemon does not verify Tailscale membership. Operators must expose the
+loopback listener exclusively through protected ingress and restrict who can
+reach it. Local processes can also reach loopback; this is not isolation from
+other users on the service host.
 
-This projection contains only inbox acknowledgment receipts, not runtime
-telemetry or attempts. Inbox fetch/status never mutate custody or receipt state.
-Ack rechecks authority even on a repeat; it means no further reminder is needed,
-not that the message was read or processed. Archive does not remove read or ack
-access. Legacy suppression/custody cannot hide or acknowledge inbox items.
+Read-only requests recheck active viewer and current policy. Use a dedicated
+viewer principal for receipt-summary scope. Disabling it stops future responses,
+not copies already rendered.
 
-Revocation stops future central access and claims. It cannot recall bytes already accepted into a local spool or runtime transcript; operators must treat those as exposed and rotate/recover accordingly.
+Responses and errors use no-store, no-referrer, MIME-sniffing protection and CSP
+forbidding scripts, styles, images, frames, plugins, external connections and
+embedding. Forms submit only to the same origin. Pinned Markdown parsing emits
+a narrow HTML allowlist; raw HTML is discarded. Only absolute HTTPS links are
+clickable with no-referrer/noopener/nofollow. Images become inert alt text;
+snippets and metadata are escaped. Content cannot mint page-level provenance.
 
-## Untrusted-content handling
+## Untrusted content and optional clients
 
-Record content, Markdown, `kind`, `run_id`, routing key, relation labels, future imported provenance, snippets, and runtime details are data. Never:
+Content, run labels, routing keys, Markdown, snippets and runtime responses are
+data. Never evaluate them, fetch URLs automatically, interpolate them into shell
+commands/SQL or allow them to select private runtime destinations.
 
-- execute or evaluate content;
-- fetch URLs automatically;
-- interpolate content into shell commands or SQL;
-- let a record choose a runtime session;
-- render raw HTML or unsafe URL schemes;
-- include secrets in telemetry or error messages; telemetry detail is compact serialized JSON capped at 4,096 UTF-8 bytes;
-- treat envelope-like text inside a body as authenticated provenance.
+Runtime mappings are configured privately. An unknown, empty or disabled
+explicit route never falls back. Structured envelope metadata is separate from
+the body; quoted text metadata prevents forged lines, but textual body delimiters
+are not a security boundary.
 
-Adapters place authenticated envelope metadata outside the body where the runtime supports structured metadata. Text-only runtimes still receive an explicit warning, but authority checks remain outside the model.
+Optional workers hold full principal authority. One logical automated consumer
+per principal is recommended; concurrent consumers can duplicate handoff.
+Automatic ack follows supported handoff, never precedes it. Failure remains
+pending with safe diagnostics and bounded retry. No central runtime outcome
+proves reading, comprehension or completion.
 
-## Local admin-socket ownership and recovery
+Stable inbox IDs are native dedupe identities. Finite Hermes retention, removed
+Muse files, crashes and approved backup rollback can repeat handoff. Muse hook
+seen-set durability is the deployment's responsibility. Credentials, route
+targets and raw vendor responses must not appear in logs, argv or central fields.
 
-The admin socket uses a private mode-`0700` parent, a persistent mode-`0600`
-owner-lock inode, and a durable marker. Every non-empty marker records the lock
-device/inode and the owned socket artifact device/inode. Startup, publication, marker
-transitions, and cleanup recheck both the held lock file descriptor and the lock
-pathname as the same private regular single-link file. A crash restart is
-therefore valid only when the persistent lock inode is unchanged. Replacing the
-lock pathname causes the next bind to fail closed and leaves the live socket and
-marker untouched. This serialization relies on conforming processes using the
-owner lock and private parent; POSIX does not provide an atomic conditional
-unlink primitive, so the final socket identity is rechecked immediately before
-each unlink rather than described as impossible to race.
+## Local admin-socket ownership
 
-The service UID is trusted. Code already running as that UID can rewrite the
-database, marker, lock, credentials, or binary, so same-UID malicious code is
-outside this boundary; the lock protocol is for crash recovery and conforming
-service instances, not privilege separation from that UID.
+The socket uses a private parent, persistent mode-0600 owner-lock inode and
+durable marker. Non-empty markers record the lock device/inode and owned socket
+artifact device/inode. Startup, publication and cleanup recheck the held lock
+descriptor and pathname as the same private regular single-link file.
+Replacing the lock pathname fails closed and preserves the live socket/marker.
 
-Pending socket names come from a bounded safe ASCII grammar and never exceed the
-final socket path budget. An occupied candidate is skipped; bounded exhaustion
-fails closed. A crash before the pending marker is durable can leave an unknown
-pending socket, which is skipped on the next bind and does not prevent final
-startup unless the bounded candidate set is exhausted.
+This protects crash recovery and conforming instances, not malicious same-UID
+code. The service UID is trusted and can already modify its state and binary.
+POSIX has no atomic conditional unlink: cleanup rechecks artifact identity
+immediately before unlink rather than claiming race elimination.
 
-Marker updates intentionally use a bounded in-place write. A kill during that
-write can leave an empty or partial marker; startup rejects it rather than
-guessing ownership. Manual recovery must first verify the socket and lock
-identities, then remove the damaged marker/artifacts under the protected parent.
+Pending names use bounded safe ASCII and remain inside the final socket path
+budget. Occupied candidates are skipped; bounded exhaustion fails closed.
+A crash before marker publication may leave an unknown pending path, which is
+skipped rather than removed. Bounded in-place marker writes can be interrupted;
+empty/partial markers fail closed. Manual recovery first establishes socket and
+lock identity under the protected parent.
 
-## Fencing and recovery
+## Credentials and protected restore
 
-Principal-scoped protected recovery selects the immutable UUID, revokes all
-currently valid principal and transitional delivery credentials, invalidates
-outstanding transitional enrollment authority, and issues one principal-client
-replacement in the same audited transaction. It preserves the disabled state
-and all identity and journal data. A lost response or failed replacement-file
-write is handled by repeating recovery with the UUID, which revokes the
-inaccessible replacement before issuing another.
+Protected principal recovery selects the immutable UUID, atomically revokes all
+currently valid credentials, issues one replacement and audits the mutation.
+It preserves identity, profile, records, inbox and disabled state. A lost response
+or failed private-file write is handled by repeating recovery by UUID, revoking
+the inaccessible replacement. Secrets are not replayed.
 
-Credential rotation is one atomic revoke-and-replace transaction with immediate revocation, not an overlap period. The replacement secret is returned once through protected Unix administration and written atomically to mode-`0600` storage without stdout or logging. A lost response or post-commit file-write failure requires administrator revocation of the inaccessible replacement; rollback or secret replay is not available.
+Rotation is immediate revoke-and-replace with the same principal and expiration,
+not an overlap window. It works for independently registered credentials.
+Post-commit response/file loss does not restore the old credential; use principal
+recovery without needing the lost replacement ID.
 
-Enrollment response loss or failure to persist either credential requires protected enrollment recovery for the bound adapter and installation. Recovery revokes both principal-client and delivery-adapter credential lineages, including rotated descendants, before a fresh ticket is issued for that same installation. A consumed ticket is never replayable. A different installation cannot use recovery or a fresh ticket to take over the existing installation.
+Protected restore closes ingress, quiesces clients, revokes credentials and
+reconciles exact audited identity/digest/receipt bindings. Post-backup credential
+digests remain revoked so old tokens cannot become fresh registrations.
+No adapter fencing, spool inventory or central requeue is involved.
 
-Only one active adapter installation is allowed per principal in v1. Registration has a server-issued generation and `lease_expires_at`; heartbeats renew that lease. Replacement is compare-and-swap and fences later central operations from stale generations. Claims explicitly transition from `active` to `committed`, `expired`, or `cancelled`; the database permits only one active claim per adapter/generation, so expiry must be recorded before another claim is created. The unavoidable local check-to-send race means planned replacement should drain first and forced replacement must accept possible duplicate runtime turns.
+Recipient allocation heads never decrease and inbox epochs invalidate cursors.
+Older-backup receipt loss and duplicate consequences require complete principal
+client review and explicit loss approval. Unknown prepared input requires
+archive/reset; exact durable evidence of completed reconciliation permits reopen.
+Denying metadata memberships or disabling existing principals is not a fallback
+for public-space recovery because new principals can register.
 
-Replacement revokes both old enrollment credential lineages and outstanding tickets
-before transferring installation ownership. New credentials require fresh enrollment
-for the replacement installation; old secrets never gain authority over it. Ordinary
-registration only renews the credential's already-bound installation. Expired
-heartbeats and stale generations fail closed; same-installation registration can
-renew an expired lease without changing generation. Claim selection repeats these
-checks inside its write transaction and stores the issuing credential ID.
-
-Central restore is a recovery event: close ingress, quiesce adapters, reconcile resolved protected audit events, invalidate claims/registrations, advance generations, compare spools/checkpoints, run policy and delivery probes, and reopen only after evidence is complete. Uncertain prepared input intents remain closed and require explicit archive/reset. Denying memberships or disabling existing principals cannot protect public spaces from fresh registrations.
-
-Custody receipts retain the exact issuing claim and credential binding; neither
-lease expiry nor later telemetry erases them. Replay still authenticates and
-checks the current generation. Telemetry requires that exact installation and
-generation's custody, not merely a host-accepted state string. Retryable failures
-may recover on the same attempt; accepted, route-unavailable, and terminal
-outcomes cannot be downgraded. Late events for a requeued attempt cannot advance
-the newer mailbox obligation. Requeue and adapter listing remain protected
-Unix-only administration; delivery credentials acquire no publishing authority.
-
-## Audit and privacy
-
-Audit credential, ACL, adapter, requeue, tombstone, and backup/restore mutations. Keep protected mutation logs outside the SQLite recovery unit. Public examples contain no live identifiers. Stable URLs use immutable record IDs but reveal only records authorized to the requester.
-
-Structured stderr events provide request-correlated diagnostics, not durable
-audit. Protected daemon startup binds the exact UUID-native central schema to a
-separate durable external recovery audit. Mutation intent precedes the central
-commit; uncertain outcomes, incomplete schema fingerprints, and missing or
-rolled-back audit fail closed. Conservative offline recovery revokes all restored
-credentials and requires explicit surviving spool/client reconciliation before
-reopening; historic state must be archived/reset rather than migrated. See
-[protected recovery](recovery.md) for the permission boundary, crash behavior,
-and operator acceptance limits.
+The external audit is a separate protected recovery unit. Missing/rolled-back
+audit, mismatched identity, incomplete schema or uncertain mutation fails closed.
+Audit credentials, profiles, policy and recovery without plaintext secrets.
+See [protected recovery](recovery.md) for exact startup, approval and crash rules.

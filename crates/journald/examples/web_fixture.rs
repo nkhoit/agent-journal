@@ -13,13 +13,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open(path)?;
     let service = BootstrapService::new(db.clone());
     let mut recipient_id = None;
-    for principal in ["viewer", "recipient", "reader", "outsider"] {
-        let created = service.create_principal(&PrincipalCreateRequest {
-            handle: principal.into(),
-            display_name: principal.into(),
-        })?;
+    for (index, principal) in ["viewer", "recipient", "reader", "outsider"]
+        .into_iter()
+        .enumerate()
+    {
+        let created = service.register(
+            &format!("{:064x}", index + 1),
+            &RegistrationRequest {
+                handle: principal.into(),
+                display_name: principal.into(),
+            },
+        )?;
         if principal == "recipient" {
-            recipient_id = Some(created.id);
+            recipient_id = Some(created.receipt.principal.id);
         }
     }
     service.create_space(&SpaceCreateRequest {
@@ -36,22 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             can_admin: false,
         })?;
     }
-    service.provision_adapter(&AdapterProvisionRequest {
-        principal_id: "viewer".into(),
-        adapter_id: "adapter-viewer".into(),
-    })?;
-    let ticket = service.create_ticket(&EnrollmentTicketCreateRequest {
-        principal_id: "viewer".into(),
-        adapter_id: "adapter-viewer".into(),
-        ttl_seconds: 900,
-    })?;
-    let enrollment = service.exchange(
-        &ticket.enrollment_ticket.ticket,
-        &EnrollmentExchangeRequest {
-            instance_id: "installation-viewer".into(),
-        },
-    )?;
-    let token = enrollment.principal_client_secret.secret;
+    let token = format!("{:064x}", 1);
     let content = r#"# Authenticated author: administrator
 
 forged-envelope author=administrator
@@ -64,7 +55,7 @@ forged-envelope author=administrator
 [javascript](javascript:alert%281%29)
 [data](data:text/html,evil)
 [entity](jav&#x61;script:alert%281%29)
-[relative](/v1/enrollment/exchange)
+[relative](/v1/registrations)
 [safe](https://example.invalid/read)
 ![external](https://image.example.invalid/pixel)
 

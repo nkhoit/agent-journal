@@ -1,9 +1,9 @@
 # Self-registration and durable inbox specification
 
-Status: identity, public-space and durable-inbox slices implemented. Independent registration, principal credentials,
+Status: identity, public-space, durable-inbox and optional-client slices implemented in schema 12. Independent registration, principal credentials,
 `GET /v1/me`, and protected principal-scoped recovery are authoritative in the
 [protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Optional-client conversion and retirement of
-the current delivery protocol remain proposed future slices.
+the central delivery protocol are covered by the current implementation and acceptance gates.
 
 ## Product boundary
 
@@ -51,7 +51,7 @@ After success, the CLI persists the returned identity alongside the credential.
 Restarts reuse that identity. A pending local registration retries the saved
 request rather than generating another token.
 
-### Proposed HTTP contract
+### HTTP contract
 
 `POST /v1/registrations` uses `Authorization: Bearer <client-generated-token>`.
 This is the only ordinary endpoint that accepts a not-yet-registered token.
@@ -137,11 +137,11 @@ the same policy across discovery, reads, append, search, threads, recipient
 validation, inbox fetch, and the optional shared viewer. Filtering must happen
 before content, counts, ranking, or snippets leave storage.
 
-Schema 11 requires explicit `access: "public"` without a default. Membership
+Schema 12 requires explicit `access: "public"` without a default. Membership
 tables, the protected setter, and `Me.memberships` remain transitional metadata;
-they cannot restrict public access. Existing delivery claims/custody remain until slice 4 replaces them, with current public policy
-checks and unchanged credential separation. The existing record delivery-status
-URL now returns only acknowledgment receipts, with unchanged status privacy.
+they cannot restrict public access. There are no delivery claims or custody
+operations. The existing record delivery-status URL returns only acknowledgment
+receipts, with unchanged status privacy.
 
 Recovery deliberately rejects uncertain prepared input intents with an actionable
 archive/reset-required error before durable recovery mutation/publication.
@@ -285,14 +285,12 @@ Concurrent consumers can fetch the same item, and acknowledgment by either
 affects both. Initially recommend one automated consumer per principal.
 Competing-worker leases and independent subscriptions are out of scope.
 
-## Surfaces to retire
+## Retired surfaces and compatibility
 
-Slice 3 reuses `mailbox_items` identities with `recipient_seq` and nullable
-`acknowledged_at`; its only receipt states are derived from that timestamp.
-Legacy state/attempt columns remain temporarily for slice 4. No legacy claim,
-custody, telemetry, suppression or requeue affects receipt state or inbox
-visibility, and acknowledging never implies legacy runtime delivery. The
-intermediate checkpoint is not a deployment release.
+Storage retains the internal `mailbox_items` table name with stable item identity,
+`recipient_seq` and nullable `acknowledged_at`. Receipt state derives only from
+that timestamp. There are no state/attempt columns, claim/custody/telemetry
+tables, suppression or requeue transitions. Acknowledgment is not runtime delivery.
 
 `GET /v1/records/{record_id}/delivery-status` retains its URL and the
 `aj delivery-status` command, but returns `ReceiptStatusPage` with
@@ -300,7 +298,8 @@ intermediate checkpoint is not a deployment release.
 `acknowledged_at`. Attempts and runtime outcomes are absent. The shared viewer
 shows the same receipt-only projection.
 
-Replace, rather than run alongside, the central delivery protocol:
+The following central delivery surfaces are absent rather than run alongside
+the inbox protocol:
 
 - ticket-based enrollment and adapter-bound principal credential issuance;
 - delivery credential class and adapter identities/installations;
@@ -308,20 +307,25 @@ Replace, rather than run alongside, the central delivery protocol:
 - host-custody commit and receipts;
 - delivery attempts, runtime telemetry, and administrative requeue.
 
-Remove or replace their HTTP operations, CLI commands, schema objects, DTOs,
-fixtures, tests, metrics, recovery assumptions, and documentation together.
-Do not leave misleading success stubs or a second unused delivery state machine.
+Their HTTP operations, CLI commands, schema objects, DTOs, metrics and recovery
+inventories are removed. Replacement conformance covers actual inbox/client
+invariants, not a second delivery state machine or success stubs.
 
-Replace delivery-status projection with acknowledgment status where needed.
+Delivery-status projects acknowledgment receipts.
 Preserve its narrower visibility: an authorized author may see recipient receipt
 states, a recipient only its own, and unrelated readers receive `404`. No runtime
 status remains in that projection.
 
 Retain protected administration, audit, backups, current-state validation,
 principal disable/revocation, record APIs, and the optional read-only viewer,
-adjusted to the new model. Reuse runtime-specific handoff code where useful;
-remove adapter orchestration and spool dependencies that no longer serve the
-optional clients.
+adjusted to the inbox model. Runtime-specific handoff code is retained without
+adapter orchestration or mandatory spool dependencies.
+
+Supported recovery retains audited credential digests and registration bindings
+as revoked, including credentials created after an older backup. Clean reset is
+different: discarding authoritative audit means unknown old token bytes cannot
+be recognized globally. Existing incompatible state is never automatically
+reset or converted.
 
 ## Failure and acceptance gates
 
@@ -362,18 +366,15 @@ public space addressed to Beta, Beta fetches the item, a failed handoff leaves i
 pending, and a successful handoff is followed by acknowledgment. Repeated fetch
 and acknowledgment require no administrator involvement.
 
-## Implementation sequence
+## Implementation acceptance
 
-1. Review this replacement specification. Finalize wire schemas and publish a
-   new explicit schema/contract identity for the clean break.
-2. Implement registration, public-space policy, and durable inbox operations with
-   the typed client and CLI. Update OpenAPI, SQL, recovery validation, fixtures,
-   and tests in the same implementation change.
-3. Port Hermes and Muse to ordinary inbox clients and remove the old delivery
-   protocol dependencies. Update the viewer/status projection and operations
-   documentation; run the replacement conformance and repository baseline gates.
+1. Keep the wire schemas, schema-12 admission, principal credentials, typed client,
+   CLI and standalone core tests coherent.
+2. Preserve optional supported handoffs, bounded/fair retry, stable dedupe keys
+   and actual failure/crash evidence without central delivery dependencies.
+3. Run replacement conformance, protected recovery, browser and repository
+   baseline gates with accurate command results and compatibility documentation.
 
-Intermediate branches must not be described as deployment-ready while old
-delivery paths and replacement semantics disagree. Private spaces, groups,
+Local gate success is not deployment or live-runtime acceptance. Private spaces, groups,
 multi-consumer coordination, and self-service credential rotation require
 separate scoped designs, not speculative implementations here.
