@@ -13,6 +13,16 @@ supported. Older databases, audit formats and legacy spools require explicit
 operator archive/reset. There is no in-place migration, automatic reset or
 adoption of incompatible state. Preserve evidence before an operator reset.
 
+Fresh central initialization exclusively creates a `<database>.initializing`
+marker before opening SQLite and removes it only after the initializing
+connection closes. Concurrent initializers wait for that publication boundary,
+then perform ordinary exact-schema admission. Normal error unwinding closes the
+connection and removes its marker too; any incomplete database still fails
+exact-schema admission. Fresh initialization never reuses a marker abandoned by
+process death. Reopening that incomplete input fails closed without changing
+the marker, database or sidecars. Preserve that evidence for operator
+archive/reset; do not remove the marker to bypass an active initializer.
+
 The central `recovery_anchor` holds a random journal identity, monotonic audit
 revision, audit-required marker and inbox cursor epoch. `journald --recovery-audit
 PATH` selects the external audit; the default is a sibling recovery database.

@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use rusqlite::backup::Backup;
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -274,87 +273,48 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let factory = ConnectionFactory::new(path);
-        let initialization_path = initialization_lock_path(factory.path());
-        let initialization_pending = initialization_path.exists();
-        if sqlite_sidecar_entries_exist(factory.path())? {
-            // A sidecar is normally fail-closed hot evidence. The sole exception
-            // is an active, serialized fresh initialization: wait for that owner
-            // to finish instead of misclassifying its transient WAL as cold
-            // admission. A stale or inaccessible initializer still times out
-            // reset-required without SQLite mutation.
-            if initialization_pending {
-                wait_for_initialization(factory.path())?;
-                return Self::open(factory.path());
-            }
-            return Err(StorageError::ResetRequired {
-                kind: "central database",
-            });
-        }
-        let initialization_lock = if !factory.path().exists() || initialization_pending {
-            match try_acquire_initialization_lock(factory.path())? {
-                Some(lock) => Some(lock),
-                None => {
-                    wait_for_initialization(factory.path())?;
-                    return Self::open(factory.path());
+        let path = path.as_ref();
+        loop {
+            // The initializer publishes its marker before creating SQLite state
+            // and removes it only after closing SQLite. Observe the database
+            // first so a later marker probe cannot miss an active initializer.
+            let exists = path.exists();
+            #[cfg(test)]
+            initialization_tests::after_admission_probe();
+            if exists {
+                if fs::symlink_metadata(initialization_lock_path(path)).is_ok() {
+                    wait_for_initialization(path)?;
+                    continue;
                 }
+                return Self::open_existing(path);
             }
-        } else {
-            None
-        };
-        if factory.path().exists() {
-            drop(initialization_lock);
-            if sqlite_sidecar_entries_exist(factory.path())? {
+            let Some(_initialization_lock) = try_acquire_initialization_lock(path)? else {
+                wait_for_initialization(path)?;
+                continue;
+            };
+            // Another initializer may have completed between the first probe
+            // and our exclusive creation of the marker. Never initialize twice.
+            if path.exists() {
+                continue;
+            }
+            if sqlite_sidecar_entries_exist(path)? {
                 return Err(StorageError::ResetRequired {
                     kind: "central database",
                 });
             }
-            let existing = Self::open_existing(factory.path());
-            if existing.is_ok() || matches!(&existing, Err(StorageError::ResetRequired { .. })) {
-                return existing;
-            }
-            for _ in 0..100 {
-                thread::sleep(Duration::from_millis(10));
-                let retry = Self::open_existing(factory.path());
-                if retry.is_ok() {
-                    return retry;
-                }
-            }
-            return existing;
-        }
-        if sqlite_sidecar_entries_exist(factory.path())? {
-            return Err(StorageError::ResetRequired {
-                kind: "central database",
+            let factory = ConnectionFactory::new(path);
+            let mut connection = factory.connect_unchecked()?;
+            #[cfg(test)]
+            initialization_tests::after_connection_open();
+            apply_uuid_native_baseline(&mut connection)?;
+            verify_schema(&connection)?;
+            drop(connection);
+            factory.admit_existing()?;
+            return Ok(Self {
+                factory,
+                audit: None,
             });
         }
-        let _initialization_lock =
-            initialization_lock.expect("missing database owns initialization lock");
-        let mut connection = factory.connect_unchecked()?;
-        if let Err(baseline_error) = apply_uuid_native_baseline(&mut connection) {
-            drop(connection);
-            for _ in 0..100 {
-                let current = factory.open_read_only_unconfigured();
-                if current
-                    .and_then(|connection| verify_schema(&connection))
-                    .is_ok()
-                {
-                    factory.admit_existing()?;
-                    return Ok(Self {
-                        factory,
-                        audit: None,
-                    });
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            return Err(baseline_error);
-        }
-        verify_schema(&connection)?;
-        drop(connection);
-        factory.admit_existing()?;
-        Ok(Self {
-            factory,
-            audit: None,
-        })
     }
 
     pub fn path(&self) -> &Path {
@@ -755,22 +715,20 @@ fn try_acquire_initialization_lock(
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|source| StorageError::Io {
-            operation: "open",
-            path: lock_path.clone(),
-            source,
-        })?;
-    match file.try_lock_exclusive() {
-        Ok(()) => Ok(Some(InitializationLock {
+        .create_new(true)
+        .open(&lock_path);
+    #[cfg(test)]
+    initialization_tests::after_lock_open();
+    // Presence is ownership. Never reopen/flock an inode that its previous
+    // owner can unlink while a waiter holds a descriptor to it.
+    match file {
+        Ok(file) => Ok(Some(InitializationLock {
             path: lock_path,
             _file: file,
         })),
-        Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(source) => Err(StorageError::Io {
-            operation: "lock",
+            operation: "create initialization marker",
             path: lock_path,
             source,
         }),
@@ -778,10 +736,15 @@ fn try_acquire_initialization_lock(
 }
 
 fn wait_for_initialization(path: &Path) -> Result<(), StorageError> {
+    #[cfg(test)]
+    initialization_tests::before_initialization_wait();
     let lock_path = initialization_lock_path(path);
     for _ in 0..100 {
         thread::sleep(Duration::from_millis(10));
-        if !lock_path.exists() {
+        if matches!(
+            fs::symlink_metadata(&lock_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
             return Ok(());
         }
     }
@@ -1069,3 +1032,6 @@ fn remove_sqlite_files(path: &Path) {
 
 #[cfg(test)]
 mod recovery_reads;
+
+#[cfg(test)]
+mod initialization_tests;

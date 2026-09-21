@@ -1123,17 +1123,12 @@ async fn cancelling_serve_releases_admin_ownership_before_restart() {
         let server = Server::bind(config(&temporary))
             .await
             .expect("bind cancellable server");
-        let socket_path = server.admin_socket_path().to_owned();
-        let serving = tokio::spawn(server.serve(std::future::pending::<()>()));
-        let mut connected = false;
-        for _ in 0..100 {
-            if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-                connected = true;
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(connected, "admin serving task did not start");
+        let (started_tx, started_rx) = oneshot::channel();
+        let serving = tokio::spawn(server.serve(async move {
+            started_tx.send(()).expect("report serve polling");
+            std::future::pending::<()>().await;
+        }));
+        started_rx.await.expect("serve was polled");
 
         serving.abort();
         assert!(
@@ -1143,20 +1138,9 @@ async fn cancelling_serve_releases_admin_ownership_before_restart() {
                 .is_cancelled()
         );
 
-        let mut replacement = None;
-        for _ in 0..10_000 {
-            match Server::bind(config(&temporary)).await {
-                Ok(server) => {
-                    replacement = Some(server);
-                    break;
-                }
-                Err(error) => {
-                    drop(error);
-                    tokio::task::yield_now().await;
-                }
-            }
-        }
-        let replacement = replacement.expect("restart after serve cancellation");
+        let replacement = Server::bind(config(&temporary))
+            .await
+            .expect("restart immediately after serve cancellation");
         assert!(std::os::unix::net::UnixStream::connect(replacement.admin_socket_path()).is_ok());
         drop(replacement);
     }
@@ -1180,6 +1164,53 @@ async fn cancelling_serve_releases_admin_ownership_before_restart() {
         fs::read(&socket_path).expect("read preserved replacement"),
         b"replacement"
     );
+}
+
+#[tokio::test]
+async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks() {
+    for web_enabled in [false, true] {
+        let temporary = TempDir::new("serve-drop");
+        let mut configuration = config(&temporary);
+        if web_enabled {
+            let database = Database::open_protected(
+                &configuration.database_path,
+                configuration.database_path.with_extension("recovery.db"),
+            )
+            .unwrap();
+            journal_service::BootstrapService::new(database)
+                .create_principal(&journal_protocol::PrincipalCreateRequest {
+                    handle: "viewer".into(),
+                    display_name: "Viewer".into(),
+                })
+                .unwrap();
+            configuration.web = Some(journald::WebConfig {
+                address: "127.0.0.1:0".parse().unwrap(),
+                viewer: "viewer".into(),
+            });
+        }
+        let server = Server::bind(configuration.clone())
+            .await
+            .expect("bind server");
+        let public_address = server.public_address();
+        let web_address = server.web_address().unwrap();
+        let socket_path = server.admin_socket_path().to_owned();
+        let mut serving = Box::pin(server.serve(std::future::pending::<()>()));
+        std::future::poll_fn(|context| {
+            assert!(serving.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(serving);
+        assert!(!socket_path.exists(), "drop must release admin ownership");
+        let public =
+            std::net::TcpListener::bind(public_address).expect("public listener was dropped");
+        let web = web_address
+            .map(|address| std::net::TcpListener::bind(address).expect("web listener was dropped"));
+        let replacement = Server::bind(configuration)
+            .await
+            .expect("restart without polling detached listener tasks");
+        drop((public, web, replacement));
+    }
 }
 
 #[tokio::test]
