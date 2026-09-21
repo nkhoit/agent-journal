@@ -19,6 +19,7 @@ const SECURITY_TABLES: &[&str] = &[
     "adapter_registrations",
     "profile_idempotency_keys",
     "credentials",
+    "registration_receipts",
     "enrollment_tickets",
     "credential_audit",
     "audit_events",

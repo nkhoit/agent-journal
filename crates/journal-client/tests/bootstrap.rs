@@ -29,6 +29,48 @@ fn typed_admin_request_and_redacted_failure() {
     assert!(!error.to_string().contains("secret"));
 }
 
+struct RegistrationRecorder {
+    status: u16,
+}
+
+impl Transport for RegistrationRecorder {
+    fn send(&self, request: Request) -> Result<Response, TransportError> {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/registrations");
+        assert_eq!(
+            request.headers.get("Authorization"),
+            Some(&format!("Bearer {}", "ab".repeat(32)))
+        );
+        let body: RegistrationRequest = decode_json(&request.body).unwrap();
+        assert_eq!(body.handle, "agent-new");
+        Ok(Response::new(
+            self.status,
+            br#"{"principal":{"id":"018f1f59-6e90-7000-8000-000000000003","handle":"agent-new","display_name":"Agent New","profile_revision":1,"created_at":"2026-01-01T00:00:00Z","disabled":false},"credential_id":"credential-new"}"#.to_vec(),
+        ))
+    }
+}
+
+#[test]
+fn registration_preserves_initial_and_replay_status() {
+    let input = RegistrationRequest {
+        handle: "agent-new".into(),
+        display_name: "Agent New".into(),
+    };
+    let initial = Client::new(RegistrationRecorder { status: 201 })
+        .register(&"ab".repeat(32), &input)
+        .unwrap();
+    assert!(!initial.replayed);
+    let replay = Client::new(RegistrationRecorder { status: 200 })
+        .register(&"ab".repeat(32), &input)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(initial.receipt, replay.receipt);
+    assert!(matches!(
+        Client::new(RegistrationRecorder { status: 201 }).register(&"AB".repeat(32), &input),
+        Err(ClientError::InvalidRequest)
+    ));
+}
+
 struct ProfileRecorder;
 
 const PROFILE_TEST_TOKEN: &str = concat!(
@@ -115,6 +157,31 @@ fn recovery_and_revocation_use_only_admin_paths() {
         instance_id: "installation-1".into(),
     })
     .unwrap();
+}
+
+struct PrincipalRecoveryRecorder;
+impl Transport for PrincipalRecoveryRecorder {
+    fn send(&self, request: Request) -> Result<Response, TransportError> {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/admin/principals/recover");
+        assert!(!request.headers.contains_key("Authorization"));
+        Ok(Response::new(
+            200,
+            br#"{"principal":{"id":"018f1f59-6e90-7000-8000-000000000001","handle":"agent-alpha","display_name":"Agent Alpha","profile_revision":1,"created_at":"2026-01-01T00:00:00Z","disabled":true},"replacement_secret":{"credential_id":"credential-new","secret":"secret-canary"}}"#.to_vec(),
+        ))
+    }
+}
+
+#[test]
+fn principal_recovery_uses_protected_admin_path_and_preserves_disabled_state() {
+    let response = Client::new(PrincipalRecoveryRecorder)
+        .recover_principal(&PrincipalRecoveryRequest {
+            principal_id: "018f1f59-6e90-7000-8000-000000000001".into(),
+            reason: None,
+        })
+        .unwrap();
+    assert!(response.principal.disabled);
+    assert!(!format!("{response:?}").contains("secret-canary"));
 }
 
 #[test]

@@ -62,8 +62,9 @@ class ContractGateTest(unittest.TestCase):
         result = self.run_gate()
         output = f"{result.stdout}\n{result.stderr}"
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("31 paths", output)
-        self.assertIn("33 operations", output)
+        self.assertIn("33 paths", output)
+        self.assertIn("35 operations", output)
+        self.assertIn("77 fixture mappings", output)
         self.assertIn("fixture coverage", output.casefold())
 
     def test_rotation_requires_one_time_response(self) -> None:

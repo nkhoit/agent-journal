@@ -6,7 +6,9 @@ version = 4
 name = "aj"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "journal-client",
+ "serde",
  "serde_json",
 ]
 
@@ -690,6 +692,7 @@ dependencies = [
 name = "journal-client"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "journal-protocol",
  "reqwest",
  "serde",

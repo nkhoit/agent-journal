@@ -9,6 +9,9 @@ operations:
   - operation_id: healthReady
     method: GET
     path: /health/ready
+  - operation_id: registerPrincipal
+    method: POST
+    path: /v1/registrations
   - operation_id: getMe
     method: GET
     path: /v1/me
@@ -89,6 +92,9 @@ operations:
   - operation_id: createPrincipal
     method: POST
     path: /v1/admin/principals
+  - operation_id: recoverPrincipalCredential
+    method: POST
+    path: /v1/admin/principals/recover
   - operation_id: createSpace
     method: POST
     path: /v1/admin/spaces

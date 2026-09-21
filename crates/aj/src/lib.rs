@@ -1,11 +1,13 @@
 use journal_client::{
     Client, HttpTransport, journal_protocol::EnrollmentExchangeRequest, private_file,
 };
+use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path};
 
 const USAGE: &str = "Usage: aj COMMAND [OPTIONS]
 
 Commands:
+  register --endpoint URL --state-file PATH --handle HANDLE --display-name NAME
   me --endpoint URL --credential-file PATH
   spaces --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
   post --endpoint URL --credential-file PATH --space SPACE --idempotency-key KEY --input PATH|-
@@ -37,7 +39,9 @@ pub fn run_with_output(args: &[String], mut output: impl Write, mut error: impl 
         let _ = writeln!(output, "{USAGE}");
         return 0;
     }
-    let result = if args.first().is_some_and(|s| s == "enroll") {
+    let result = if args.first().is_some_and(|s| s == "register") {
+        register(args, &mut output, &mut error)
+    } else if args.first().is_some_and(|s| s == "enroll") {
         execute(args, &mut error)
     } else {
         journal(args, &mut output)
@@ -49,6 +53,160 @@ pub fn run_with_output(args: &[String], mut output: impl Write, mut error: impl 
             1
         }
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingRegistration {
+    version: u8,
+    endpoint: String,
+    request: journal_client::journal_protocol::RegistrationRequest,
+    token: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CompletedRegistration {
+    credential_id: String,
+    secret: String,
+    principal: journal_client::journal_protocol::domain::Principal,
+    endpoint: String,
+    request: journal_client::journal_protocol::RegistrationRequest,
+}
+
+fn register(
+    args: &[String],
+    output: &mut impl Write,
+    error: &mut impl Write,
+) -> Result<(), &'static str> {
+    if args.len() != 9
+        || args[0] != "register"
+        || args[1] != "--endpoint"
+        || args[3] != "--state-file"
+        || args[5] != "--handle"
+        || args[7] != "--display-name"
+    {
+        return Err(
+            "usage: aj register --endpoint URL --state-file PATH --handle HANDLE --display-name NAME",
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (output, error);
+        Err("private registration state requires Unix")
+    }
+
+    #[cfg(unix)]
+    {
+        let path = Path::new(&args[4]);
+        let _state_lock =
+            private_file::lock(path).map_err(|_| "cannot lock private registration state")?;
+        let requested = journal_client::journal_protocol::RegistrationRequest {
+            handle: args[6].clone(),
+            display_name: args[8].clone(),
+        };
+        requested.validate().map_err(|_| "invalid registration")?;
+        let (pending, encoded) = match private_file::read(path) {
+            Ok(text) => {
+                if let Ok(completed) = journal_client::journal_protocol::decode_json::<
+                    CompletedRegistration,
+                >(text.as_bytes())
+                {
+                    if completed.endpoint != args[2]
+                        || completed.request != requested
+                        || completed.principal.handle != completed.request.handle
+                        || completed.principal.display_name != completed.request.display_name
+                        || completed.credential_id.is_empty()
+                        || completed.secret.len() != 64
+                        || !completed
+                            .secret
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    {
+                        return Err("registration state does not match endpoint or profile");
+                    }
+                    let receipt = journal_client::journal_protocol::RegistrationReceipt {
+                        principal: completed.principal,
+                        credential_id: completed.credential_id,
+                    };
+                    serde_json::to_writer(&mut *output, &receipt)
+                        .map_err(|_| "cannot write response")?;
+                    return writeln!(output).map_err(|_| "cannot write response");
+                }
+                let pending: PendingRegistration =
+                    journal_client::journal_protocol::decode_json(text.as_bytes())
+                        .map_err(|_| "registration state is invalid")?;
+                if pending.version != 1
+                    || pending.endpoint != args[2]
+                    || pending.request != requested
+                {
+                    return Err("registration state does not match endpoint or profile");
+                }
+                (pending, text.into_bytes())
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                private_file::check_destination(path)
+                    .map_err(|_| "cannot establish private registration state")?;
+                let mut bytes = [0_u8; 32];
+                getrandom::fill(&mut bytes).map_err(|_| "secure random source failed")?;
+                let pending = PendingRegistration {
+                    version: 1,
+                    endpoint: args[2].clone(),
+                    request: requested,
+                    token: hex(&bytes),
+                };
+                let encoded =
+                    serde_json::to_vec(&pending).map_err(|_| "cannot encode registration state")?;
+                private_file::write(path, &encoded)
+                    .map_err(|_| "cannot persist private registration state")?;
+                (pending, encoded)
+            }
+            Err(_) => return Err("cannot read private registration state"),
+        };
+        let client =
+            Client::new(HttpTransport::new(&pending.endpoint).map_err(|_| "invalid endpoint")?);
+        let response = client.register(&pending.token, &pending.request).map_err(|_| {
+        let _ = writeln!(
+            error,
+            "aj: event=registration_response_failed server_outcome=unknown request_id={} recovery=retry-same-state-file",
+            client.last_request_id().as_deref().unwrap_or("unavailable")
+        );
+        "registration failed or response lost; retry the same state file"
+    })?;
+        let credential = CompletedRegistration {
+            credential_id: response.receipt.credential_id.clone(),
+            secret: pending.token,
+            principal: response.receipt.principal.clone(),
+            endpoint: pending.endpoint,
+            request: pending.request,
+        };
+        let completed =
+            serde_json::to_vec(&credential).map_err(|_| "cannot encode credential file")?;
+        private_file::replace(path, &encoded, &completed).map_err(|_| {
+        let _ = writeln!(
+            error,
+            "aj: event=credential_write_failed operation=registration server_outcome=committed request_id={} recovery=retry-same-state-file",
+            client.last_request_id().as_deref().unwrap_or("unavailable")
+        );
+        "credential persistence failed; retry the same state file"
+    })?;
+        serde_json::to_writer(&mut *output, &response.receipt)
+            .map_err(|_| "cannot write response")?;
+        writeln!(output).map_err(|_| "cannot write response")
+    }
+}
+
+#[cfg(unix)]
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                DIGITS[(byte >> 4) as usize] as char,
+                DIGITS[(byte & 15) as usize] as char,
+            ]
+        })
+        .collect()
 }
 
 fn read_input(input: &str) -> Result<Vec<u8>, &'static str> {
@@ -278,5 +436,64 @@ mod tests {
                 .unwrap()
                 .contains("sensitive-input")
         );
+    }
+
+    #[test]
+    fn completed_registration_is_an_existing_credential_file() {
+        let completed = CompletedRegistration {
+            credential_id: "credential-example".into(),
+            secret: "ab".repeat(32),
+            principal: journal_client::journal_protocol::domain::Principal {
+                id: "018f1f59-6e90-7000-8000-000000000001".into(),
+                handle: "agent-example".into(),
+                display_name: "Example".into(),
+                description: None,
+                profile_revision: 1,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                disabled: false,
+            },
+            endpoint: "https://journal.example.invalid".into(),
+            request: journal_client::journal_protocol::RegistrationRequest {
+                handle: "agent-example".into(),
+                display_name: "Example".into(),
+            },
+        };
+        let encoded = serde_json::to_vec(&completed).unwrap();
+        let credential: journal_client::journal_protocol::OneTimePrincipalClientSecret =
+            journal_client::journal_protocol::decode_json(&encoded).unwrap();
+        assert_eq!(credential.credential_id, completed.credential_id);
+        assert_eq!(credential.secret, completed.secret);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn registration_fails_before_network_without_private_storage_support() {
+        let path =
+            std::env::temp_dir().join(format!("unsupported-registration-{}", std::process::id()));
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let status = run_with_output(
+            &[
+                "register".into(),
+                "--endpoint".into(),
+                "http://127.0.0.1:9".into(),
+                "--state-file".into(),
+                path.to_string_lossy().into_owned(),
+                "--handle".into(),
+                "agent-example".into(),
+                "--display-name".into(),
+                "Example".into(),
+            ],
+            &mut output,
+            &mut errors,
+        );
+        assert_eq!(status, 1);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8(errors)
+                .unwrap()
+                .contains("private registration state requires Unix")
+        );
+        assert!(!path.exists());
     }
 }

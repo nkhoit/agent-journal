@@ -1,8 +1,10 @@
 # Self-registration and durable inbox specification
 
-Status: proposed replacement design, not the implemented protocol. The current
-[protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema remain
-authoritative for running software until the replacement is implemented.
+Status: identity slice implemented. Independent registration, principal credentials,
+`GET /v1/me`, and protected principal-scoped recovery are authoritative in the
+[protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Public-space
+policy, durable inbox operations, optional-client conversion, and retirement of
+the current delivery protocol remain proposed future slices.
 
 ## Product boundary
 

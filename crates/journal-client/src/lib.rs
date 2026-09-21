@@ -14,6 +14,12 @@ pub use journal_protocol::{
     OneTimeReplacementSecret as ReplacementSecret,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationClientResponse {
+    pub receipt: journal_protocol::RegistrationReceipt,
+    pub replayed: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("HTTP request failed with status {status}")]
@@ -43,6 +49,43 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    pub fn register(
+        &self,
+        token: &str,
+        input: &journal_protocol::RegistrationRequest,
+    ) -> Result<RegistrationClientResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        if token.len() != 64
+            || !token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ClientError::InvalidRequest);
+        }
+        let mut request = Request::new(
+            "POST",
+            "/v1/registrations",
+            journal_protocol::encode_json(input).map_err(|_| ClientError::Json)?,
+        );
+        request
+            .headers
+            .insert("Content-Type".into(), "application/json".into());
+        request
+            .headers
+            .insert("Authorization".into(), format!("Bearer {token}"));
+        let response = self.send(request)?;
+        if !matches!(response.status, 200 | 201) {
+            return Err(ClientError::Http {
+                status: response.status,
+            });
+        }
+        Ok(RegistrationClientResponse {
+            receipt: journal_protocol::decode_json(&response.body)
+                .map_err(|_| ClientError::Json)?,
+            replayed: response.status == 200,
+        })
+    }
+
     pub fn metrics(&self) -> Result<journal_protocol::OperationalMetrics, ClientError> {
         let response = self.send(Request::new("GET", "/v1/admin/metrics", vec![]))?;
         if response.status != 200 {
@@ -572,6 +615,14 @@ impl Client {
         journal_protocol::domain::validate_identifier("instance_id", &input.instance_id)
             .map_err(|_| ClientError::InvalidRequest)?;
         self.mutate("/v1/admin/enrollment/recover", input)
+    }
+
+    pub fn recover_principal(
+        &self,
+        input: &journal_protocol::PrincipalRecoveryRequest,
+    ) -> Result<journal_protocol::PrincipalRecoveryResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/principals/recover", input, None)
     }
 
     fn mutate(&self, path: &str, input: &impl serde::Serialize) -> Result<(), ClientError> {

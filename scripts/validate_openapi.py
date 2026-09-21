@@ -19,6 +19,7 @@ EXPECTED_OPERATIONS = {
     "getOperationalMetrics": ("GET", "/v1/admin/metrics"),
     "healthLive": ("GET", "/health/live"),
     "healthReady": ("GET", "/health/ready"),
+    "registerPrincipal": ("POST", "/v1/registrations"),
     "getMe": ("GET", "/v1/me"),
     "updateProfile": ("PATCH", "/v1/me/profile"),
     "listPrincipals": ("GET", "/v1/principals"),
@@ -43,6 +44,7 @@ EXPECTED_OPERATIONS = {
     "getRecordDeliveryStatus": ("GET", "/v1/records/{record_id}/delivery-status"),
     "getAdminMailboxStatus": ("GET", "/v1/admin/mailboxes/{principal}/status"),
     "createPrincipal": ("POST", "/v1/admin/principals"),
+    "recoverPrincipalCredential": ("POST", "/v1/admin/principals/recover"),
     "createSpace": ("POST", "/v1/admin/spaces"),
     "grantMembership": ("POST", "/v1/admin/memberships"),
     "rotateCredential": ("POST", "/v1/admin/credentials/rotate"),
@@ -91,6 +93,8 @@ REQUIRED_RESPONSE_FIELDS = {
         "created_at",
         "disabled",
     },
+    "RegistrationReceipt": {"principal", "credential_id"},
+    "PrincipalRecoveryResponse": {"principal", "replacement_secret"},
     "PrincipalPage": {"items", "next_cursor"},
     "Membership": {"space_id", "principal_id", "can_read", "can_append", "can_admin"},
     "Space": {"id", "name", "created_at", "limits"},
@@ -144,6 +148,8 @@ REQUIRED_RESPONSE_FIELDS = {
     "RequeueResponse": {"mailbox_item_id", "attempt_id", "state"},
 }
 REQUEST_SCHEMA_FIELDS = {
+    "RegistrationRequest": ({"handle", "display_name"}, {"handle", "display_name"}),
+    "PrincipalRecoveryRequest": ({"principal_id", "reason"}, {"principal_id"}),
     "CredentialRotateRequest": ({"credential_id", "reason"}, {"credential_id"}),
     "CredentialRevokeRequest": ({"credential_id", "reason"}, {"credential_id"}),
     "EnrollmentRecoveryRequest": ({"adapter_id", "instance_id"}, {"adapter_id", "instance_id"}),
@@ -181,6 +187,7 @@ REQUEST_SCHEMA_FIELDS = {
 }
 
 EXPECTED_REQUESTS = {
+    "registerPrincipal": ("RegistrationRequest", True),
     "appendRecord": ("AppendRecordRequest", True),
     "updateProfile": ("ProfileUpdateRequest", True),
     "createEnrollmentTicket": ("EnrollmentTicketCreateRequest", True),
@@ -193,6 +200,7 @@ EXPECTED_REQUESTS = {
     "commitHostCustody": ("CommitRequest", True),
     "recordDeliveryEvent": ("DeliveryEventRequest", True),
     "createPrincipal": ("PrincipalCreateRequest", True),
+    "recoverPrincipalCredential": ("PrincipalRecoveryRequest", True),
     "createSpace": ("SpaceCreateRequest", True),
     "grantMembership": ("MembershipRequest", True),
     "rotateCredential": ("CredentialRotateRequest", True),
@@ -204,6 +212,7 @@ EXPECTED_SUCCESS_RESPONSES = {
     "getOperationalMetrics": ("200", "OperationalMetrics"),
     "healthLive": ("200", "Health"),
     "healthReady": ("200", "Health"),
+    "registerPrincipal": ("201", "RegistrationReceipt"),
     "getMe": ("200", "Me"),
     "updateProfile": ("200", "Principal"),
     "listPrincipals": ("200", "PrincipalPage"),
@@ -228,6 +237,7 @@ EXPECTED_SUCCESS_RESPONSES = {
     "getRecordDeliveryStatus": ("200", "DeliveryStatusPage"),
     "getAdminMailboxStatus": ("200", "MailboxStatusPage"),
     "createPrincipal": ("201", "Principal"),
+    "recoverPrincipalCredential": ("200", "PrincipalRecoveryResponse"),
     "createSpace": ("201", "Space"),
     "grantMembership": ("200", "Membership"),
     "rotateCredential": ("200", "CredentialRotationResponse"),
@@ -266,6 +276,7 @@ EXPECTED_ADMIN_PARAMETER_REFS = {
         "#/components/parameters/Limit",
     ),
     "createPrincipal": (),
+    "recoverPrincipalCredential": (),
     "createSpace": (),
     "grantMembership": (),
     "rotateCredential": (),
@@ -326,6 +337,8 @@ def security_for(path: str, operation_id: str) -> list[dict[str, list[Any]]]:
         return []
     if operation_id == "exchangeEnrollmentTicket":
         return [{"enrollmentTicket": []}]
+    if operation_id == "registerPrincipal":
+        return [{"registrationToken": []}]
     if operation_id in DELIVERY_OPERATIONS:
         return [{"deliveryAdapter": []}]
     return [{"principalClient": []}]
@@ -795,12 +808,16 @@ def validate_openapi(document: dict[str, Any]) -> dict[str, tuple[str, str, dict
         if name not in responses:
             fail(f"missing required response: {name}")
     expected_schemes = {
+        "registrationToken": ("64 lowercase hexadecimal characters",),
         "principalClient": ("opaque",),
         "deliveryAdapter": ("opaque",),
         "enrollmentTicket": ("opaque one-use enrollment ticket",),
     }
     if set(schemes) != set(expected_schemes):
-        fail("security schemes must be principalClient, deliveryAdapter, and enrollmentTicket only")
+        fail(
+            "security schemes must be registrationToken, principalClient, "
+            "deliveryAdapter, and enrollmentTicket only"
+        )
     for name, (bearer_format,) in expected_schemes.items():
         scheme = schemes[name]
         if (

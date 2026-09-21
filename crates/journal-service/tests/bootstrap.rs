@@ -85,6 +85,344 @@ impl Drop for Fixture {
     }
 }
 
+fn registration_request() -> RegistrationRequest {
+    RegistrationRequest {
+        handle: "self-registered".into(),
+        display_name: "Self Registered".into(),
+    }
+}
+
+#[test]
+fn self_registration_replays_exactly_and_rejects_conflicts_and_dead_credentials() {
+    let f = Fixture::new();
+    let token = "ab".repeat(32);
+    let request = registration_request();
+    let first = f.service.register(&token, &request).unwrap();
+    assert!(!first.replayed);
+    assert_eq!(first.receipt.principal.handle, request.handle);
+    f.service
+        .create_space(&SpaceCreateRequest {
+            id: "registration-space".into(),
+            name: "Registration space".into(),
+        })
+        .unwrap();
+    f.service
+        .set_membership(&MembershipRequest {
+            space_id: "registration-space".into(),
+            principal_id: first.receipt.principal.id.clone(),
+            can_read: true,
+            can_append: true,
+            can_admin: false,
+        })
+        .unwrap();
+    assert!(
+        f.service
+            .append_record(
+                &token,
+                "registration-space",
+                "registration-append",
+                &AppendRecordRequest {
+                    kind: "note".into(),
+                    content: "registered without adapter".into(),
+                    run_id: None,
+                    attention: Vec::new(),
+                    routing_key: None,
+                    relations: Vec::new(),
+                },
+            )
+            .is_ok()
+    );
+    let replay = f.service.register(&token, &request).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt, first.receipt);
+    assert!(matches!(
+        f.service.register(
+            &token,
+            &RegistrationRequest {
+                display_name: "Changed".into(),
+                ..request.clone()
+            }
+        ),
+        Err(BootstrapError::Conflict)
+    ));
+    let connection = Database::open(&f.path).unwrap().connect().unwrap();
+    connection
+        .execute(
+            "UPDATE credentials SET revoked_at='2027-01-15T08:00:00Z'
+             WHERE id=?",
+            [&first.receipt.credential_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service.register(&token, &request),
+        Err(BootstrapError::Unauthorized)
+    ));
+    let expired_token = "78".repeat(32);
+    let expired_request = RegistrationRequest {
+        handle: "expired-registration".into(),
+        display_name: "Expired".into(),
+    };
+    let expired = f
+        .service
+        .register(&expired_token, &expired_request)
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE credentials SET expires_at='2020-01-01T00:00:00Z' WHERE id=?",
+            [&expired.receipt.credential_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service.register(&expired_token, &expired_request),
+        Err(BootstrapError::Unauthorized)
+    ));
+    let occupied = f
+        .service
+        .register(
+            &"56".repeat(32),
+            &RegistrationRequest {
+                handle: "principal-test".into(),
+                display_name: "Occupied".into(),
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(occupied, BootstrapError::Conflict));
+    let enrollment = f.exchange(&f.ticket()).unwrap();
+    assert!(matches!(
+        f.service
+            .register(&enrollment.principal_client_secret.secret, &request),
+        Err(BootstrapError::Unauthorized)
+    ));
+    assert!(matches!(
+        f.service.register(&"CD".repeat(32), &request),
+        Err(BootstrapError::InvalidJournal)
+    ));
+}
+
+#[test]
+fn concurrent_identical_registration_has_one_identity_and_receipt() {
+    let f = Fixture::new();
+    let token = "cd".repeat(32);
+    let request = registration_request();
+    std::thread::scope(|scope| {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let results = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let service = &f.service;
+                let token = &token;
+                let request = &request;
+                scope.spawn(move || {
+                    barrier.wait();
+                    service.register(token, request).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results[0].receipt, results[1].receipt);
+        assert_ne!(results[0].replayed, results[1].replayed);
+    });
+    let connection = Database::open(&f.path).unwrap().connect().unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM registration_receipts", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn registration_and_principal_recovery_roll_back_at_every_boundary() {
+    for boundary in [
+        "registration-digest-lookup",
+        "registration-principal",
+        "registration-handle",
+        "registration-credential",
+        "registration-receipt",
+    ] {
+        let f = Fixture::new();
+        let failing = f.service.clone().with_failpoint(boundary);
+        assert!(matches!(
+            failing.register(&"ef".repeat(32), &registration_request()),
+            Err(BootstrapError::Injected)
+        ));
+        let connection = Database::open(&f.path).unwrap().connect().unwrap();
+        for table in ["registration_receipts", "credentials"] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM principals WHERE display_name='Self Registered'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    for boundary in [
+        "principal-recovery-revoked",
+        "principal-recovery-authority",
+        "principal-recovery-issued",
+    ] {
+        let f = Fixture::new();
+        let registered = f
+            .service
+            .register(&"12".repeat(32), &registration_request())
+            .unwrap();
+        let failing = f.service.clone().with_failpoint(boundary);
+        assert!(matches!(
+            failing.recover_principal(&PrincipalRecoveryRequest {
+                principal_id: registered.receipt.principal.id.clone(),
+                reason: Some("test".into()),
+            }),
+            Err(BootstrapError::Injected)
+        ));
+        assert!(
+            f.service
+                .authenticate(&"12".repeat(32), CredentialClass::PrincipalClient)
+                .is_ok()
+        );
+    }
+}
+
+#[test]
+fn principal_recovery_revokes_all_authority_and_is_repeatable_by_uuid() {
+    let f = Fixture::new();
+    let registered = f
+        .service
+        .register(&"34".repeat(32), &registration_request())
+        .unwrap();
+    f.service
+        .provision_adapter(&AdapterProvisionRequest {
+            principal_id: registered.receipt.principal.id.clone(),
+            adapter_id: "self-adapter".into(),
+        })
+        .unwrap();
+    let ticket = f
+        .service
+        .create_ticket(&EnrollmentTicketCreateRequest {
+            principal_id: registered.receipt.principal.id.clone(),
+            adapter_id: "self-adapter".into(),
+            ttl_seconds: 60,
+        })
+        .unwrap();
+    let enrollment = f
+        .service
+        .exchange(
+            &ticket.enrollment_ticket.ticket,
+            &EnrollmentExchangeRequest {
+                instance_id: "self-installation".into(),
+            },
+        )
+        .unwrap();
+    let first = f
+        .service
+        .recover_principal(&PrincipalRecoveryRequest {
+            principal_id: registered.receipt.principal.id.clone(),
+            reason: None,
+        })
+        .unwrap();
+    assert!(
+        f.service
+            .authenticate(&"34".repeat(32), CredentialClass::PrincipalClient)
+            .is_err()
+    );
+    assert!(
+        f.service
+            .authenticate(
+                &enrollment.delivery_adapter_secret.secret,
+                CredentialClass::DeliveryAdapter
+            )
+            .is_err()
+    );
+    let second = f
+        .service
+        .recover_principal(&PrincipalRecoveryRequest {
+            principal_id: registered.receipt.principal.id.clone(),
+            reason: None,
+        })
+        .unwrap();
+    assert!(
+        f.service
+            .authenticate(
+                &first.replacement_secret.secret,
+                CredentialClass::PrincipalClient
+            )
+            .is_err()
+    );
+    assert!(
+        f.service
+            .authenticate(
+                &second.replacement_secret.secret,
+                CredentialClass::PrincipalClient
+            )
+            .is_ok()
+    );
+    assert_eq!(second.principal.id, registered.receipt.principal.id);
+}
+
+#[cfg(unix)]
+#[test]
+fn principal_recovery_advances_protected_external_audit() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory =
+        std::env::temp_dir().join(format!("principal-recovery-audit-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let database =
+        Database::open_protected(directory.join("journal.db"), directory.join("audit.db")).unwrap();
+    let service = BootstrapService::with_sources(
+        database.clone(),
+        Arc::new(FixedClock),
+        Arc::new(Sequence(AtomicU64::new(500))),
+    );
+    let registered = service
+        .register(&"90".repeat(32), &registration_request())
+        .unwrap();
+    let before: i64 = database
+        .connect_read_only()
+        .unwrap()
+        .query_row(
+            "SELECT revision FROM recovery_anchor WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    service
+        .recover_principal(&PrincipalRecoveryRequest {
+            principal_id: registered.receipt.principal.id,
+            reason: Some("audit test".into()),
+        })
+        .unwrap();
+    let after: i64 = database
+        .connect_read_only()
+        .unwrap()
+        .query_row(
+            "SELECT revision FROM recovery_anchor WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, before + 1);
+    drop(service);
+    drop(database);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn exchange_is_one_use_and_authentication_is_class_separated() {
     let f = Fixture::new();

@@ -66,7 +66,7 @@ Every request has a server-generated `request_id`, returned as `X-Request-ID`. `
 - `bootstrap_rejected` (warn): validation, not-found, or conflict outcomes.
 - `bootstrap_failed` (error): storage, SQLite, randomness, clock, worker, or capacity failure. SQLite failures include a numeric extended code when available, never SQL text or raw error details. `not_confirmed` or `unknown` must not be interpreted as proof of rollback.
 
-Search by request ID and operation first; inspect the associated failure category, SQLite code, and request duration before retrying. Enrollment and rotation are not replayable. The CLIs report `credential_write_failed`, `server_outcome=committed`, a validated response request ID when available, and `recovery=enrollment-recover` if local publication fails. A missing response instead reports `server_outcome=unknown`; an unavailable request ID is expected when the response is lost. Use the protected recovery procedure below rather than inferring success from HTTP completion alone.
+Search by request ID and operation first; inspect the associated failure category, SQLite code, and request duration before retrying. Self-registration is replayable only from its unchanged private pending state. Enrollment and rotation are not replayable. The CLIs report `credential_write_failed`, `server_outcome=committed`, a validated response request ID when available, and `recovery=enrollment-recover` if local publication fails. A missing response instead reports `server_outcome=unknown`; an unavailable request ID is expected when the response is lost. Use the protected recovery procedure below rather than inferring success from HTTP completion alone.
 
 Logs exclude headers, bearer values, tickets, digests, request/response bodies,
 local credential paths, installation IDs, and runtime route targets. They are
@@ -161,6 +161,25 @@ Run administration as the Unix account owning the daemon socket. The daemon chec
 With `SOCKET` pointing to that socket, `JOURNAL_URL` pointing to the public HTTPS endpoint (loopback HTTP is allowed for local testing), and `secrets/` a mode-`0700` directory:
 
 ```sh
+aj register --endpoint "$JOURNAL_URL" --state-file secrets/principal.json \
+  --handle agent-example --display-name "Example agent"
+aj me --endpoint "$JOURNAL_URL" --credential-file secrets/principal.json
+```
+
+`aj register` creates the private state file before networking. Retry the exact
+command and path after a lost response. Endpoint or profile drift is rejected,
+concurrent commands for the same path are serialized, and an existing completed
+credential file is never overwritten. An exact retry of completed state returns
+the retained receipt without another request, including when rename succeeded
+but directory synchronization reported failure. On success the same path
+contains the ordinary principal credential shape accepted by `--credential-file`.
+Private storage is currently Unix-only; unsupported platforms fail before the
+request.
+
+The transitional administrator-created enrollment path remains available for
+delivery adapters:
+
+```sh
 aj-admin --socket "$SOCKET" principal-create agent-example "Example agent"
 aj-admin --socket "$SOCKET" space-create space-example "Example space"
 aj-admin --socket "$SOCKET" membership-set space-example agent-example true true false
@@ -170,6 +189,18 @@ aj enroll --endpoint "$JOURNAL_URL" --ticket-file secrets/ticket \
   --instance-id installation-example \
   --principal-file secrets/principal.json --delivery-file secrets/delivery.json
 ```
+
+If a principal credential is lost, use its immutable UUID:
+
+```sh
+aj-admin --socket "$SOCKET" principal-recover PRINCIPAL_UUID \
+  secrets/recovered-principal.json "operator recovery"
+```
+
+This revokes all currently valid principal and delivery credentials plus
+outstanding transitional enrollment authority for that UUID, then returns one
+principal replacement through the protected socket. If the response is lost or
+the file write fails, repeat recovery by UUID with a fresh output path.
 
 Ticket and credential output files must not already exist. Publication is no-clobber and durable: write and sync a private staging file, link it into place, remove staging, and sync the containing directory. Credential files contain the non-secret credential identifier and its secret; ticket files contain only the ticket. Neither command prints secrets. A failure may leave a private output file, but never makes a committed transaction replayable. Delete unusable outputs only after revocation/recovery, and use fresh output paths when reenrolling.
 

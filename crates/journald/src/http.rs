@@ -404,6 +404,12 @@ admin_handler!(
     |s: BootstrapService, r: journal_protocol::EnrollmentRecoveryRequest| s
         .recover(&r.adapter_id, &r.instance_id)
 );
+admin_handler!(
+    recover_principal,
+    journal_protocol::PrincipalRecoveryRequest,
+    OK,
+    |s: BootstrapService, r| s.recover_principal(&r)
+);
 
 fn bearer(headers: &axum::http::HeaderMap) -> Option<String> {
     if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
@@ -415,6 +421,63 @@ fn bearer(headers: &axum::http::HeaderMap) -> Option<String> {
         && token.len() == 64
         && token.bytes().all(|b| b.is_ascii_hexdigit()))
     .then(|| token.to_owned())
+}
+
+fn registration_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
+    if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
+        return None;
+    }
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("Bearer")
+        && token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| token.to_owned())
+}
+
+async fn register_principal(
+    State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: axum::http::HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let Some(token) = registration_bearer(&headers) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "invalid request",
+            request_id,
+        );
+    };
+    let Ok(input) = strict_request::<journal_protocol::RegistrationRequest>(request).await else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "invalid request",
+            request_id,
+        );
+    };
+    match bootstrap_result(
+        &state,
+        &request_id,
+        "principal_registration",
+        true,
+        move |service| service.register(&token, &input),
+    )
+    .await
+    {
+        Ok(outcome) => success_response(
+            if outcome.replayed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
+            outcome.receipt,
+        ),
+        Err(response) => response,
+    }
 }
 
 async fn exchange(
@@ -730,6 +793,7 @@ pub(crate) fn public_router_with_timeout(
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/v1/registrations", post(register_principal))
         .route("/v1/enrollment/exchange", post(exchange))
         .route("/v1/me", get(me))
         .route("/v1/me/profile", patch(update_profile))
@@ -795,6 +859,7 @@ pub(crate) fn admin_router_with_timeout(
         .route("/v1/admin/credentials/rotate", post(rotate))
         .route("/v1/admin/credentials/revoke", post(revoke))
         .route("/v1/admin/enrollment/recover", post(recover))
+        .route("/v1/admin/principals/recover", post(recover_principal))
         .route(
             "/v1/admin/adapters/{adapter_id}/replace",
             post(replace_adapter),
