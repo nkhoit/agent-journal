@@ -62,9 +62,9 @@ class ContractGateTest(unittest.TestCase):
         result = self.run_gate()
         output = f"{result.stdout}\n{result.stderr}"
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("33 paths", output)
-        self.assertIn("35 operations", output)
-        self.assertIn("77 fixture mappings", output)
+        self.assertIn("35 paths", output)
+        self.assertIn("37 operations", output)
+        self.assertIn("79 fixture mappings", output)
         self.assertIn("fixture coverage", output.casefold())
 
     def test_rotation_requires_one_time_response(self) -> None:
@@ -272,6 +272,22 @@ class ContractGateTest(unittest.TestCase):
         self.write_yaml(self.openapi, document)
 
         self.assert_gate_rejects("getRecordDeliveryStatus", "other_reader")
+
+    def test_inbox_state_filter_and_receipt_vocabulary_are_fixed(self) -> None:
+        document = self.load_yaml(self.openapi)
+        state = document["paths"]["/v1/inbox"]["get"]["parameters"][0]
+        state["schema"]["default"] = "all"
+        self.write_yaml(self.openapi, document)
+        self.assert_gate_rejects("getInbox", "state")
+
+    def test_inbox_ack_has_no_request_body(self) -> None:
+        document = self.load_yaml(self.openapi)
+        document["paths"]["/v1/inbox/{item_id}/ack"]["post"]["requestBody"] = {
+            "required": True,
+            "content": {"application/json": {"schema": {"type": "object"}}},
+        }
+        self.write_yaml(self.openapi, document)
+        self.assert_gate_rejects("acknowledgeInboxItem", "request body")
 
     def test_expected_envelope_requires_from_principal(self) -> None:
         envelope_path = self.conformance / "adapter" / "expected-envelope.txt"

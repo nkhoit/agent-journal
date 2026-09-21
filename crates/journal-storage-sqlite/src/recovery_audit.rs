@@ -47,6 +47,7 @@ impl Cell {
 struct Snapshot {
     tables: Vec<Vec<Vec<Cell>>>,
     space_heads: Vec<(String, i64)>,
+    inbox_heads: Vec<(String, i64)>,
 }
 
 #[derive(Debug)]
@@ -646,7 +647,7 @@ impl RecoveryAudit {
             params![revision, serde_json::to_string(&snapshot(&transaction)?)?],
         )?;
         transaction.execute(
-            "UPDATE recovery_anchor SET revision=?,audit_required=1",
+            "UPDATE recovery_anchor SET revision=?1,audit_required=1,inbox_epoch=?1",
             [revision],
         )?;
         transaction.commit()?;
@@ -804,6 +805,9 @@ fn snapshot(connection: &Connection) -> Result<Snapshot, StorageError> {
     Ok(Snapshot {
         tables,
         space_heads,
+        inbox_heads: connection.prepare("SELECT recipient_principal_id,last_seq FROM inbox_sequences ORDER BY recipient_principal_id")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>,_>>()?,
     })
 }
 
@@ -888,6 +892,18 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
           lease_expires_at='1970-01-01T00:00:00Z';
          UPDATE enrollment_installations SET recovery_authorized=1;",
     )?;
+    for (recipient, head) in &latest.inbox_heads {
+        if *head <= 0 {
+            return Err(StorageError::RecoveryClosed(
+                "invalid inbox allocation head",
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO inbox_sequences(recipient_principal_id,last_seq) VALUES (?,?)
+             ON CONFLICT(recipient_principal_id) DO UPDATE SET last_seq=max(last_seq,excluded.last_seq)",
+            params![recipient,head],
+        )?;
+    }
     Ok(())
 }
 
@@ -1153,8 +1169,9 @@ mod tests {
                      VALUES('r1','s',1,'018f1f59-6e90-7000-8000-000000000001','note','pending recovery','2026-01-01T00:00:00Z'),
                            ('r2','s',2,'018f1f59-6e90-7000-8000-000000000001','note','retained custody','2026-01-01T00:00:00Z');
                  INSERT INTO attention VALUES('r1','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z'),('r2','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
-                 INSERT INTO mailbox_items VALUES('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
-                     ('m2','r2','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                 INSERT INTO inbox_sequences VALUES ('018f1f59-6e90-7000-8000-000000000001',2);
+                 INSERT INTO mailbox_items VALUES('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,NULL),
+                     ('m2','r2','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',2,NULL);
                  UPDATE mailbox_items SET state='claimed';
                  UPDATE delivery_attempts SET state='claimed';
                  INSERT INTO claims(id,adapter_id,principal_id,instance_id,generation,state,lease_expires_at,created_at,credential_id)
@@ -1422,6 +1439,75 @@ mod tests {
     }
 
     #[test]
+    fn older_backup_loses_new_acks_but_preserves_inbox_allocation_high_water() {
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        seed(&database);
+        let audit = fixture.audit(&database);
+        mutate(
+            &database,
+            &audit,
+            "UPDATE mailbox_items SET acknowledged_at='2026-01-01T00:00:00Z' WHERE id='m2'",
+        );
+        audit
+            .backup(&database, &fixture.0.join("backup.db"))
+            .unwrap();
+        mutate(
+            &database,
+            &audit,
+            "UPDATE mailbox_items SET acknowledged_at='2026-01-02T00:00:00Z' WHERE id='m1'; UPDATE inbox_sequences SET last_seq=7",
+        );
+        let snapshot_before = snapshot(&database.connect_unchecked().unwrap()).unwrap();
+        assert_eq!(snapshot_before.inbox_heads[0].1, 7);
+        let serialized = serde_json::to_string(&snapshot_before).unwrap();
+        assert!(!serialized.contains("acknowledged_at"));
+        assert!(!serialized.contains("\"m1\""));
+        let mut approval = audit
+            .restore(
+                &fixture.0.join("backup.db"),
+                &fixture.0.join("restored.db"),
+                true,
+            )
+            .unwrap();
+        let restored = Database::open(fixture.0.join("restored.db")).unwrap();
+        let connection = restored.connect_unchecked().unwrap();
+        let rows = connection
+            .prepare("SELECT id,acknowledged_at FROM mailbox_items ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("m1".into(), None),
+                ("m2".into(), Some("2026-01-01T00:00:00Z".into()))
+            ]
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT last_seq FROM inbox_sequences", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT inbox_epoch FROM recovery_anchor", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            approval.audit_revision
+        );
+        assert!(audit.reopen(&restored, &approval).is_err());
+        approval.accepted_record_loss = true;
+        approval.inventory_complete = true;
+        audit.reopen(&restored, &approval).unwrap();
+    }
+
+    #[test]
     fn restore_replays_revocation_fences_authority_and_requires_exact_approval() {
         let fixture = Fixture::new();
         let database = fixture.database();
@@ -1554,6 +1640,12 @@ mod tests {
             let transaction = connection.transaction().unwrap();
             transaction
                 .execute("UPDATE memberships SET can_read=0", [])
+                .unwrap();
+            transaction
+                .execute(
+                    "UPDATE mailbox_items SET acknowledged_at='2026-01-02T00:00:00Z' WHERE id='m1'",
+                    [],
+                )
                 .unwrap();
             let revision = audit.prepare(&transaction).unwrap();
             if stage == "committed" {

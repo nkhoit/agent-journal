@@ -116,8 +116,10 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(CommitResponse, "CommitResponse");
     example!(DeliveryEnvelope, "DeliveryEnvelope");
     example!(DeliveryEventResponse, "DeliveryEventResponse");
-    example!(DeliverySummary, "DeliverySummary");
-    example!(DeliveryStatusPage, "DeliveryStatusPage");
+    example!(ReceiptSummary, "ReceiptSummary");
+    example!(ReceiptStatusPage, "ReceiptStatusPage");
+    example!(InboxItem, "InboxItem");
+    example!(InboxPage, "InboxPage");
     example!(MailboxStatus, "MailboxStatus");
     example!(MailboxStatusPage, "MailboxStatusPage");
     example!(OneTimeEnrollmentTicket, "OneTimeEnrollmentTicket");
@@ -707,14 +709,35 @@ fn response_dtos_require_every_normative_field() {
         }),
         &["event_id", "state", "received_at"],
     );
-    assert_required_fields::<DeliverySummary>(
+    assert_required_fields::<ReceiptSummary>(
         json!({
-            "mailbox_item_id":"mailbox-1","recipient":"agent-beta",
-            "state":"pending","attempts":1
+            "inbox_item_id":"mailbox-1","recipient":"agent-beta",
+            "state":"unacknowledged","created_at":"2026-01-01T00:00:00Z","acknowledged_at":null
         }),
-        &["mailbox_item_id", "recipient", "state", "attempts"],
+        &[
+            "inbox_item_id",
+            "recipient",
+            "state",
+            "created_at",
+            "acknowledged_at",
+        ],
     );
-    assert_required_fields::<DeliveryStatusPage>(
+    assert_required_fields::<ReceiptStatusPage>(
+        json!({"items":[],"next_cursor":null}),
+        &["items", "next_cursor"],
+    );
+    assert_required_fields::<InboxItem>(
+        wire_example("InboxItem").clone(),
+        &[
+            "inbox_item_id",
+            "recipient",
+            "seq",
+            "created_at",
+            "acknowledged_at",
+            "record",
+        ],
+    );
+    assert_required_fields::<InboxPage>(
         json!({"items":[],"next_cursor":null}),
         &["items", "next_cursor"],
     );

@@ -49,6 +49,14 @@ Run the ordinary parallel gate on Linux. The spool explicitly unlocks its sideca
 after closing SQLite, including when another process inherited the lock descriptor.
 The Unix regression holds that descriptor in a live child during close and reopen.
 
+Principal inbox tests live in the protocol/service/client `tests/inbox.rs` and
+`journald/tests/inbox_http.rs`. They exercise independent registration, atomic
+recipient sequences, bounded traversal, bodyless ack, first-timestamp retention
+and receipt privacy without an adapter. Schema 11 recovery retains allocator
+heads but permits receipt loss only under intentional older-backup loss approval.
+Do not translate legacy custody outcomes into inbox acknowledgments. The old
+runtime tests inspect persisted legacy state separately from receipt status.
+
 S11 adds `journal-runtime-fake` using existing pinned dependencies, and
 `make adapter-conformance` executes every adapter scenario with redacted
 persisted-state evidence. The runner also rejects fixture drift and missing

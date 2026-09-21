@@ -78,6 +78,10 @@ def main():
                     if status == 200:
                         assert page.locator("tbody tr").count() == 1
                         assert page.locator("tbody").inner_text().startswith(fixture["recipient_id"])
+                        assert page.locator("h1").inner_text() == "Receipt status"
+                        assert "unacknowledged" in page.locator("tbody").inner_text()
+                        assert "Attempts" not in page.locator("thead").inner_text()
+                        assert "host-accepted" not in page.locator("tbody").inner_text()
                     else:
                         assert "recipient" not in page.content()
                 for path in [record, record + "/thread", "/web/spaces/space", "/web/spaces/space/search?q=malicioussnippet"]:

@@ -42,6 +42,8 @@ EXPECTED_OPERATIONS = {
     "recordDeliveryEvent": ("POST", "/v1/mailbox-items/{item_id}/events"),
     "getMailboxStatus": ("GET", "/v1/mailbox/status"),
     "getRecordDeliveryStatus": ("GET", "/v1/records/{record_id}/delivery-status"),
+    "getInbox": ("GET", "/v1/inbox"),
+    "acknowledgeInboxItem": ("POST", "/v1/inbox/{item_id}/ack"),
     "getAdminMailboxStatus": ("GET", "/v1/admin/mailboxes/{principal}/status"),
     "createPrincipal": ("POST", "/v1/admin/principals"),
     "recoverPrincipalCredential": ("POST", "/v1/admin/principals/recover"),
@@ -128,8 +130,10 @@ REQUIRED_RESPONSE_FIELDS = {
         "from_principal", "addressed_to", "body",
     },
     "DeliveryEventResponse": {"event_id", "state", "received_at"},
-    "DeliverySummary": {"mailbox_item_id", "recipient", "state", "attempts"},
-    "DeliveryStatusPage": {"items", "next_cursor"},
+    "ReceiptSummary": {"inbox_item_id", "recipient", "state", "created_at", "acknowledged_at"},
+    "ReceiptStatusPage": {"items", "next_cursor"},
+    "InboxItem": {"inbox_item_id", "recipient", "seq", "created_at", "acknowledged_at", "record"},
+    "InboxPage": {"items", "next_cursor"},
     "MailboxStatus": {"principal_id", "pending", "oldest_pending_at"},
     "MailboxStatusPage": {"items", "next_cursor"},
     "CredentialMetadata": {"credential_id", "principal_id", "class", "rotated_at"},
@@ -235,7 +239,9 @@ EXPECTED_SUCCESS_RESPONSES = {
     "commitHostCustody": ("200", "CommitResponse"),
     "recordDeliveryEvent": ("200", "DeliveryEventResponse"),
     "getMailboxStatus": ("200", "MailboxStatusPage"),
-    "getRecordDeliveryStatus": ("200", "DeliveryStatusPage"),
+    "getRecordDeliveryStatus": ("200", "ReceiptStatusPage"),
+    "getInbox": ("200", "InboxPage"),
+    "acknowledgeInboxItem": ("204", None),
     "getAdminMailboxStatus": ("200", "MailboxStatusPage"),
     "createPrincipal": ("201", "Principal"),
     "recoverPrincipalCredential": ("200", "PrincipalRecoveryResponse"),
@@ -542,7 +548,7 @@ def validate_limits(
 
     page_schemas = (
         "PrincipalPage", "SpacePage", "RecordPage", "SearchPage",
-        "AdapterPage", "DeliveryStatusPage", "MailboxStatusPage",
+        "AdapterPage", "ReceiptStatusPage", "InboxPage", "MailboxStatusPage",
     )
     for schema_name in page_schemas:
         if schemas.get(schema_name, {}).get("properties", {}).get("items", {}).get("maxItems") != 100:
@@ -853,6 +859,25 @@ def validate_openapi(document: dict[str, Any]) -> dict[str, tuple[str, str, dict
     validate_response_fields(schemas)
     validate_request_contract(document, operations, schemas)
     validate_operation_schemas(operations)
+
+    inbox = operations["getInbox"][2]
+    states = [p for p in inbox.get("parameters", []) if p.get("name") == "state"]
+    if len(states) != 1 or states[0].get("schema") != {
+        "type": "string", "enum": ["unacknowledged", "acknowledged", "all"],
+        "default": "unacknowledged",
+    }:
+        fail("getInbox must define the exact receipt state filter and default")
+    if schemas["ReceiptSummary"]["properties"]["state"] != {
+        "type": "string", "enum": ["unacknowledged", "acknowledged"],
+    }:
+        fail("ReceiptSummary must not expose legacy delivery states")
+    for name in ["InboxItem", "ReceiptSummary"]:
+        if set(schemas[name]["properties"]) != REQUIRED_RESPONSE_FIELDS[name] or schemas[name].get("additionalProperties") is not False:
+            fail(f"{name} must expose only its exact receipt fields")
+        if schemas[name]["properties"]["acknowledged_at"] != {
+            "type": ["string", "null"], "format": "date-time",
+        }:
+            fail(f"{name}.acknowledged_at must be nullable server time")
 
     visibility = operations["getRecordDeliveryStatus"][2].get(
         "x-agent-journal-delivery-status-visibility"

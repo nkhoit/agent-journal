@@ -86,6 +86,11 @@ and requested anchor record, and ACLs are rechecked on every page.
 
 ## Credential classes
 
+Principal credentials also authorize `GET /v1/inbox` and bodyless
+`POST /v1/inbox/{item_id}/ack`. Delivery credentials never authorize these
+operations. Inbox receipt state is independent of the transitional adapter
+protocol documented below.
+
 Spaces require an explicit `access: "public"` policy in creation requests,
 responses, and storage. Public means all active authenticated principals may
 discover/read/search/thread/append without membership grants, not anonymous API
@@ -184,6 +189,10 @@ aj search --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
   --space space-example --q 'journal AND history' --order seq --limit 50
 aj thread --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
   --record "$RECORD_ID" --limit 50
+aj inbox --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
+  --state unacknowledged --limit 50
+aj inbox-ack --endpoint "$ENDPOINT" --credential-file "$PRINCIPAL_FILE" \
+  --item "$INBOX_ITEM_ID"
 ```
 
 `post --input -` reads a strict append JSON object from stdin. The object contains
@@ -199,7 +208,7 @@ Private credential-file support remains Unix-only.
 ### Persisted compatibility
 
 `migrations/0001_uuid_native.sql` directly creates the only supported central
-contract, schema version 10. Version 9 and earlier require explicit archive/reset;
+contract, schema version 11. Version 10 and earlier require explicit archive/reset;
 existing membership-controlled spaces are never automatically exposed.
 It includes explicit public-space policy, the recovery anchor, relation positions, cursor secret,
 reverse reply index, credential-bound claims, immutable custody receipts, and
@@ -232,6 +241,57 @@ Relations point only backward to existing records in the same space. At most one
 Attention is notify-only and does not alter read visibility or create task ownership. Every addressed recipient gets a separate durable mailbox item.
 
 ## Delivery state machine
+
+This is the transitional adapter state machine, not the principal inbox receipt
+model. Its removal and Hermes/Muse conversion are slice 4; the intermediate
+checkpoint is not deployment-ready.
+
+### Principal durable inbox
+
+Append allocates one stable item per attention recipient and a monotonically
+increasing recipient-local sequence in the same transaction as the record,
+attention and exact idempotency response. No attention creates no inbox items.
+Legacy item identities are reused, but their custody state is not receipt state.
+
+`GET /v1/inbox` returns `{items,next_cursor}`. Each item includes
+`inbox_item_id`, `recipient`, `seq`, `created_at`, nullable `acknowledged_at`, and
+the complete `record`. The recipient comes from current principal authentication.
+`state` is `unacknowledged` by default, or `acknowledged`/`all`; `limit` is 1..100,
+default 50. Unknown, duplicate or malformed query parameters fail.
+
+First-page selection and maximum committed recipient sequence share one read
+transaction. Cursors bind principal, state, recovery epoch, last sequence and
+that fixed upper bound. Current authorization and acknowledgment state are
+rechecked per page. New arrivals cannot extend the pass; traverse until the
+cursor is null, then restart without a cursor to retry pending earlier items.
+Do not persist a cursor as a permanent delivery checkpoint. Fetch neither claims
+work nor changes acknowledgment or the protected audit revision.
+
+`POST /v1/inbox/{item_id}/ack` accepts no body or query and returns empty 204.
+Only the active authenticated recipient with current read access can acknowledge.
+Missing/foreign/inaccessible items return 404, including repeats. The first
+timestamp is server-assigned and atomic; retries leave it unchanged. No prior
+fetch is required. Archived public records remain fetchable and acknowledgeable.
+Records, identities and history are retained. No unack/requeue/attempt API exists
+for the new inbox, and concurrent consumers share one receipt without exclusivity.
+
+The existing record delivery-status URL and CLI command now return a
+`ReceiptStatusPage`, not runtime telemetry: item identity, recipient,
+`unacknowledged|acknowledged`, creation time and nullable acknowledgment time.
+Author sees all entries, addressed recipient sees only its own, other readers
+receive 404. Public record reads never include receipt state. Status reads do
+not expire claims or suppress items; the shared viewer remains read-only.
+
+Legacy custody, telemetry and requeue cannot acknowledge or hide pending inbox
+items. Acknowledgment cannot assert runtime delivery, reading or completion.
+Optional clients may eventually hand off then acknowledge, deduplicating by
+stable inbox identity; a crash between those actions can duplicate handoff.
+
+Normal retries/restarts preserve first acknowledgments. An explicitly approved
+older-backup restore may lose newer receipts and repeat reminders. Recovery
+preserves audited allocation high-water marks, invalidates inbox cursors and
+uses the existing protected inventory/loss approval. It does not snapshot every
+receipt externally or reconstruct missing records.
 
 ### Central mailbox claims
 

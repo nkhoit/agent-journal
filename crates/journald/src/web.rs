@@ -152,15 +152,16 @@ async fn view(
                     for item in records.items { body.push_str(&record(&item)); }
                     body.push_str(&next_page(&format!("{base}/thread"), query.pairs(), records.next_cursor));
                 } else if route.ends_with("/delivery-status") {
-                    title = "Delivery summary";
+                    title = "Receipt status";
                     let delivery = viewer.delivery(id, &query)?;
-                    body.push_str("<p>Transport facts only, not model read or completion receipts.</p>\
-                        <table><thead><tr><th>Recipient</th><th>State</th><th>Attempts</th></tr></thead><tbody>");
+                    body.push_str("<p>Acknowledgment ends inbox reminders, not proof of runtime delivery, reading or completion.</p>\
+                        <table><thead><tr><th>Recipient</th><th>State</th><th>Created</th><th>Acknowledged</th></tr></thead><tbody>");
                     for item in delivery.items {
                         let state = serde_json::to_value(item.state).map_err(|_| BootstrapError::CorruptJournal)?;
                         let state = state.as_str().ok_or(BootstrapError::CorruptJournal)?;
-                        body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-                            escape(&item.recipient), escape(state), item.attempts));
+                        body.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            escape(&item.recipient), escape(state), escape(&item.created_at),
+                            escape(item.acknowledged_at.as_deref().unwrap_or("Not acknowledged"))));
                     }
                     body.push_str("</tbody></table>");
                     body.push_str(&next_page(&format!("{base}/delivery-status"), query.pairs(), delivery.next_cursor));

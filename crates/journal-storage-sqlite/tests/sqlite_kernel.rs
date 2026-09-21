@@ -118,7 +118,13 @@ fn operational_snapshot_tracks_pending_rows_and_wal_without_checkpointing() {
             &"x".repeat(4096),
         );
     }
-    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at) VALUES ('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending',?1,?1)", [NOW]).unwrap();
+    writer
+        .execute(
+            "INSERT INTO inbox_sequences VALUES ('018f1f59-6e90-7000-8000-000000000001',1)",
+            [],
+        )
+        .unwrap();
+    writer.execute("INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at,recipient_seq) VALUES ('m1','r1','018f1f59-6e90-7000-8000-000000000001','pending',?1,?1,1)", [NOW]).unwrap();
     let after = database.operational_snapshot(NOW).unwrap();
     assert_eq!(after.pending_mailbox_count, 1);
     assert_eq!(after.oldest_pending_at.as_deref(), Some(NOW));
@@ -229,8 +235,8 @@ fn membership_only_schema_is_rejected_without_exposing_or_rewriting_spaces() {
     let connection = Connection::open(&path).unwrap();
     let old = include_str!("../../../migrations/0001_uuid_native.sql")
         .replace("\r\n", "\n")
-        .replace("version = 10", "version = 9")
-        .replace("(1, 10, 'uuid-native-v1')", "(1, 9, 'uuid-native-v1')")
+        .replace("version = 11", "version = 10")
+        .replace("(1, 11, 'uuid-native-v1')", "(1, 10, 'uuid-native-v1')")
         .replace("    access TEXT NOT NULL CHECK (access = 'public'),\n", "");
     connection.execute_batch(&old).unwrap();
     connection

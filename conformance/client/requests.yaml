@@ -1,5 +1,12 @@
 fixture_version: 1
 operations:
+  - operation_id: getInbox
+    method: GET
+    path: /v1/inbox
+    max_limit: 100
+  - operation_id: acknowledgeInboxItem
+    method: POST
+    path: /v1/inbox/{item_id}/ack
   - operation_id: getOperationalMetrics
     method: GET
     path: /v1/admin/metrics

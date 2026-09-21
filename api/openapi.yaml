@@ -668,11 +668,68 @@ paths:
               schema: { $ref: '#/components/schemas/MailboxStatusPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/inbox:
+    get:
+      tags: [delivery]
+      operationId: getInbox
+      summary: Fetch the authenticated principal's durable inbox
+      description: >-
+        No claim or receipt mutation. Defaults to unacknowledged items in ascending
+        recipient-local sequence. A first-page read transaction captures the maximum
+        committed recipient sequence. Authenticated cursors bind recipient, state and
+        the fixed upper bound; new arrivals cannot extend the traversal. Authorization
+        and receipt state are rechecked on each page. Finish a traversal then restart
+        without a cursor for pending retries; never retain a permanent checkpoint.
+        Archived spaces remain readable. Recovery invalidates inbox cursors.
+      security: [{ principalClient: [] }]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [unacknowledged, acknowledged, all], default: unacknowledged }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Complete readable records with durable recipient receipt metadata.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /v1/inbox/{item_id}/ack:
+    post:
+      tags: [delivery]
+      operationId: acknowledgeInboxItem
+      summary: End further inbox reminders for one own readable item
+      description: >-
+        No request body or query. Current principal credentials and read policy are
+        checked even on repeats. Missing, foreign or inaccessible items return 404.
+        First acknowledgment records server time atomically; repeats leave it unchanged.
+        No prior fetch is required. Retains records and history and does not imply
+        runtime delivery, reading, understanding or completion. An explicitly approved
+        older-backup restore can lose later acknowledgments and repeat reminders.
+      security: [{ principalClient: [] }]
+      parameters:
+        - $ref: '#/components/parameters/MailboxItemID'
+      responses:
+        '204':
+          description: Acknowledged, or already acknowledged; no response body.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/records/{record_id}/delivery-status:
     get:
       tags: [delivery]
       operationId: getRecordDeliveryStatus
-      summary: View authorized delivery summaries for one record
+      summary: View authorized inbox receipt states for one record
       description: >-
         The ordinary endpoint returns all recipient-scoped entries only to the
         record author when the author remains authorized to read the record.
@@ -694,12 +751,12 @@ paths:
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Delivery summaries without route targets or credentials.
+          description: Receipt states only, without attempts or runtime delivery claims.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestID' }
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/DeliveryStatusPage' }
+              schema: { $ref: '#/components/schemas/ReceiptStatusPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1463,21 +1520,38 @@ components:
     DeliveryState:
       type: string
       enum: [published, pending, claimed, host-accepted, adapter-reported-runtime-accepted, adapter-reported-retryable-failure, route-unavailable, adapter-reported-terminal-failure, suppressed-revoked]
-    DeliverySummary:
+    InboxItem:
       type: object
-      required: [mailbox_item_id, recipient, state, attempts]
+      additionalProperties: false
+      required: [inbox_item_id, recipient, seq, created_at, acknowledged_at, record]
       properties:
-        mailbox_item_id: { type: string, maxLength: 128 }
-        recipient: { type: string, maxLength: 128 }
-        state: { $ref: '#/components/schemas/DeliveryState' }
-        attempts: { type: integer, minimum: 0 }
-        last_attempt_id: { type: [string, 'null'], maxLength: 128 }
-        updated_at: { type: string, format: date-time }
-    DeliveryStatusPage:
+        inbox_item_id: { type: string, minLength: 1, maxLength: 128 }
+        recipient: { type: string, minLength: 1, maxLength: 128 }
+        seq: { type: integer, minimum: 1, maximum: 9223372036854775807 }
+        created_at: { type: string, format: date-time }
+        acknowledged_at: { type: [string, 'null'], format: date-time }
+        record: { $ref: '#/components/schemas/Record' }
+    InboxPage:
       type: object
       required: [items, next_cursor]
       properties:
-        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/DeliverySummary' } }
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/InboxItem' } }
+        next_cursor: { type: [string, 'null'], maxLength: 2048 }
+    ReceiptSummary:
+      type: object
+      additionalProperties: false
+      required: [inbox_item_id, recipient, state, created_at, acknowledged_at]
+      properties:
+        inbox_item_id: { type: string, minLength: 1, maxLength: 128 }
+        recipient: { type: string, maxLength: 128 }
+        state: { type: string, enum: [unacknowledged, acknowledged] }
+        created_at: { type: string, format: date-time }
+        acknowledged_at: { type: [string, 'null'], format: date-time }
+    ReceiptStatusPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ReceiptSummary' } }
         next_cursor: { type: [string, 'null'], maxLength: 2048 }
     MailboxStatus:
       type: object

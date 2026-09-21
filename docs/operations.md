@@ -1,5 +1,24 @@
 # Operations
 
+## Principal inbox checkpoint
+
+Schema 11 adds `aj inbox --state unacknowledged --limit 50` and
+`aj inbox-ack --item ID`, with the ordinary endpoint and principal credential-file
+options. Fetch returns one bounded page. Finish its fixed-bound traversal, then
+restart without a cursor to retry failed items; cursors are not durable delivery
+checkpoints. Acknowledgment ends reminders, not proof of processing.
+
+The existing delivery-status command and viewer now show only receipts. Legacy
+adapter metrics still describe legacy claims/custody, not inbox pending counts.
+Adapters remain unconverted until slice 4; this checkpoint is not deployment-ready.
+No legacy state automatically acknowledges an inbox item.
+
+Older databases require explicit archive/reset. Intentional older-backup restore
+can lose later acknowledgments and repeat reminders, accepted through the
+existing protected inventory/loss workflow. It retains recipient sequence
+high-water marks and invalidates inbox cursors. Normal restart/retry preserves
+the original committed acknowledgment timestamp.
+
 For central backup, restore fencing, external security audit, uncertain-intent
 recovery, and approval-gated reopening, use the [protected recovery runbook](recovery.md).
 

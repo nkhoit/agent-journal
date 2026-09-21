@@ -29,7 +29,7 @@ def main() -> None:
     connection.executescript(MIGRATION.read_text(encoding="utf-8"))
 
     assert connection.execute("SELECT version, format FROM schema_contract").fetchone() == (
-        10,
+        11,
         "uuid-native-v1",
     )
     assert connection.execute("SELECT count(*) FROM schema_contract").fetchone() == (1,)
@@ -115,12 +115,24 @@ def main() -> None:
         (P2, NOW),
     )
     connection.execute(
-        "INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at) VALUES ('mailbox-1','record-1',?,'pending',?,?)",
+        "INSERT INTO inbox_sequences VALUES (?,1)", (P2,)
+    )
+    connection.execute(
+        "INSERT INTO mailbox_items(id,record_id,recipient_principal_id,state,created_at,updated_at,recipient_seq) VALUES ('mailbox-1','record-1',?,'pending',?,?,1)",
         (P2, NOW, NOW),
     )
     assert connection.execute(
         "SELECT attempt_id,ordinal,state FROM delivery_attempts WHERE mailbox_item_id='mailbox-1'"
     ).fetchone() == ("initial-mailbox-1", 1, "pending")
+    rejects(connection, "UPDATE mailbox_items SET recipient_seq=2")
+    rejects(connection, "DELETE FROM mailbox_items")
+    rejects(connection, "UPDATE inbox_sequences SET last_seq=0")
+    rejects(connection, "UPDATE inbox_sequences SET last_seq=9223372036854775807+1")
+    connection.execute("UPDATE mailbox_items SET acknowledged_at=? WHERE id='mailbox-1'", (NOW,))
+    rejects(connection, "UPDATE mailbox_items SET acknowledged_at=NULL")
+    rejects(connection, "UPDATE mailbox_items SET acknowledged_at='2027-01-01T00:00:00Z'")
+    connection.execute("UPDATE mailbox_items SET state='host-accepted'")
+    assert connection.execute("SELECT acknowledged_at FROM mailbox_items").fetchone() == (NOW,)
     rejects(connection, "UPDATE records SET content='changed' WHERE id='record-1'")
     rejects(connection, "DELETE FROM records WHERE id='record-1'")
 

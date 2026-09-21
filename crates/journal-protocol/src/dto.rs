@@ -495,18 +495,69 @@ pub struct DeliveryEventResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliverySummary {
-    pub mailbox_item_id: String,
+#[serde(deny_unknown_fields)]
+pub struct ReceiptSummary {
+    pub inbox_item_id: String,
     pub recipient: String,
-    pub state: domain::DeliveryState,
-    pub attempts: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_attempt_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
+    pub state: ReceiptState,
+    pub created_at: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub acknowledged_at: Option<String>,
 }
 
-pub type DeliveryStatusPage = Page<DeliverySummary>;
+pub type ReceiptStatusPage = Page<ReceiptSummary>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReceiptState {
+    Unacknowledged,
+    Acknowledged,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InboxState {
+    #[default]
+    Unacknowledged,
+    Acknowledged,
+    All,
+}
+
+impl InboxState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unacknowledged => "unacknowledged",
+            Self::Acknowledged => "acknowledged",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InboxQuery {
+    pub state: InboxState,
+    pub page: PageQuery,
+}
+
+impl InboxQuery {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        self.page.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxItem {
+    pub inbox_item_id: String,
+    pub recipient: String,
+    pub seq: i64,
+    pub created_at: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub acknowledged_at: Option<String>,
+    pub record: domain::Record,
+}
+
+pub type InboxPage = Page<InboxItem>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailboxStatus {

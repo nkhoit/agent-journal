@@ -40,7 +40,8 @@ impl Fixture {
              INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
              VALUES ('r','s',1,'018f1f59-6e90-7000-8000-000000000001','note','recovery probe','2026-01-01T00:00:00Z');
              INSERT INTO attention VALUES ('r','018f1f59-6e90-7000-8000-000000000001','2026-01-01T00:00:00Z');
-             INSERT INTO mailbox_items VALUES ('m','r','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');"
+             INSERT INTO inbox_sequences VALUES ('018f1f59-6e90-7000-8000-000000000001',1);
+             INSERT INTO mailbox_items VALUES ('m','r','018f1f59-6e90-7000-8000-000000000001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,NULL);"
         ).unwrap();
         database
     }

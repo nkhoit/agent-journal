@@ -21,6 +21,18 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn legacy_state(&self, record: &str) -> String {
+        self.database
+            .connect_read_only()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM mailbox_items WHERE record_id=?",
+                [record],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::var_os("AJ_CONFORMANCE_STATE_DIR")
@@ -268,11 +280,12 @@ fn exercise<'a>(f: &'a Fixture, endpoint: &str, revoke: impl Fn() + 'a) {
     let status = client
         .delivery_status(&f.principal, &posted.record.id, &wire::PageQuery::default())
         .unwrap();
-    assert_eq!(
-        status.items[0].state,
-        wire::domain::DeliveryState::AdapterReportedRuntimeAccepted
-    );
+    assert_eq!(status.items[0].state, wire::ReceiptState::Unacknowledged);
     let serialized = serde_json::to_string(&status).unwrap();
+    assert_eq!(
+        f.legacy_state(&posted.record.id),
+        "adapter-reported-runtime-accepted"
+    );
     assert!(!serialized.contains("private-target"));
     drop(captured);
     client
@@ -421,13 +434,14 @@ fn real_http_accept_then_crash_recovers_same_attempt_with_duplicate_acceptance()
         let saved = store.get(&first.envelope.attempt_id).unwrap();
         assert!(saved.custody_confirmed);
         assert_eq!(saved.injection_state, InjectionState::InFlight);
+        assert_eq!(f.legacy_state(&record.id), "host-accepted");
         assert_eq!(
             client
                 .delivery_status(&f.principal, &record.id, &wire::PageQuery::default())
                 .unwrap()
                 .items[0]
                 .state,
-            wire::domain::DeliveryState::HostAccepted
+            wire::ReceiptState::Unacknowledged
         );
         if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
             std::fs::copy(
@@ -454,6 +468,10 @@ fn real_http_accept_then_crash_recovers_same_attempt_with_duplicate_acceptance()
         .tick()
         .unwrap();
         assert_eq!(runtime.acceptances().len(), 2);
+        assert_eq!(
+            f.legacy_state(&record.id),
+            "adapter-reported-runtime-accepted"
+        );
         assert_eq!(runtime.acceptances()[1], first);
         assert_eq!(
             store
@@ -468,7 +486,7 @@ fn real_http_accept_then_crash_recovers_same_attempt_with_duplicate_acceptance()
                 .unwrap()
                 .items[0]
                 .state,
-            wire::domain::DeliveryState::AdapterReportedRuntimeAccepted
+            wire::ReceiptState::Unacknowledged
         );
         if std::env::var_os("AJ_CONFORMANCE_STATE_DIR").is_some() {
             std::fs::write(

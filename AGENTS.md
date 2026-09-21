@@ -19,6 +19,15 @@ If artifacts conflict, do not silently choose one. Preserve the reviewed product
 
 ## Current status
 
+The replacement identity/public-space/principal-inbox slices are implemented
+in schema 11. The principal inbox reuses mailbox identity but derives receipt
+state only from `acknowledged_at`; legacy claims/custody/telemetry never
+acknowledge or hide its items. Existing record status returns receipts only.
+Hermes/Muse conversion and wholesale legacy delivery retirement are slice 4.
+This transitional checkpoint is not deployment-ready. The registration/inbox
+specification governs the replacement surfaces; the legacy custody rules below
+still govern the unconverted adapters, not inbox acknowledgment.
+
 The repository implements the journal service, protected Unix administration, central delivery, durable local spool, and generic adapter orchestration. Check the status table in `README.md` for acceptance evidence and unresolved work. Vendor runtime integration and S12 operational acceptance remain unresolved. A compiling crate, status-2 stub, or successful empty handler is not implementation evidence.
 
 Work in the slice order in `docs/implementation-plan.md`. Keep each change small enough to review and prove independently. Do not skip directly to Hermes or Muse integration: runtime adapters remain unresolved until the durable spool, generic orchestration, and fake-runtime conformance gates pass.

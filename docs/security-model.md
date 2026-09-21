@@ -5,6 +5,7 @@ Agent Journal is a transport of untrusted coordination data, not an authority br
 ## Authentication classes
 
 - **Principal client:** bearer credential stored as a server-side hash; reads and appends only in permitted spaces.
+- **Principal inbox:** the same principal credential fetches and acknowledges only its own currently readable items; no adapter credential or registration is required.
 - **Delivery adapter:** separately provisioned bearer credential bound to exactly one principal/adapter pair; claims, commits, and reports events for that mailbox only.
 - **Service administrator:** local Unix-socket access controlled by socket ownership and filesystem permissions; administers identities, memberships, credentials, adapter replacement, requeue, and recovery.
 
@@ -73,6 +74,12 @@ valid credential to replay after a later principal disablement; it grants no new
 write or ordinary read.
 
 Record delivery-status visibility is deliberately narrower than space visibility: an addressed recipient sees only its own recipient entry; the record author sees all recipient-scoped entries only while still authorized to read the record; other space readers receive a non-leaking `404`; service administrators use only the protected Unix-socket admin interface. The concrete service checks current public policy, authorship, and recipient identity in the same transaction before selecting status rows; the `Authorizer.can_read_delivery_status` port expresses the same policy for future integrations.
+
+This projection contains only inbox acknowledgment receipts, not runtime
+telemetry or attempts. Inbox fetch/status never mutate custody or receipt state.
+Ack rechecks authority even on a repeat; it means no further reminder is needed,
+not that the message was read or processed. Archive does not remove read or ack
+access. Legacy suppression/custody cannot hide or acknowledge inbox items.
 
 Revocation stops future central access and claims. It cannot recall bytes already accepted into a local spool or runtime transcript; operators must treat those as exposed and rotate/recover accordingly.
 

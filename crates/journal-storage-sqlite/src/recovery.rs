@@ -76,6 +76,11 @@ pub(crate) fn verify(connection: &Connection) -> Result<RecoveryVerification, St
           EXCEPT SELECT record_id,recipient_principal_id FROM mailbox_items)
           OR EXISTS(SELECT record_id,recipient_principal_id FROM mailbox_items
           EXCEPT SELECT record_id,recipient_principal_id FROM attention)"),
+        ("inbox allocation probe failed",
+         "SELECT EXISTS(SELECT 1 FROM mailbox_items m LEFT JOIN inbox_sequences h
+          ON h.recipient_principal_id=m.recipient_principal_id
+          WHERE h.last_seq IS NULL OR h.last_seq<m.recipient_seq OR m.recipient_seq<=0)
+          OR EXISTS(SELECT 1 FROM inbox_sequences WHERE typeof(last_seq)!='integer' OR last_seq<=0)"),
         ("mailbox attempt probe failed",
          "SELECT EXISTS(SELECT 1 FROM mailbox_items m WHERE NOT EXISTS(
           SELECT 1 FROM delivery_attempts a WHERE a.mailbox_item_id=m.id))
