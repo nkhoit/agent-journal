@@ -222,6 +222,184 @@ impl BootstrapService {
         self.get_thread_as(ReadIdentity::Bearer(token), id, query)
     }
 
+    /// Resolve the root record of the thread containing `id`.
+    /// Internal viewer helper; not a public API endpoint.
+    ///
+    /// Returns the root record plus whether the reply-to chain resolved to a
+    /// genuine root. When the chain is unresolved (missing or cross-space
+    /// parent), the returned record is fallback context (the deepest
+    /// resolvable node, which may be the anchor itself); callers must not
+    /// treat its title as the thread title.
+    pub(super) fn get_thread_root_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        id: &str,
+    ) -> Result<(Record, bool), BootstrapError> {
+        self.transaction(|tx| {
+            let actor = self.read_actor(tx, identity)?;
+            let space: String = tx
+                .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .ok_or(BootstrapError::NotFound)?;
+            permitted(tx, &actor, &space, false)?;
+            let (root_id, _, resolved) = thread_root_id(
+                tx,
+                id,
+                &space,
+                THREAD_MAX_DEPTH,
+                THREAD_MAX_NODES,
+                THREAD_MAX_EDGES,
+            )?;
+            let root = record(tx, &root_id)?;
+            Ok((root, resolved))
+        })
+    }
+
+    /// Batch-resolve thread root IDs and titles for viewer breadcrumbs.
+    /// Returns a map from record ID to (root_id, root_title).
+    /// Internal viewer helper; not a public API endpoint.
+    ///
+    /// Uses one recursive query ascending the reply-to parent chains for all
+    /// record IDs at once (depth-bounded, cycle-safe, same-space parents only,
+    /// never enumerating descendants). A row whose chain cannot be resolved
+    /// (depth bound, cycle, missing parent, or cross-space parent) falls back
+    /// to its own ID with no title instead of failing the page; the viewer
+    /// still renders such a record as a reply (rootness comes from the
+    /// record's own reply-to relation), with an untitled thread breadcrumb.
+    /// Records the viewer cannot read are omitted (fail-closed).
+    pub(super) fn get_thread_roots_as(
+        &self,
+        identity: ReadIdentity<'_>,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, (String, Option<String>)>, BootstrapError> {
+        self.transaction(|tx| {
+            let actor = self.read_actor(tx, identity)?;
+            let mut result = std::collections::HashMap::new();
+            if ids.is_empty() {
+                return Ok(result);
+            }
+            // Space lookup + permission check (cached per space).
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let spaces: Vec<(String, String)> = tx
+                .prepare(&format!(
+                    "SELECT id, space_id FROM records WHERE id IN ({placeholders})"
+                ))?
+                .query_map(rusqlite::params_from_iter(ids), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<_, _>>()?;
+            let mut space_allowed: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut permitted_ids: Vec<String> = Vec::new();
+            for (id, space) in spaces {
+                let allowed = match space_allowed.get(&space) {
+                    Some(&allowed) => allowed,
+                    None => {
+                        let allowed = permitted(tx, &actor, &space, false).is_ok();
+                        space_allowed.insert(space.clone(), allowed);
+                        allowed
+                    }
+                };
+                if allowed {
+                    permitted_ids.push(id);
+                }
+            }
+            if permitted_ids.is_empty() {
+                return Ok(result);
+            }
+            // One recursive ascent for every permitted record ID. The path
+            // column makes the walk cycle-safe; the depth bound keeps it
+            // within THREAD_MAX_DEPTH edges (which subsumes the node/edge
+            // budgets: 4096 nodes and 8192 edges against at most 65 nodes).
+            let placeholders = permitted_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut stmt = tx.prepare(&format!(
+                "WITH RECURSIVE chain(record_id, node_id, space_id, depth, path) AS (
+                    SELECT id, id, space_id, 0, ',' || id || ','
+                    FROM records WHERE id IN ({placeholders})
+                    UNION ALL
+                    SELECT c.record_id, rel.target_record_id, c.space_id, c.depth + 1,
+                           c.path || rel.target_record_id || ','
+                    FROM chain c
+                    JOIN record_relations rel
+                      ON rel.source_record_id = c.node_id
+                     AND rel.relation_type = 'reply-to'
+                    JOIN records r
+                      ON r.id = rel.target_record_id
+                     AND r.space_id = c.space_id
+                    WHERE c.depth < {}
+                      AND instr(c.path, ',' || rel.target_record_id || ',') = 0
+                ),
+                deepest AS (
+                    SELECT record_id, node_id AS root_id, space_id, MAX(depth) AS depth
+                    FROM chain
+                    GROUP BY record_id
+                )
+                SELECT d.record_id, d.root_id,
+                       -- A chain is unresolved when the deepest node still
+                       -- carries a reply-to edge: the walk stopped because of
+                       -- the depth bound, a cycle, or a parent that is missing
+                       -- or in another space. Checking the edge itself (not
+                       -- only edges that resolve to a same-space record) keeps
+                       -- a broken chain from being mistaken for a root, which
+                       -- would promote a reply title into the root slot.
+                       EXISTS (
+                           SELECT 1
+                           FROM record_relations rel
+                           WHERE rel.source_record_id = d.root_id
+                             AND rel.relation_type = 'reply-to'
+                       ) AS unresolved
+                FROM deepest d",
+                THREAD_MAX_DEPTH
+            ))?;
+            let candidates: Vec<(String, String, bool)> = stmt
+                .query_map(rusqlite::params_from_iter(&permitted_ids), |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<Result<_, _>>()?;
+            // Per-row fallback: an unresolved chain (depth bound, cycle,
+            // missing parent, or cross-space parent) resolves to the record
+            // itself with no title. The viewer still renders the record as a
+            // reply because rootness comes from its own reply-to relation.
+            let mut root_ids: Vec<String> = Vec::new();
+            let mut resolved: Vec<(String, String)> = Vec::new();
+            for (record_id, root_id, unresolved) in candidates {
+                if unresolved {
+                    result.insert(record_id.clone(), (record_id, None));
+                } else {
+                    root_ids.push(root_id.clone());
+                    resolved.push((record_id, root_id));
+                }
+            }
+            // One batched title lookup for all distinct roots.
+            if !root_ids.is_empty() {
+                let placeholders = root_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let titles: std::collections::HashMap<String, Option<String>> = tx
+                    .prepare(&format!(
+                        "SELECT id, title FROM records WHERE id IN ({placeholders})"
+                    ))?
+                    .query_map(rusqlite::params_from_iter(&root_ids), |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                    })?
+                    .collect::<Result<_, _>>()?;
+                for (record_id, root_id) in resolved {
+                    let root_title = titles.get(&root_id).and_then(|t| t.clone());
+                    result.insert(record_id, (root_id, root_title));
+                }
+            }
+            Ok(result)
+        })
+    }
+
     pub(super) fn get_thread_as(
         &self,
         identity: ReadIdentity<'_>,
@@ -401,7 +579,10 @@ impl BootstrapService {
                 if previous_hash != hash {
                     return Err(BootstrapError::IdempotencyConflict);
                 }
-                return decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal);
+                let mut result: AppendResult =
+                    decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal)?;
+                result.replayed = true;
+                return Ok(result);
             }
             let actor = self.journal_actor(tx, token)?;
             permitted(tx, &actor, space, true)?;
@@ -412,6 +593,10 @@ impl BootstrapService {
                 permitted(tx, &principal_id, space, false)?;
                 *recipient = principal_id;
             }
+            // Normalize after the idempotency hash is computed from the
+            // submitted bytes: distinct spellings stay distinct replays,
+            // while persistence always sees the trimmed title.
+            input.title = journal_domain::normalize_title(input.title.clone());
             canonical_append(&input).map_err(|_| BootstrapError::InvalidJournal)?;
             let seq: i64 = tx.query_row("SELECT coalesce(max(space_seq),0)+1 FROM records WHERE space_id=?", [space], |r| r.get(0))?;
             self.checkpoint("append-sequence")?;
@@ -424,8 +609,8 @@ impl BootstrapService {
             let instant = self.clock.now();
             let now = timestamp(instant)?;
             let id = self.record_id(instant)?;
-            tx.execute("INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,run_id,routing_key,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                params![id,space,seq,actor,input.kind,input.content,input.run_id,input.routing_key,now])?;
+            tx.execute("INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,run_id,routing_key,title,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                params![id,space,seq,actor,input.kind,input.content,input.run_id,input.routing_key,input.title,now])?;
             self.checkpoint("append-record")?;
             for (position, relation) in input.relations.iter().enumerate() {
                 tx.execute("INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at,position) VALUES (?,?,?,?,?)",
@@ -447,7 +632,7 @@ impl BootstrapService {
                 self.checkpoint("append-mailbox")?;
             }
             let result = AppendResult {
-                record: Record { id: id.clone(), space_id: space.into(), seq, author: actor.clone(), kind: input.kind.clone(), content: input.content.clone(), run_id: input.run_id.clone(), created_at: now.clone(), attention, routing_key: input.routing_key.clone(), relations: input.relations.clone() },
+                record: Record { id: id.clone(), space_id: space.into(), seq, author: actor.clone(), kind: input.kind.clone(), content: input.content.clone(), run_id: input.run_id.clone(), created_at: now.clone(), attention, routing_key: input.routing_key.clone(), relations: input.relations.clone(), title: input.title.clone() },
                 mailbox_created: input.attention.len(), replayed: false,
             };
             let response = serde_json::to_string(&result).map_err(|_| BootstrapError::CorruptJournal)?;
@@ -652,14 +837,14 @@ fn search_error(error: rusqlite::Error) -> BootstrapError {
     }
 }
 
-fn thread_ids(
+fn thread_root_id(
     tx: &Transaction<'_>,
     anchor: &str,
     space: &str,
     max_depth: usize,
     max_nodes: usize,
     max_edges: usize,
-) -> Result<Vec<(i64, String)>, BootstrapError> {
+) -> Result<(String, usize, bool), BootstrapError> {
     let mut root = anchor.to_owned();
     let mut ancestors = HashSet::new();
     let mut edges = 0;
@@ -683,9 +868,34 @@ fn thread_ids(
         }
         root = parent;
     }
+    // The ascent above only follows same-space parents. If the final node still
+    // carries any reply-to edge (dangling target or cross-space parent), the
+    // chain is unresolved: report the anchor as fallback context, not as a
+    // proven root, so callers never promote a reply title to a thread header.
+    let resolved: bool = tx
+        .query_row(
+            "SELECT 1 FROM record_relations WHERE source_record_id=? AND relation_type='reply-to'",
+            [root.clone()],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none();
+    Ok((root, edges, resolved))
+}
+
+fn thread_ids(
+    tx: &Transaction<'_>,
+    anchor: &str,
+    space: &str,
+    max_depth: usize,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<Vec<(i64, String)>, BootstrapError> {
+    let (root, root_edges, _) = thread_root_id(tx, anchor, space, max_depth, max_nodes, max_edges)?;
     let mut pending = vec![(root, 0)];
     let mut seen = HashSet::new();
     let mut result = Vec::new();
+    let mut edges = root_edges;
     while let Some((id, depth)) = pending.pop() {
         if !seen.insert(id.clone()) {
             return Err(BootstrapError::CorruptJournal);
@@ -739,8 +949,8 @@ pub(super) fn permitted(
 }
 
 pub(super) fn record(tx: &Transaction<'_>, id: &str) -> Result<Record, BootstrapError> {
-    let mut record = tx.query_row("SELECT id,space_id,space_seq,author_principal_id,kind,content,run_id,created_at,routing_key FROM records WHERE id=?", [id], |r|Ok(Record {
-        id:r.get(0)?,space_id:r.get(1)?,seq:r.get(2)?,author:r.get(3)?,kind:r.get(4)?,content:r.get(5)?,run_id:r.get(6)?,created_at:r.get(7)?,routing_key:r.get(8)?,attention:vec![],relations:vec![],
+    let mut record = tx.query_row("SELECT id,space_id,space_seq,author_principal_id,kind,content,run_id,created_at,routing_key,title FROM records WHERE id=?", [id], |r|Ok(Record {
+        id:r.get(0)?,space_id:r.get(1)?,seq:r.get(2)?,author:r.get(3)?,kind:r.get(4)?,content:r.get(5)?,run_id:r.get(6)?,created_at:r.get(7)?,routing_key:r.get(8)?,title:r.get(9)?,attention:vec![],relations:vec![],
     })).optional()?.ok_or(BootstrapError::NotFound)?;
     record.attention = tx.prepare("SELECT recipient_principal_id FROM attention WHERE record_id=? ORDER BY recipient_principal_id")?.query_map([id], |r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let relations = tx.prepare("SELECT relation_type,target_record_id FROM record_relations WHERE source_record_id=? ORDER BY position,rowid")?.query_map([id], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;

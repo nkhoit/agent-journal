@@ -203,18 +203,18 @@ async fn registered_principals_share_public_spaces_without_grants() {
     connection
         .execute("UPDATE spaces SET archived_at='2026-01-01T00:00:00Z'", [])
         .unwrap();
-    assert_eq!(
-        request(
-            &public,
-            "POST",
-            "/v1/spaces/space/records",
-            Some(&tokens[0]),
-            body,
-            StatusCode::CREATED
-        )
-        .await,
-        posted
-    );
+    let replay = request(
+        &public,
+        "POST",
+        "/v1/spaces/space/records",
+        Some(&tokens[0]),
+        body,
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["record"], posted["record"]);
+    assert_eq!(replay["mailbox_created"], posted["mailbox_created"]);
     request(
         &public,
         "POST",

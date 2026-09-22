@@ -104,9 +104,12 @@ async fn view(
         let invalid = |_| BootstrapError::InvalidJournal;
         let mut body = String::from("<p>Shared read-only viewer. Everyone with access sees the same permitted records.</p>");
         let title;
+        // Custom `<h1>` HTML for pages whose heading needs markup (thread pages);
+        // defaults to the escaped title text.
+        let mut heading: Option<String> = None;
         match route.as_str() {
             "/web" => {
-                title = "Spaces";
+                title = "Spaces".to_owned();
                 let query = PageQuery::from_query(&query).map_err(invalid)?;
                 let spaces = viewer.spaces(&query)?;
                 body.push_str("<ul>");
@@ -124,20 +127,40 @@ async fn view(
                     <label>Search <input name=\"q\" required maxlength=\"512\"></label>\
                     <button type=\"submit\">Search</button></form>", escape(&search)));
                 if route.ends_with("/search") {
-                    title = "Search";
+                    title = "Search".to_owned();
                     let query = SearchRecordsQuery::from_query(&query).map_err(invalid)?;
                     let results = viewer.search(space, &query)?;
+                    let ids: Vec<String> = results.items.iter().map(|r| r.record.id.clone()).collect();
+                    let roots = viewer.thread_roots(&ids)?;
                     for result in results.items {
-                        body.push_str(&format!("<article><h2>{}</h2><p>Untrusted search snippet:</p><pre>{}</pre></article>",
-                            link(&record_path(&result.record.id), &result.record.id),
-                            escape(result.snippet.as_deref().unwrap_or(""))));
+                        let ctx = roots.get(&result.record.id).map(|(_, root_title)| {
+                            ThreadCtx {
+                                root_title: root_title.as_deref(),
+                                in_thread: false,
+                            }
+                        });
+                        body.push_str(&record(
+                            &result.record,
+                            ctx,
+                            result.snippet.as_deref(),
+                        ));
                     }
                     body.push_str(&next_page(&search, query.pairs(), results.next_cursor));
                 } else {
-                    title = "Timeline";
+                    title = "Timeline".to_owned();
                     let query = ListRecordsQuery::from_query(&query).map_err(invalid)?;
                     let records = viewer.records(space, &query)?;
-                    for item in records.items { body.push_str(&record(&item)); }
+                    let ids: Vec<String> = records.items.iter().map(|r| r.id.clone()).collect();
+                    let roots = viewer.thread_roots(&ids)?;
+                    for item in records.items {
+                        let ctx = roots.get(&item.id).map(|(_, root_title)| {
+                            ThreadCtx {
+                                root_title: root_title.as_deref(),
+                                in_thread: false,
+                            }
+                        });
+                        body.push_str(&record(&item, ctx, None));
+                    }
                     body.push_str(&next_page(&base, query.pairs(), records.next_cursor));
                 }
             }
@@ -147,12 +170,30 @@ async fn view(
                 let base = record_path(id);
                 let query = PageQuery::from_query(&query).map_err(invalid)?;
                 if route.ends_with("/thread") {
-                    title = "Thread";
+                    let (root, resolved) = viewer.thread_root(id)?;
+                    // On fallback the anchor is not a proven root: never
+                    // promote a reply title into the thread header.
+                    let header_title: Option<&str> =
+                        if resolved { root.title.as_deref() } else { None };
+                    let (page_title, h1) = thread_heading(header_title);
+                    title = page_title;
+                    heading = Some(h1);
+                    let ctx_root_title: Option<String> =
+                        if resolved { root.title.clone() } else { None };
                     let records = viewer.thread(id, &query)?;
-                    for item in records.items { body.push_str(&record(&item)); }
+                    for item in records.items {
+                        body.push_str(&record(
+                            &item,
+                            Some(ThreadCtx {
+                                root_title: ctx_root_title.as_deref(),
+                                in_thread: true,
+                            }),
+                            None,
+                        ));
+                    }
                     body.push_str(&next_page(&format!("{base}/thread"), query.pairs(), records.next_cursor));
                 } else if route.ends_with("/delivery-status") {
-                    title = "Receipt status";
+                    title = "Receipt status".to_owned();
                     let delivery = viewer.delivery(id, &query)?;
                     body.push_str("<p>Acknowledgment ends inbox reminders, not proof of runtime delivery, reading or completion.</p>\
                         <table><thead><tr><th>Recipient</th><th>State</th><th>Created</th><th>Acknowledged</th></tr></thead><tbody>");
@@ -166,14 +207,23 @@ async fn view(
                     body.push_str("</tbody></table>");
                     body.push_str(&next_page(&format!("{base}/delivery-status"), query.pairs(), delivery.next_cursor));
                 } else {
-                    title = "Record";
+                    title = "Record".to_owned();
                     if query != PageQuery::default() { return Err(BootstrapError::InvalidJournal); }
-                    body.push_str(&record(&viewer.record(id)?));
+                    let item = viewer.record(id)?;
+                    let roots = viewer.thread_roots(&[item.id.clone()])?;
+                    let ctx = roots.get(&item.id).map(|(_, root_title)| {
+                        ThreadCtx {
+                            root_title: root_title.as_deref(),
+                            in_thread: false,
+                        }
+                    });
+                    body.push_str(&record(&item, ctx, None));
                 }
             }
             _ => return Err(BootstrapError::NotFound),
         }
-        Ok(page(title, &body))
+        let heading = heading.unwrap_or_else(|| escape(&title));
+        Ok(page(&title, &heading, &body))
     }).await;
     match result {
         Ok(html) => axum::response::Html(html).into_response(),

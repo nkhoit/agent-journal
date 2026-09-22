@@ -86,7 +86,7 @@ REQUIRED_RESPONSE_FIELDS = {'AppendRecordResponse': {'replayed', 'mailbox_create
                   'space_id'},
  'Space': {'id', 'access', 'name', 'created_at', 'limits'},
  'SpacePage': {'items', 'next_cursor'}}
-REQUEST_SCHEMA_FIELDS = {'AppendRecordRequest': ({'run_id', 'content', 'relations', 'kind', 'routing_key', 'attention'},
+REQUEST_SCHEMA_FIELDS = {'AppendRecordRequest': ({'run_id', 'content', 'relations', 'kind', 'routing_key', 'attention', 'title'},
                          {'content', 'kind'}),
  'CredentialRevokeRequest': ({'credential_id', 'reason'}, {'credential_id'}),
  'CredentialRotateRequest': ({'credential_id', 'reason'}, {'credential_id'}),

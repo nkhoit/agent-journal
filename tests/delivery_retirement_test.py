@@ -29,7 +29,7 @@ class DeliveryRetirement(unittest.TestCase):
 
     def test_clean_break_has_no_delivery_tables(self):
         self.assertEqual(
-            self.db.execute("SELECT version FROM schema_contract").fetchone(), (12,)
+            self.db.execute("SELECT version FROM schema_contract").fetchone(), (13,)
         )
         tables = {
             row[0]

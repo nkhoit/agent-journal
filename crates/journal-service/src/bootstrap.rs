@@ -143,6 +143,25 @@ impl SharedViewer<'_> {
             .get_thread_as(ReadIdentity::ConfiguredViewer(self.principal), id, query)
     }
 
+    /// Root record of the thread containing `id`, for viewer title display.
+    /// Returns the record plus whether its reply-to chain resolved to a
+    /// genuine root; on fallback the title must not be used as thread title.
+    /// Internal helper; not a public endpoint.
+    pub fn thread_root(&self, id: &str) -> Result<(journal_domain::Record, bool), BootstrapError> {
+        self.service
+            .get_thread_root_as(ReadIdentity::ConfiguredViewer(self.principal), id)
+    }
+
+    /// Batch thread root IDs and titles for viewer breadcrumbs.
+    /// Internal helper; not a public endpoint.
+    pub fn thread_roots(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, (String, Option<String>)>, BootstrapError> {
+        self.service
+            .get_thread_roots_as(ReadIdentity::ConfiguredViewer(self.principal), ids)
+    }
+
     pub fn delivery(
         &self,
         id: &str,

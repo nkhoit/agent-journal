@@ -77,6 +77,7 @@ impl Fixture {
             attention: vec!["beta".into()],
             routing_key: None,
             relations: vec![],
+            title: None,
         }
     }
     fn post(&self, key: &str) -> AppendResult {
@@ -104,7 +105,10 @@ impl Drop for Fixture {
 fn independent_principals_replay_ack_and_archive_without_adapters() {
     let f = Fixture::new();
     let posted = f.post("once");
-    assert_eq!(f.post("once"), posted);
+    let replay = f.post("once");
+    assert!(replay.replayed);
+    assert_eq!(replay.record, posted.record);
+    assert_eq!(replay.mailbox_created, posted.mailbox_created);
     for table in ["records", "mailbox_items", "inbox_sequences"] {
         assert_eq!(f.count(table), 1);
     }

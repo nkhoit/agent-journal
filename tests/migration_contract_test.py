@@ -29,7 +29,7 @@ def main() -> None:
     connection.executescript(MIGRATION.read_text(encoding="utf-8"))
 
     assert connection.execute("SELECT version, format FROM schema_contract").fetchone() == (
-        12,
+        13,
         "uuid-native-v1",
     )
     assert connection.execute("SELECT count(*) FROM schema_contract").fetchone() == (1,)
@@ -131,6 +131,21 @@ def main() -> None:
     assert connection.execute("SELECT acknowledged_at FROM mailbox_items").fetchone() == (NOW,)
     rejects(connection, "UPDATE records SET content='changed' WHERE id='record-1'")
     rejects(connection, "DELETE FROM records WHERE id='record-1'")
+    assert connection.execute(
+        "SELECT title FROM records WHERE id='record-1'"
+    ).fetchone() == (None,)
+    connection.execute(
+        "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,title,created_at) VALUES ('record-titled','s1',3,?,'note','titled body','Titled',?)",
+        (P1, NOW),
+    )
+    assert connection.execute(
+        "SELECT title FROM records WHERE id='record-titled'"
+    ).fetchone() == ("Titled",)
+    rejects(
+        connection,
+        "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,title,created_at) VALUES ('record-bad','s1',4,?,'note','bad','',?)",
+        (P1, NOW),
+    )
 
     connection.execute(
         "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at) VALUES ('record-2','s1',2,?,'note','child',?)",

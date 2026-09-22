@@ -207,7 +207,7 @@ paths:
             schema: { $ref: '#/components/schemas/AppendRecordRequest' }
       responses:
         '201':
-          description: Record published and obligations created. An identical idempotency replay returns the exact stored response, including its original replayed value.
+          description: Record published and obligations created. An identical idempotency replay returns the stored record with replayed set to true.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestID' }
           content:
@@ -855,6 +855,10 @@ components:
         attention: { type: array, maxItems: 16, uniqueItems: true, items: { type: string, maxLength: 128 } }
         routing_key: { type: string, maxLength: 128 }
         relations: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/Relation' } }
+        title:
+          type: string
+          maxLength: 200
+          description: Optional human-readable title (1-200 Unicode scalar values after trimming; blank normalizes to null; control characters rejected). Allowed on any record; the thread's display title is resolved from the root record's title.
 
     Record:
       type: object
@@ -875,6 +879,10 @@ components:
         attention: { type: array, maxItems: 16, items: { type: string, maxLength: 128 } }
         routing_key: { type: [string, 'null'], maxLength: 128 }
         relations: { type: array, maxItems: 32, items: { $ref: '#/components/schemas/Relation' } }
+        title:
+          type: [string, 'null']
+          maxLength: 200
+          description: Normalized title as stored (trimmed, 1-200 chars). Null when the record has no title.
     RecordPage:
       type: object
       required: [items, next_cursor]

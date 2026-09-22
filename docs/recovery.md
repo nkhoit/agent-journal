@@ -8,7 +8,7 @@ administrator bearer or Windows permission fallback.
 
 ## Compatibility and audit ownership
 
-Only exact schema 12 central state and its current external snapshot format are
+Only exact schema 13 central state and its current external snapshot format are
 supported. Older databases, audit formats and legacy spools require explicit
 operator archive/reset. There is no in-place migration, automatic reset or
 adoption of incompatible state. Preserve evidence before an operator reset.

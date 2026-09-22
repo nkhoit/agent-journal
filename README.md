@@ -26,7 +26,7 @@ generation, host custody, attempt, runtime telemetry or requeue API.
 names but return acknowledgment receipts only: an authorized author sees all
 recipient entries, a recipient sees its own, and unrelated readers receive 404.
 
-Schema 12 is a clean break. Existing older databases and external audit formats
+Schema 13 is a clean break. Existing older databases and external audit formats
 require explicit operator archive/reset; they are not migrated, silently reset
 or opened by weakening validation. Record/inbox identity and sequence semantics
 remain stable within supported state.

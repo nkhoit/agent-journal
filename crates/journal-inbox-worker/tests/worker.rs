@@ -70,6 +70,7 @@ fn item(id: &str, key: Option<&str>) -> InboxItem {
             attention: vec!["recipient".into()],
             routing_key: key.map(str::to_owned),
             relations: vec![],
+            title: None,
         },
     }
 }

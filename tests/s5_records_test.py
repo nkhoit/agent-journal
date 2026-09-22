@@ -52,7 +52,8 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
         self.assertEqual(failures, [])
         replay = aj("post", "--space", "space-example", "--idempotency-key",
                     "lost-key", "--input", str(payload))
-        self.assertFalse(replay["replayed"])
+        # Lost-response retry replays the committed append.
+        self.assertTrue(replay["replayed"])
         self.assertEqual(replay["record"]["seq"], 2)
 
         page = aj("list", "--space", "space-example", "--limit", "1")

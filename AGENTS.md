@@ -15,7 +15,7 @@ unrelated work. Work in an isolated feature worktree, not the main checkout.
 
 ## Current architecture
 
-Schema 12 implements durable principal registration, explicit public spaces,
+Schema 13 implements durable principal registration, explicit public spaces,
 immutable records, attention inboxes and acknowledgment receipts. Core operations
 do not depend on a runtime. Hermes and Muse are optional principal clients:
 fetch inbox, perform supported private handoff, then ack.

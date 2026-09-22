@@ -336,6 +336,7 @@ fn cli_once_uses_real_journald_and_hermes_handoff_before_ack() {
                 run_id: None,
                 routing_key: Some("default".into()),
                 relations: vec![],
+                title: None,
             },
         )
         .expect("append record")
@@ -414,6 +415,7 @@ fn cli_once_uses_real_journald_and_hermes_handoff_before_ack() {
         run_id: None,
         routing_key: Some(key.into()),
         relations: vec![],
+        title: None,
     };
     central
         .append(
