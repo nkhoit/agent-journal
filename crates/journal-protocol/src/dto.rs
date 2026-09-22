@@ -282,11 +282,26 @@ impl InboxState {
 pub struct InboxQuery {
     pub state: InboxState,
     pub page: PageQuery,
+    /// Long-poll hold in seconds applied when the first page is empty.
+    /// 0 returns immediately; values above MAX_INBOX_WAIT_SECONDS are rejected.
+    pub wait_seconds: u64,
 }
+
+/// Upper bound for `InboxQuery::wait_seconds`. A held request never outlives
+/// this many seconds; clients needing longer waits reissue the request.
+pub const MAX_INBOX_WAIT_SECONDS: u64 = 30;
 
 impl InboxQuery {
     pub fn validate(&self) -> Result<(), WireValidationError> {
-        self.page.validate()
+        self.page.validate()?;
+        if self.wait_seconds > MAX_INBOX_WAIT_SECONDS {
+            return Err(WireValidationError::Range {
+                field: "wait_seconds",
+                min: 0,
+                max: MAX_INBOX_WAIT_SECONDS,
+            });
+        }
+        Ok(())
     }
 }
 

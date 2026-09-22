@@ -45,6 +45,7 @@ pub fn options(
             "--credential-file",
             "--routes-file",
             "--poll-seconds",
+            "--wait-seconds",
         ]
         .contains(&flag)
             || runtime_flags.contains(&flag)
@@ -81,6 +82,7 @@ pub struct Config {
     routes_file: String,
     once: bool,
     poll: Duration,
+    wait_seconds: u64,
 }
 
 impl Config {
@@ -94,12 +96,22 @@ impl Config {
         if !(1..=3600).contains(&poll) {
             return Err(ConfigError::Invalid("poll seconds must be 1..3600"));
         }
+        let wait_seconds = values
+            .get("--wait-seconds")
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|_| ConfigError::Invalid("wait seconds must be 0..30"))?
+            .unwrap_or(0);
+        if wait_seconds > journal_client::journal_protocol::MAX_INBOX_WAIT_SECONDS {
+            return Err(ConfigError::Invalid("wait seconds must be 0..30"));
+        }
         Ok(Self {
             endpoint: required(values, "--central-endpoint")?,
             credential_file: required(values, "--credential-file")?,
             routes_file: required(values, "--routes-file")?,
             once: values.contains_key("--once"),
             poll: Duration::from_secs(poll),
+            wait_seconds,
         })
     }
 
@@ -112,7 +124,8 @@ impl Config {
                 .map_err(|_| "invalid private routes file")?;
         let transport =
             HttpTransport::new(&self.endpoint).map_err(|_| "invalid central endpoint")?;
-        let inbox = PrincipalInbox::new(Client::new(transport), credential.secret);
+        let inbox = PrincipalInbox::new(Client::new(transport), credential.secret)
+            .with_wait_seconds(self.wait_seconds);
         let mut worker = Worker::new(&inbox, runtime, &routes);
         let clock = Instant::now();
         let executor = tokio::runtime::Builder::new_current_thread()
@@ -203,12 +216,7 @@ mod tests {
 
     #[test]
     fn legacy_options_and_duplicate_aliases_fail_closed() {
-        for legacy in [
-            "--delivery-credential-file",
-            "--spool-db",
-            "--instance-id",
-            "--wait-seconds",
-        ] {
+        for legacy in ["--delivery-credential-file", "--spool-db", "--instance-id"] {
             assert!(matches!(
                 options(args(&[legacy, "value"]), &[]),
                 Err(ConfigError::Invalid(
@@ -270,6 +278,66 @@ mod tests {
             .unwrap();
             assert!(Config::from_options(&values).is_ok());
         }
+    }
+
+    #[test]
+    fn wait_seconds_bounds_are_exact() {
+        for invalid in ["-1", "31", "3600", "not-a-number"] {
+            let values = options(
+                args(&[
+                    "--central-endpoint",
+                    "https://journal.example.invalid",
+                    "--credential-file",
+                    "credential.json",
+                    "--routes-file",
+                    "routes.json",
+                    "--wait-seconds",
+                    invalid,
+                ]),
+                &[],
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    Config::from_options(&values),
+                    Err(ConfigError::Invalid("wait seconds must be 0..30"))
+                ),
+                "{invalid}"
+            );
+        }
+        for valid in ["0", "1", "30"] {
+            let values = options(
+                args(&[
+                    "--central-endpoint",
+                    "https://journal.example.invalid",
+                    "--credential-file",
+                    "credential.json",
+                    "--routes-file",
+                    "routes.json",
+                    "--wait-seconds",
+                    valid,
+                    "--once",
+                ]),
+                &[],
+            )
+            .unwrap();
+            assert!(Config::from_options(&values).is_ok(), "{valid}");
+        }
+        // Omitted --wait-seconds defaults to immediate return.
+        let values = options(
+            args(&[
+                "--central-endpoint",
+                "https://journal.example.invalid",
+                "--credential-file",
+                "credential.json",
+                "--routes-file",
+                "routes.json",
+                "--once",
+            ]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(Config::from_options(&values).unwrap().wait_seconds, 0);
     }
 
     #[cfg(unix)]

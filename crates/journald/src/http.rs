@@ -29,17 +29,31 @@ pub(crate) use web::web_router_with_timeout;
 #[derive(Debug, Clone)]
 pub struct ServiceState {
     blocking: BlockingExecutor,
+    inbox_arrivals: tokio::sync::watch::Sender<u64>,
 }
 
 impl ServiceState {
     pub fn new(database: Database, blocking_limit: usize) -> Result<Self, BlockingError> {
         Ok(Self {
             blocking: BlockingExecutor::new(database, blocking_limit)?,
+            inbox_arrivals: tokio::sync::watch::channel(0).0,
         })
     }
 
     pub fn blocking(&self) -> &BlockingExecutor {
         &self.blocking
+    }
+
+    /// Wake held inbox long-poll requests. Called after a committed append
+    /// created inbox items; the generation counter only needs to advance,
+    /// since waiters re-query under their own credentials and filters.
+    fn note_inbox_arrival(&self) {
+        self.inbox_arrivals
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    fn inbox_arrivals(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inbox_arrivals.subscribe()
     }
 }
 
@@ -524,6 +538,79 @@ async fn update_profile(
     .await
 }
 
+/// Fetch one inbox page through the bounded blocking executor, preserving the
+/// standard journal_read outcome logging for every attempt.
+async fn fetch_inbox_page(
+    state: &ServiceState,
+    request_id: &RequestId,
+    token: &str,
+    query: &journal_protocol::InboxQuery,
+) -> Result<journal_protocol::InboxPage, Response> {
+    let token = token.to_owned();
+    let query = query.clone();
+    bootstrap_result(state, request_id, "journal_read", false, move |s| {
+        s.inbox(&token, &query)
+    })
+    .await
+}
+
+/// Serve `GET /v1/inbox` with optional long-polling. When `wait_seconds` is
+/// zero the first page returns immediately, preserving historical behavior.
+/// When positive and the request carries no cursor, an empty first page holds
+/// the connection until an inbox item is committed, the bound elapses, or the
+/// client disconnects; the query is then re-executed and its result returned.
+/// The wait never holds a database transaction or a blocking-executor permit:
+/// each fetch runs separately inside the bounded executor, and the hold itself
+/// is a plain async wait on the inbox-arrival generation counter. Spurious
+/// wakeups only cause an extra re-query under the caller's own credentials.
+async fn inbox_long_poll(
+    state: ServiceState,
+    request_id: RequestId,
+    token: String,
+    raw_query: &str,
+) -> Response {
+    let query = match journal_protocol::InboxQuery::from_query(raw_query) {
+        Ok(query) => query,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "invalid request",
+                request_id,
+            );
+        }
+    };
+    // A cursor binds a fixed upper sequence bound, so cursor-bearing pages can
+    // never observe new arrivals; long-polling applies to fresh traversals.
+    let waits = query.wait_seconds > 0 && query.page.cursor.as_deref().is_none_or(|s| s.is_empty());
+    // Subscribe before the first fetch so an arrival during the fetch still
+    // trips the generation counter observed by `changed()`.
+    let mut arrivals = state.inbox_arrivals();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(query.wait_seconds);
+    loop {
+        let page = match fetch_inbox_page(&state, &request_id, &token, &query).await {
+            Ok(page) => page,
+            Err(response) => return response,
+        };
+        if !page.items.is_empty() || !waits {
+            return success_response(StatusCode::OK, page);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return success_response(StatusCode::OK, page);
+        }
+        tokio::select! {
+            _ = arrivals.changed() => continue,
+            _ = tokio::time::sleep(deadline - now) => {
+                return match fetch_inbox_page(&state, &request_id, &token, &query).await {
+                    Ok(page) => success_response(StatusCode::OK, page),
+                    Err(response) => response,
+                };
+            }
+        }
+    }
+}
+
 async fn journal_operation(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
@@ -637,15 +724,24 @@ async fn journal_operation(
                 request_id,
             );
         };
-        return bootstrap(
-            state,
-            request_id,
-            StatusCode::CREATED,
-            "append_record",
-            true,
-            move |s| s.append_record(&token, &space, &key, &input),
-        )
-        .await;
+        return match bootstrap_result(&state, &request_id, "append_record", true, move |s| {
+            s.append_record(&token, &space, &key, &input)
+        })
+        .await
+        {
+            Ok(appended) => {
+                // The transaction committed inside the blocking executor;
+                // wake held long-poll readers only when items were created.
+                if appended.mailbox_created > 0 {
+                    state.note_inbox_arrival();
+                }
+                success_response(StatusCode::CREATED, appended)
+            }
+            Err(response) => response,
+        };
+    }
+    if route == "/v1/inbox" {
+        return inbox_long_poll(state, request_id, token, &query).await;
     }
     bootstrap(
         state,
@@ -655,13 +751,6 @@ async fn journal_operation(
         false,
         move |s| {
             let value = match route.as_str() {
-                "/v1/inbox" => serde_json::to_value(
-                    s.inbox(
-                        &token,
-                        &journal_protocol::InboxQuery::from_query(&query)
-                            .map_err(|_| BootstrapError::InvalidJournal)?,
-                    )?,
-                ),
                 "/v1/spaces" => serde_json::to_value(s.list_spaces(
                     &token,
                     &PageQuery::from_query(&query).map_err(|_| BootstrapError::InvalidJournal)?,

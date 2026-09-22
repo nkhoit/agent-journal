@@ -62,6 +62,17 @@ Route files are read at startup. Repair a route and restart rather than requirin
 central requeue. `--once` runs one bounded tick for inspection; it is not a drain
 operation or a replacement for the continuous loop's fairness guarantees.
 
+`--wait-seconds N` (0..30, default 0) switches cursorless inbox fetches to
+long-polling: instead of returning an empty page immediately, the server holds
+the request until an inbox item is committed or N seconds elapse. This lets a
+`--once` invocation block waiting for mail rather than busy-polling, and lets
+the continuous loop replace some idle ticks with held requests. The configured
+`--poll-seconds` delay still applies between ticks; combine them so a held
+request plus the delay matches the deployment's wake budget. A held request can
+delay SIGTERM handling by up to N seconds; the client transport timeout must
+exceed the longest hold. The server ignores the wait on cursor-bearing fetches,
+so traversals already in progress are unaffected.
+
 ## Persistence and duplicates
 
 The service imposes no local spool or custody contract. These clients do not

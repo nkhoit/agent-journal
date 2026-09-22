@@ -113,11 +113,23 @@ pub trait Inbox {
 pub struct PrincipalInbox {
     client: Client,
     credential: String,
+    wait_seconds: u64,
 }
 
 impl PrincipalInbox {
     pub fn new(client: Client, credential: String) -> Self {
-        Self { client, credential }
+        Self {
+            client,
+            credential,
+            wait_seconds: 0,
+        }
+    }
+
+    /// Hold cursorless fetches open up to `wait_seconds` when the inbox is
+    /// empty, instead of returning immediately. Bounded by the server.
+    pub fn with_wait_seconds(mut self, wait_seconds: u64) -> Self {
+        self.wait_seconds = wait_seconds;
+        self
     }
 }
 
@@ -131,6 +143,7 @@ impl Inbox for PrincipalInbox {
                     cursor: cursor.map(str::to_owned),
                     limit: Some(PAGE_LIMIT as usize),
                 },
+                wait_seconds: self.wait_seconds,
             },
         )
     }
