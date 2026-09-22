@@ -3,7 +3,16 @@ use std::collections::BTreeMap;
 
 impl crate::InboxQuery {
     pub fn from_query(query: &str) -> Result<Self, InvalidQuery> {
-        let values = parse(query, &["state", "cursor", "limit"])?;
+        let values = parse(query, &["state", "cursor", "limit", "wait_seconds"])?;
+        let wait_seconds: u64 = values
+            .get("wait_seconds")
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|_| InvalidQuery)?
+            .unwrap_or(0);
+        if wait_seconds > crate::MAX_INBOX_WAIT_SECONDS {
+            return Err(InvalidQuery);
+        }
         Ok(Self {
             state: match values.get("state").map(String::as_str) {
                 None | Some("unacknowledged") => crate::InboxState::Unacknowledged,
@@ -12,12 +21,16 @@ impl crate::InboxQuery {
                 _ => return Err(InvalidQuery),
             },
             page: page(&values)?,
+            wait_seconds,
         })
     }
 
     pub fn pairs(&self) -> Vec<(String, String)> {
         let mut pairs = self.page.pairs();
         pairs.push(("state".into(), self.state.as_str().into()));
+        if self.wait_seconds > 0 {
+            pairs.push(("wait_seconds".into(), self.wait_seconds.to_string()));
+        }
         pairs
     }
 }

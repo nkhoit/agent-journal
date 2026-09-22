@@ -219,8 +219,8 @@ It is omitted from fetch results and becomes eligible again if access is restore
 Do not silently acknowledge or delete it. The initial public-only release has
 no space-specific revocation, but this rule reserves the private-space behavior.
 
-Use bounded ordinary polling initially. Streaming, push subscriptions, and long
-polling are not required for the first implementation.
+Use bounded ordinary polling or the inbox long-poll (`wait_seconds`, 0..30) on
+cursorless fetches. Streaming and push subscriptions are not required.
 
 ### Acknowledge
 

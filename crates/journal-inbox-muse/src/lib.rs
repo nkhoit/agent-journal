@@ -19,7 +19,7 @@ impl Config {
     }
 
     pub fn usage() -> &'static str {
-        "Usage: journal-inbox-muse --central-endpoint URL --credential-file PATH --routes-file PATH --muse-drop-dir PATH [--once] [--poll-seconds N]"
+        "Usage: journal-inbox-muse --central-endpoint URL --credential-file PATH --routes-file PATH --muse-drop-dir PATH [--once] [--poll-seconds N] [--wait-seconds N]"
     }
 }
 
