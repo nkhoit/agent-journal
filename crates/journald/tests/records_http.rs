@@ -128,9 +128,11 @@ async fn record_routes_enforce_wire_contract() {
         if status == StatusCode::CREATED {
             if let Some(record) = &first {
                 assert_eq!(record, &value["record"]);
-                assert_eq!(value["replayed"], false);
+                // Replays of the same idempotency key report replayed=true.
+                assert_eq!(value["replayed"], true);
             } else {
                 first = Some(value["record"].clone());
+                assert_eq!(value["replayed"], false);
             }
         } else if status == StatusCode::CONFLICT {
             assert_eq!(value["error"]["code"], "idempotency-conflict");
@@ -307,9 +309,15 @@ async fn append_replay_after_disable_is_exact_but_new_or_invalid_requests_are_de
 
     let (status, replay) = append(&router, &token, "exact", body).await;
     assert_eq!(status, StatusCode::CREATED);
+    // Replay returns the persisted record with replayed=true (the stored bytes
+    // have replayed=false; the flag is set on the replay path).
+    let first_json: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let replay_json: serde_json::Value = serde_json::from_slice(&replay).unwrap();
+    assert_eq!(replay_json["replayed"], true);
+    assert_eq!(replay_json["record"], first_json["record"]);
     assert_eq!(
-        replay, first,
-        "replay must return the persisted response bytes"
+        replay_json["mailbox_created"],
+        first_json["mailbox_created"]
     );
     let (status, conflict) = append(
         &router,

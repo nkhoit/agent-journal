@@ -168,6 +168,7 @@ fn cli_once_drops_to_muse_then_acknowledges_with_restart_idempotence() {
                 run_id: None,
                 routing_key: Some("default".into()),
                 relations: vec![],
+                title: None,
             },
         )
         .expect("append record")
@@ -296,6 +297,7 @@ fn cli_once_drops_to_muse_then_acknowledges_with_restart_idempotence() {
         run_id: None,
         routing_key: Some(key.into()),
         relations: vec![],
+        title: None,
     };
     central
         .append(

@@ -28,10 +28,17 @@ Page size defaults to 50 and is at most 100.
 ### Canonical append and replay
 
 Canonical typed append bytes use key order `kind`, `content`, `run_id`,
-`attention`, `routing_key`, `relations`. Kind/content are present. Absent
+`attention`, `routing_key`, `relations`, `title`. Kind/content are present. Absent
 optionals and empty attention/relations are omitted. Attention is validated
 unique and sorted lexically; relation order and every string byte are preserved.
-There is no case folding, trimming, selector substitution or content rewriting.
+There is no case folding, selector substitution or content rewriting. The
+optional `title` is trimmed of surrounding Unicode whitespace (blank becomes
+absent) after the idempotency hash is computed over the submitted bytes, so
+whitespace variants hash differently; it is validated for length (at most 200
+Unicode scalar values) and rejected when it contains control characters. Agent
+convention: give discussion-starting root records a concise human-readable
+title; the thread's display title is resolved from the root record's title,
+and reply titles are message-level subjects that never rename the thread.
 
 `POST /v1/spaces/{space}/records` requires Idempotency-Key. Its scope is
 `(principal, method, path, key)` and comparison precedes mutable handle
@@ -40,8 +47,8 @@ record/relations, attention and every recipient inbox item, and stores the
 idempotency response in one transaction. No attention creates no inbox items.
 Any failure rolls back all allocations and inserts.
 
-Exact replay returns the original 201 response, including its original
-`replayed: false`. Different input with the same key returns 409. A valid,
+Exact replay returns the original 201 response with `replayed` set to true.
+Different input with the same key returns 409. A valid,
 unrevoked/unexpired credential is still required, but replay lookup precedes
 mutable profile/access/disabled-principal checks. New appends reject disabled
 recipients and archived spaces.
@@ -158,7 +165,7 @@ are null when unknown/unprotected. There are no runtime/claim/heartbeat metrics.
 
 ## Compatibility and optional consumers
 
-Schema 12 admits only exact current state. Older databases/audits require explicit
+Schema 13 admits only exact current state. Older databases/audits require explicit
 archive/reset without migration or automatic deletion. All old enrollment,
 adapter, claim, custody, telemetry and requeue paths are absent and return 404.
 There is no delivery credential class or old executable alias.

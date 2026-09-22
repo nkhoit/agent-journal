@@ -89,20 +89,21 @@ fn independently_registered_principals_use_public_spaces_without_memberships() {
         f.service.get_record(&beta, &posted.record.id).unwrap(),
         posted.record
     );
-    assert_eq!(
-        f.service
-            .append_record(
-                &alpha,
-                "space",
-                "public",
-                &RecordInput {
-                    attention: vec!["beta".into()],
-                    ..f.input()
-                }
-            )
-            .unwrap(),
-        posted
-    );
+    let replay = f
+        .service
+        .append_record(
+            &alpha,
+            "space",
+            "public",
+            &RecordInput {
+                attention: vec!["beta".into()],
+                ..f.input()
+            },
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.record, posted.record);
+    assert_eq!(replay.mailbox_created, posted.mailbox_created);
     let inbox = f.service.inbox(&beta, &InboxQuery::default()).unwrap();
     assert_eq!(inbox.items.len(), 1);
     assert_eq!(inbox.items[0].record, posted.record);
@@ -196,6 +197,7 @@ impl Fixture {
             attention: vec!["reader".into()],
             routing_key: None,
             relations: vec![],
+            title: None,
         }
     }
     fn count(&self, table: &str) -> i64 {
@@ -704,7 +706,9 @@ fn append_replay_read_and_mailbox_are_durable() {
     let replay = restarted
         .append_record(&f.token, "space", "key", &input)
         .unwrap();
-    assert_eq!(replay, first);
+    assert!(replay.replayed);
+    assert_eq!(replay.record, first.record);
+    assert_eq!(replay.mailbox_created, first.mailbox_created);
     assert_eq!(
         restarted.get_record(&f.token, &first.record.id).unwrap(),
         first.record
@@ -761,7 +765,9 @@ fn append_replay_survives_post_commit_acl_and_disable_changes() {
             .service
             .append_record(&f.token, "space", mutation, &input)
             .unwrap();
-        assert_eq!(replay, stored, "{mutation}");
+        assert!(replay.replayed, "{mutation}");
+        assert_eq!(replay.record, stored.record, "{mutation}");
+        assert_eq!(replay.mailbox_created, stored.mailbox_created, "{mutation}");
         assert_eq!(f.count("records"), 1);
         assert_eq!(f.count("mailbox_items"), 1);
     }
@@ -796,8 +802,9 @@ fn append_replay_uses_raw_handles_after_profile_rename_and_alias() {
         .service
         .append_record(&f.token, "space", "rename-replay", &input)
         .unwrap();
-    assert_eq!(replay, f.stored_append("rename-replay"));
-    assert_eq!(first, replay);
+    assert!(replay.replayed);
+    assert_eq!(replay.record, f.stored_append("rename-replay").record);
+    assert_eq!(replay.record, first.record);
 
     let mut renamed_handle = input;
     renamed_handle.attention = vec!["reader-renamed".into()];
@@ -1253,6 +1260,7 @@ fn append_crash_child() {
         run_id: None,
         routing_key: None,
         relations: vec![],
+        title: None,
     };
     service
         .append_record(
@@ -1304,7 +1312,72 @@ fn process_termination_rolls_back_or_replays_complete_append() {
             .service
             .append_record(&f.token, "space", "crash", &input)
             .unwrap();
-        assert!(!retry.replayed);
+        // "before" crashed before commit: fresh append. "after" completed the
+        // append: the retry replays it instead of duplicating.
+        assert_eq!(retry.replayed, mode == "after");
         assert_eq!(retry.record.seq, 1);
     }
+}
+
+#[test]
+fn title_normalization_and_idempotency_hash_before_normalization() {
+    let f = Fixture::new();
+    // Title is trimmed and blank becomes None on append.
+    let mut input = f.input();
+    input.title = Some("  Project Alpha  ".into());
+    let first = f
+        .service
+        .append_record(&f.token, "space", "titled", &input)
+        .unwrap();
+    assert_eq!(first.record.title.as_deref(), Some("Project Alpha"));
+    assert!(!first.replayed);
+
+    // Blank title normalizes to None.
+    let mut blank = f.input();
+    blank.title = Some("   ".into());
+    let blank_result = f
+        .service
+        .append_record(&f.token, "space", "blank", &blank)
+        .unwrap();
+    assert_eq!(blank_result.record.title, None);
+
+    // Idempotency hashes the submitted input BEFORE normalization, so
+    // " Topic " and "Topic" conflict under one reused key.
+    let mut spaced = f.input();
+    spaced.title = Some(" Topic ".into());
+    let mut trimmed = f.input();
+    trimmed.title = Some("Topic".into());
+    f.service
+        .append_record(&f.token, "space", "ws-key", &spaced)
+        .unwrap();
+    assert!(matches!(
+        f.service
+            .append_record(&f.token, "space", "ws-key", &trimmed),
+        Err(BootstrapError::IdempotencyConflict)
+    ));
+
+    // Replay of the identical input returns the normalized title.
+    let replay = f
+        .service
+        .append_record(&f.token, "space", "titled", &input)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.record.title.as_deref(), Some("Project Alpha"));
+
+    // Reply titles are message-level: stored on the reply, retrievable
+    // independently of the root's title.
+    let mut reply_input = f.input();
+    reply_input.title = Some("Reply subject".into());
+    reply_input.relations = vec![domain::Relation {
+        relation_type: domain::RelationType::ReplyTo,
+        record_id: first.record.id.clone(),
+    }];
+    let reply = f
+        .service
+        .append_record(&f.token, "space", "reply", &reply_input)
+        .unwrap();
+    assert_eq!(reply.record.title.as_deref(), Some("Reply subject"));
+    // The root's title is unchanged by the reply's title.
+    let root_again = f.service.get_record(&f.token, &first.record.id).unwrap();
+    assert_eq!(root_again.title.as_deref(), Some("Project Alpha"));
 }

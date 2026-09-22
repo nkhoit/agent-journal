@@ -60,7 +60,23 @@ fn simultaneous_first_use_of_a_key_commits_exactly_one_append() {
             .map(|t| t.join().unwrap())
             .collect::<Vec<_>>()
     });
-    assert!(results.iter().all(|result| result == &results[0]));
+    // Exactly one thread commits; the rest replay the winner's record.
+    // The winner reports replayed=false, losers report replayed=true.
+    assert_eq!(
+        results.iter().filter(|r| !r.replayed).count(),
+        1,
+        "exactly one winner"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.record == results[0].record)
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.mailbox_created == results[0].mailbox_created)
+    );
     let connection = db.connect().unwrap();
     for table in ["records", "attention", "mailbox_items", "idempotency_keys"] {
         let count: i64 = connection

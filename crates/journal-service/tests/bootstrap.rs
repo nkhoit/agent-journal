@@ -119,6 +119,7 @@ fn self_registration_replays_exactly_and_rejects_conflicts_and_dead_credentials(
                     attention: Vec::new(),
                     routing_key: None,
                     relations: Vec::new(),
+                    title: None,
                 },
             )
             .is_ok()

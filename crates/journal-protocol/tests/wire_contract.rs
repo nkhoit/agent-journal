@@ -221,6 +221,7 @@ fn path_headers_and_authentication_are_not_body_fields() {
         attention: vec!["agent-beta".into()],
         routing_key: None,
         relations: Vec::new(),
+        title: None,
     };
     let value = serde_json::to_value(&body).expect("append JSON");
     for forbidden in [
@@ -257,6 +258,7 @@ fn append_and_query_limits_use_utf8_bytes_and_exact_boundaries() {
         attention: Vec::new(),
         routing_key: None,
         relations: Vec::new(),
+        title: None,
     };
     assert_eq!(exact.content.len(), domain::MAX_CONTENT_BYTES);
     assert!(exact.validate().is_ok());

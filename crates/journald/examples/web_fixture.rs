@@ -75,6 +75,7 @@ malicioussnippet `<img src=x onerror=alert(1)>`
                 routing_key: None,
                 attention: vec!["recipient".into()],
                 relations: vec![],
+                title: None,
             },
         )?
         .record;
@@ -92,6 +93,7 @@ malicioussnippet `<img src=x onerror=alert(1)>`
                 relation_type: domain::RelationType::ReplyTo,
                 record_id: record.id.clone(),
             }],
+            title: None,
         },
     )?;
     let state = ServiceState::new(db, 8)?;

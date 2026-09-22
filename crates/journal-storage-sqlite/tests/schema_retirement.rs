@@ -11,8 +11,8 @@ fn prior_schema_is_rejected_without_reset_or_sidecar_creation() {
             .as_nanos()
     ));
     let sql = include_str!("../../../migrations/0001_uuid_native.sql")
-        .replace("version = 12", "version = 11")
-        .replace("VALUES (1, 12,", "VALUES (1, 11,");
+        .replace("version = 13", "version = 12")
+        .replace("VALUES (1, 13,", "VALUES (1, 12,");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch(&sql).unwrap();
     drop(connection);

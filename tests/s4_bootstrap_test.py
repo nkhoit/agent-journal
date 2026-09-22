@@ -207,8 +207,14 @@ class BootstrapTest(unittest.TestCase):
                          "--idempotency-key", "stable", "--input", body)
         replay = command("alpha", "post", "--space", "inbox-space",
                          "--idempotency-key", "stable", "--input", body)
-        self.assertEqual(posted.stdout, replay.stdout)
-        record = json.loads(posted.stdout)["record"]
+        # Replay returns the same record with replayed=true (the stored
+        # response has replayed=false; the flag is set on the replay path).
+        posted_json = json.loads(posted.stdout)
+        replay_json = json.loads(replay.stdout)
+        self.assertEqual(replay_json["replayed"], True)
+        self.assertEqual(replay_json["record"], posted_json["record"])
+        self.assertEqual(replay_json["mailbox_created"], posted_json["mailbox_created"])
+        record = posted_json["record"]
         page = json.loads(command("beta", "inbox").stdout)
         self.assertEqual(len(page["items"]), 1)
         self.assertEqual(page["items"][0]["record"], record)

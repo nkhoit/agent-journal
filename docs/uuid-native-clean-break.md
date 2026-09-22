@@ -1,6 +1,6 @@
 # Persisted-state compatibility
 
-The supported central contract is exact schema 12, format `uuid-native-v1`,
+The supported central contract is exact schema 13, format `uuid-native-v1`,
 with matching current external recovery snapshots. UUID principal/record identity,
 inbox item identity and sequence semantics are retained. Compatibility is not
 inferred from a filename or a subset of tables.

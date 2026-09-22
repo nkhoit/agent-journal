@@ -63,12 +63,13 @@ async fn registered_principals_use_inbox_over_real_http() {
             run_id: None,
             routing_key: None,
             relations: vec![],
+            title: None,
         };
         let posted = client.append(&alpha, "public", "key", &input).unwrap();
-        assert_eq!(
-            client.append(&alpha, "public", "key", &input).unwrap(),
-            posted
-        );
+        let replay = client.append(&alpha, "public", "key", &input).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.record, posted.record);
+        assert_eq!(replay.mailbox_created, posted.mailbox_created);
         let page = client.inbox(&beta, &InboxQuery::default()).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].record, posted.record);

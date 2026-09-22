@@ -4,10 +4,10 @@ PRAGMA foreign_keys=ON;
 -- central database; existing database files are never migrated or rewritten.
 CREATE TABLE schema_contract (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version = 12),
+    version INTEGER NOT NULL CHECK (version = 13),
     format TEXT NOT NULL CHECK (format = 'uuid-native-v1')
 );
-INSERT INTO schema_contract(singleton, version, format) VALUES (1, 12, 'uuid-native-v1');
+INSERT INTO schema_contract(singleton, version, format) VALUES (1, 13, 'uuid-native-v1');
 
 CREATE TABLE principals (
     id TEXT PRIMARY KEY CHECK (
@@ -75,6 +75,7 @@ CREATE TABLE records (
     content TEXT NOT NULL CHECK (length(CAST(content AS BLOB)) BETWEEN 1 AND 65536),
     run_id TEXT CHECK (run_id IS NULL OR length(run_id) <= 128),
     routing_key TEXT,
+    title TEXT CHECK (title IS NULL OR length(title) BETWEEN 1 AND 200),
     created_at TEXT NOT NULL,
     source_system TEXT,
     source_id TEXT,

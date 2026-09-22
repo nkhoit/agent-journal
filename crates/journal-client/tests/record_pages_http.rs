@@ -20,6 +20,7 @@ fn full_escaped_record_page_fits_bounded_transport() {
         attention: vec![],
         routing_key: None,
         relations: vec![],
+        title: None,
     };
     let body = serde_json::to_vec(&Page {
         items: vec![record; domain::MAX_PAGE_SIZE],
