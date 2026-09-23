@@ -452,6 +452,21 @@ async fn begin_incomplete_json_body(address: SocketAddr) -> TcpStream {
     stream
 }
 
+/// A free loopback address below the Linux (32768+) and macOS (49152+)
+/// ephemeral ranges, so port-0 binds elsewhere in the suite are never handed it.
+fn non_ephemeral_loopback() -> SocketAddr {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let start = u64::from(std::process::id()) * 7;
+    for _ in 0..12_000 {
+        let port = 20_000 + (start + NEXT.fetch_add(1, Ordering::Relaxed)) % 12_000;
+        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port as u16));
+        if std::net::TcpListener::bind(address).is_ok() {
+            return address;
+        }
+    }
+    panic!("no free non-ephemeral loopback port");
+}
+
 fn config(temporary: &TempDir) -> Config {
     Config {
         web: None,
@@ -1171,6 +1186,9 @@ async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks
     for web_enabled in [false, true] {
         let temporary = TempDir::new("serve-drop");
         let mut configuration = config(&temporary);
+        // Rebinding proves release only if no parallel test can be handed the
+        // freed port by an ephemeral bind in between.
+        configuration.public_address = non_ephemeral_loopback();
         if web_enabled {
             let database = Database::open_protected(
                 &configuration.database_path,
@@ -1184,7 +1202,7 @@ async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks
                 })
                 .unwrap();
             configuration.web = Some(journald::WebConfig {
-                address: "127.0.0.1:0".parse().unwrap(),
+                address: non_ephemeral_loopback(),
                 viewer: "viewer".into(),
             });
         }
@@ -1206,6 +1224,12 @@ async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks
             std::net::TcpListener::bind(public_address).expect("public listener was dropped");
         let web = web_address
             .map(|address| std::net::TcpListener::bind(address).expect("web listener was dropped"));
+        // The test itself now holds the released addresses; the restart only
+        // needs fresh ones to prove administrative and audit ownership is free.
+        configuration.public_address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        if let Some(web) = configuration.web.as_mut() {
+            web.address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        }
         let replacement = Server::bind(configuration)
             .await
             .expect("restart without polling detached listener tasks");
