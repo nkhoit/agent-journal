@@ -132,10 +132,16 @@ impl Config {
             .enable_all()
             .build()
             .map_err(|_| "cannot start signal handler")?;
+        // Persistent handlers keep a signal that arrives mid-tick; a per-iteration
+        // listener would miss it while the loop runs without its idle delay.
         #[cfg(unix)]
-        let mut terminate = executor
+        let (mut terminate, mut interrupt) = executor
             .block_on(async {
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                use tokio::signal::unix::{SignalKind, signal};
+                Ok::<_, std::io::Error>((
+                    signal(SignalKind::terminate())?,
+                    signal(SignalKind::interrupt())?,
+                ))
             })
             .map_err(|_| "cannot install termination handler")?;
         loop {
@@ -147,6 +153,11 @@ impl Config {
                     "unexpected journal response; stopped without acknowledgment"
                 }
             })?;
+            let delay = if worker.continue_immediately(&events) {
+                Duration::ZERO
+            } else {
+                self.poll
+            };
             for event in events {
                 eprintln!(
                     "inbox-client event={:?} item={:?}",
@@ -162,16 +173,18 @@ impl Config {
                     #[cfg(unix)]
                     {
                         tokio::select! {
-                            result = tokio::signal::ctrl_c() => result.map(|()| true),
-                            _ = terminate.recv() => Ok(true),
-                            _ = tokio::time::sleep(self.poll) => Ok(false),
+                            biased;
+                            _ = terminate.recv() => Ok::<_, std::io::Error>(true),
+                            _ = interrupt.recv() => Ok(true),
+                            _ = tokio::time::sleep(delay) => Ok(false),
                         }
                     }
                     #[cfg(not(unix))]
                     {
                         tokio::select! {
+                            biased;
                             result = tokio::signal::ctrl_c() => result.map(|()| true),
-                            _ = tokio::time::sleep(self.poll) => Ok(false),
+                            _ = tokio::time::sleep(delay) => Ok(false),
                         }
                     }
                 })

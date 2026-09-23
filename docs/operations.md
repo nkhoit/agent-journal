@@ -78,6 +78,8 @@ log a safe category and do not fall back. Correct local configuration and restar
 there is no central requeue.
 
 `--poll-seconds` defaults to 1 and is bounded 1..3600. Each tick has bounded work.
+The delay paces fetches and unavailability backoff; items already fetched are
+handed off without it.
 `--once` is one tick for inspection, not a queue drain. Continuous mode maintains
 fair fixed-bound passes and volatile backoff/ack-pending state.
 

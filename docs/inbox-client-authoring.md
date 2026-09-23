@@ -37,7 +37,9 @@ up to 100 failure-delay entries, and up to 100 accepted/ack-pending entries.
 A tick retries at most one eligible ack, fetches at most one page, and performs
 at most one new handoff. A transient ack failure stops that tick before another
 handoff. Calls use bounded transport timeouts. The configured polling delay
-applies between ticks; no transaction or database worker is held while sleeping.
+precedes each fetch and follows any tick that saw central or runtime
+unavailability; otherwise items already fetched are handed off back-to-back.
+No transaction or database worker is held while sleeping.
 
 Failed routes and runtime handoffs advance the page position without ack.
 Failure delay doubles from one to 256 seconds; evicting a failure-cache entry
@@ -67,7 +69,7 @@ long-polling: instead of returning an empty page immediately, the server holds
 the request until an inbox item is committed or N seconds elapse. This lets a
 `--once` invocation block waiting for mail rather than busy-polling, and lets
 the continuous loop replace some idle ticks with held requests. The configured
-`--poll-seconds` delay still applies between ticks; combine them so a held
+`--poll-seconds` delay still precedes each fetch; combine them so a held
 request plus the delay matches the deployment's wake budget. A held request can
 delay SIGTERM handling by up to N seconds; the client transport timeout must
 exceed the longest hold. The server ignores the wait on cursor-bearing fetches,
