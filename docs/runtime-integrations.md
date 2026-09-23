@@ -83,8 +83,10 @@ that hook or infer its success.
 Run one logical automated consumer per principal. Unknown explicit routes do
 not fall back. Failures remain unacknowledged with bounded local retry and
 diagnostics; successful handoff precedes ack. `--once` performs one bounded tick,
-not a complete drain. `--poll-seconds` accepts 1 through 3600; default 1.
-There is no long polling, streaming, broker, installation flag or spool path.
+not a complete drain. `--poll-seconds` accepts 1 through 3600; default 1. It
+paces fetches and unavailability backoff, not each handoff; `--wait-seconds`
+optionally long-polls cursorless fetches.
+There is no streaming, broker, installation flag or spool path.
 
 Credentials, key files and route files must be private regular files in private
 directories. Route maps are bounded to 1 MiB. Do not put secret values or runtime

@@ -192,6 +192,58 @@ fn transient_ack_failure_backs_off_cached_new_handoffs() {
 }
 
 #[test]
+fn buffered_items_continue_without_the_idle_delay_until_unavailability() {
+    let source = Journal::default();
+    source.pages.borrow_mut().push_back(Page {
+        items: vec![
+            item("first", None),
+            item("bad-route", Some("unknown")),
+            item("second", None),
+            item("third", None),
+        ],
+        next_cursor: None,
+    });
+    let runtime = Platform::default();
+    let routes = routes();
+    let mut worker = Worker::new(&source, &runtime, &routes);
+    let events = worker.tick(Duration::ZERO).unwrap();
+    assert_eq!(events[0].kind, EventKind::Acknowledged);
+    assert!(worker.continue_immediately(&events));
+    // An item-specific route failure does not pause the pass.
+    let events = worker.tick(Duration::ZERO).unwrap();
+    assert_eq!(events[0].kind, EventKind::RouteUnavailable);
+    assert!(worker.continue_immediately(&events));
+    // Runtime unavailability pauses even while items remain buffered.
+    *runtime.fail.borrow_mut() = true;
+    let events = worker.tick(Duration::ZERO).unwrap();
+    assert_eq!(events[0].kind, EventKind::RuntimeUnavailable);
+    assert!(!worker.continue_immediately(&events));
+    *runtime.fail.borrow_mut() = false;
+    let events = worker.tick(Duration::ZERO).unwrap();
+    assert_eq!(events[0].kind, EventKind::Acknowledged);
+    // Once the page is drained the next tick would fetch, so the delay applies.
+    assert!(!worker.continue_immediately(&events));
+    assert_eq!(*source.acknowledgments.borrow(), ["first", "third"]);
+    assert_eq!(source.cursors.borrow().len(), 1);
+}
+
+#[test]
+fn pending_ack_failure_pauses_the_pass() {
+    let source = Journal::default();
+    source.pages.borrow_mut().push_back(Page {
+        items: vec![item("first", None), item("later", None)],
+        next_cursor: None,
+    });
+    *source.failure.borrow_mut() = Some(503);
+    let runtime = Platform::default();
+    let routes = routes();
+    let mut worker = Worker::new(&source, &runtime, &routes);
+    let events = worker.tick(Duration::ZERO).unwrap();
+    assert_eq!(events[0].kind, EventKind::AckPending);
+    assert!(!worker.continue_immediately(&events));
+}
+
+#[test]
 fn inaccessible_after_handoff_is_not_inferred_success_and_does_not_block() {
     let source = Journal::default();
     source.pages.borrow_mut().push_back(Page {

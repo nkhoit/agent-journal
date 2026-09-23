@@ -230,6 +230,21 @@ impl<'a, J: Inbox, R: Runtime> Worker<'a, J, R> {
         self.pending.len()
     }
 
+    /// Whether the continuous loop should tick again without its idle delay:
+    /// items from the current page remain and the last tick saw no central or
+    /// runtime unavailability. Fetches stay paced by the delay.
+    pub fn continue_immediately(&self, events: &[Event]) -> bool {
+        !self.page.is_empty()
+            && !events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::RuntimeUnavailable
+                        | EventKind::CentralUnavailable
+                        | EventKind::AckPending
+                )
+            })
+    }
+
     pub fn tick(&mut self, now: Duration) -> Result<Vec<Event>, WorkerError> {
         if now < self.central.after {
             return Ok(vec![]);
