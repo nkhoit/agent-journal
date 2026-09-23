@@ -121,10 +121,12 @@ and all, derived only from nullable acknowledged_at.
 An optional `wait_seconds` (0..30, default 0) enables long-polling on cursorless
 requests: when the first page is empty, the server holds the connection until an
 inbox item is committed, the bound elapses, or the client disconnects, then
-re-reads and returns the page. The hold never reserves, mutates or acknowledges
-items, and never holds a database transaction or blocking-executor permit while
-waiting. Cursor-bearing requests ignore the wait because their fixed upper bound
-cannot observe new arrivals. Out-of-range values are rejected with 400.
+re-reads and returns the page. Server shutdown releases a held request at once
+with the empty page it already read. The hold never reserves, mutates or
+acknowledges items, and never holds a database transaction or blocking-executor
+permit while waiting. Cursor-bearing requests ignore the wait because their
+fixed upper bound cannot observe new arrivals. Out-of-range values are rejected
+with 400.
 
 Each item contains stable inbox ID, recipient, recipient-local sequence,
 server creation/ack timestamps and complete record. Current authorization is

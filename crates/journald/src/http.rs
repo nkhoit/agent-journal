@@ -557,8 +557,10 @@ async fn fetch_inbox_page(
 /// Serve `GET /v1/inbox` with optional long-polling. When `wait_seconds` is
 /// zero the first page returns immediately, preserving historical behavior.
 /// When positive and the request carries no cursor, an empty first page holds
-/// the connection until an inbox item is committed, the bound elapses, or the
-/// client disconnects; the query is then re-executed and its result returned.
+/// the connection until an inbox item is committed, the bound elapses, the
+/// client disconnects, or the server begins shutting down; the query is then
+/// re-executed and its result returned, except on shutdown, which returns the
+/// empty page at once so graceful drain is not held for the full bound.
 /// The wait never holds a database transaction or a blocking-executor permit:
 /// each fetch runs separately inside the bounded executor, and the hold itself
 /// is a plain async wait on the inbox-arrival generation counter. Spurious
@@ -568,6 +570,7 @@ async fn inbox_long_poll(
     request_id: RequestId,
     token: String,
     raw_query: &str,
+    shutdown: watch::Receiver<bool>,
 ) -> Response {
     let query = match journal_protocol::InboxQuery::from_query(raw_query) {
         Ok(query) => query,
@@ -601,6 +604,9 @@ async fn inbox_long_poll(
         }
         tokio::select! {
             _ = arrivals.changed() => continue,
+            () = wait_for_shutdown(shutdown.clone()) => {
+                return success_response(StatusCode::OK, page);
+            }
             _ = tokio::time::sleep(deadline - now) => {
                 return match fetch_inbox_page(&state, &request_id, &token, &query).await {
                     Ok(page) => success_response(StatusCode::OK, page),
@@ -614,6 +620,7 @@ async fn inbox_long_poll(
 async fn journal_operation(
     State(state): State<ServiceState>,
     Extension(request_id): Extension<RequestId>,
+    Extension(shutdown): Extension<watch::Receiver<bool>>,
     request: Request<Body>,
 ) -> Response {
     use journal_protocol::{ListPrincipalsQuery, ListRecordsQuery, PageQuery, SearchRecordsQuery};
@@ -741,7 +748,7 @@ async fn journal_operation(
         };
     }
     if route == "/v1/inbox" {
-        return inbox_long_poll(state, request_id, token, &query).await;
+        return inbox_long_poll(state, request_id, token, &query, shutdown).await;
     }
     bootstrap(
         state,
@@ -1133,6 +1140,64 @@ fn new_request_id() -> String {
 mod peer_tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn held_inbox_long_poll_returns_promptly_on_shutdown() {
+        let directory = std::path::Path::new("target")
+            .join(format!("longpoll-shutdown-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::open(directory.join("journal.db")).unwrap();
+        let token = "b".repeat(64);
+        journal_service::BootstrapService::new(database.clone())
+            .register(
+                &token,
+                &journal_protocol::RegistrationRequest {
+                    handle: "beta".into(),
+                    display_name: "Beta".into(),
+                },
+            )
+            .unwrap();
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let router = public_router_with_timeout(
+            ServiceState::new(database, 2).unwrap(),
+            65536,
+            DEFAULT_BODY_READ_TIMEOUT,
+            shutdown,
+        );
+        let long_poll = || {
+            Request::get("/v1/inbox?wait_seconds=30")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let held = tokio::spawn(router.clone().oneshot(long_poll()));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!held.is_finished(), "an empty inbox must be held");
+        shutdown_tx.send(true).unwrap();
+        let started = tokio::time::Instant::now();
+        let released = tokio::time::timeout(Duration::from_secs(5), held)
+            .await
+            .expect("shutdown must release a held long-poll")
+            .unwrap()
+            .unwrap();
+        assert_eq!(released.status(), StatusCode::OK);
+        let page: journal_protocol::InboxPage =
+            serde_json::from_slice(&to_bytes(released.into_body(), 65536).await.unwrap()).unwrap();
+        assert!(page.items.is_empty());
+        // A request arriving during shutdown may be refused by the body gate
+        // or served empty, but it must never be held.
+        let late = tokio::time::timeout(Duration::from_secs(5), router.oneshot(long_poll()))
+            .await
+            .expect("a long-poll during shutdown must not be held")
+            .unwrap();
+        assert!(
+            [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE].contains(&late.status()),
+            "{}",
+            late.status()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn operational_metrics_are_local_only_and_fail_explicitly() {

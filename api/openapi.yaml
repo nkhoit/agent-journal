@@ -379,6 +379,7 @@ paths:
         When wait_seconds is positive and the request carries no cursor, an empty
         first page holds the connection until an inbox item is committed, the bound
         elapses, or the client disconnects; the page is then re-read and returned.
+        Server shutdown releases a held request at once with its empty page.
         The hold never reserves or acknowledges items. Cursor-bearing requests ignore
         the wait because their fixed upper bound cannot observe new arrivals.
       security: [{ principalClient: [] }]
