@@ -45,6 +45,11 @@ const LIST_RECORD_IDS: &str = "SELECT r.id FROM records r WHERE r.space_id=? AND
     AND (? IS NULL OR EXISTS(SELECT 1 FROM record_relations rel WHERE rel.source_record_id=r.id AND rel.relation_type=?))
     ORDER BY r.space_seq,r.id LIMIT ?";
 
+/// Stored in place of a copy of each append response. Records, relations and
+/// attention are immutable, so replay rebuilds the identical response from
+/// the record; any other stored value is a full copy from an older build.
+const REBUILT_APPEND_RESPONSE: &str = "{}";
+
 fn record_sequence_lower_bound(after_seq: Option<u64>, sequence: i64) -> i64 {
     // Per-space sequences are unique, so the cursor row can be excluded by the index seek.
     i64::try_from(after_seq.unwrap_or(0))
@@ -606,20 +611,28 @@ impl BootstrapService {
         let path = format!("/v1/spaces/{space}/records");
         self.transaction(|tx| {
             let replay_actor = self.append_replay_actor(tx, token)?;
-            let previous: Option<(String, String)> = tx
+            let previous: Option<(String, String, String)> = tx
                 .query_row(
-                    "SELECT payload_hash,response_json FROM idempotency_keys
+                    "SELECT payload_hash,record_id,response_json FROM idempotency_keys
                      WHERE principal_id=? AND method='POST' AND path=? AND idempotency_key=?",
                     params![replay_actor, path, key],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            if let Some((previous_hash, response)) = previous {
+            if let Some((previous_hash, record_id, response)) = previous {
                 if previous_hash != hash {
                     return Err(BootstrapError::IdempotencyConflict);
                 }
-                let mut result: AppendResult =
-                    decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal)?;
+                let mut result = if response == REBUILT_APPEND_RESPONSE {
+                    let record = record(tx, &record_id)?;
+                    AppendResult {
+                        mailbox_created: record.attention.len(),
+                        record,
+                        replayed: false,
+                    }
+                } else {
+                    decode_json(response.as_bytes()).map_err(|_| BootstrapError::CorruptJournal)?
+                };
                 result.replayed = true;
                 return Ok(result);
             }
@@ -673,9 +686,8 @@ impl BootstrapService {
                 record: Record { id: id.clone(), space_id: space.into(), seq, author: actor.clone(), kind: input.kind.clone(), content: input.content.clone(), run_id: input.run_id.clone(), created_at: now.clone(), attention, routing_key: input.routing_key.clone(), relations: input.relations.clone(), title: input.title.clone() },
                 mailbox_created: input.attention.len(), replayed: false,
             };
-            let response = serde_json::to_string(&result).map_err(|_| BootstrapError::CorruptJournal)?;
             tx.execute("INSERT INTO idempotency_keys(principal_id,method,path,idempotency_key,payload_hash,record_id,response_json,created_at) VALUES (?,'POST',?,?,?,?,?,?)",
-                params![actor,path,key,hash,id,response,now])?;
+                params![actor,path,key,hash,id,REBUILT_APPEND_RESPONSE,now])?;
             self.checkpoint("append-idempotency")?;
             Ok(result)
         })
