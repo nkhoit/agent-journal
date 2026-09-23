@@ -47,12 +47,31 @@ pub enum BootstrapError {
 
 impl From<rusqlite::Error> for BootstrapError {
     fn from(error: rusqlite::Error) -> Self {
-        if matches!(&error, rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::ConstraintViolation)
-        {
+        if is_state_collision(&error) {
             Self::Conflict
         } else {
             Self::Sqlite(error)
         }
+    }
+}
+
+/// Only uniqueness and name-reservation failures mean a request collided with
+/// existing state. Every other constraint failure (immutability, retention and
+/// limit triggers, foreign keys, checks) means server code or persisted data
+/// broke an invariant, and must surface as a logged failure rather than a 409.
+fn is_state_collision(error: &rusqlite::Error) -> bool {
+    let rusqlite::Error::SqliteFailure(failure, message) = error else {
+        return false;
+    };
+    match failure.extended_code {
+        rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => {
+            true
+        }
+        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER => matches!(
+            message.as_deref(),
+            Some("principal name shadows a principal id" | "principal id shadows a reserved name")
+        ),
+        _ => false,
     }
 }
 
