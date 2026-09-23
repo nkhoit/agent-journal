@@ -22,6 +22,7 @@ impl SecretSource for Sequence {
     }
 }
 struct Fixture {
+    database: Database,
     service: BootstrapService,
     path: std::path::PathBuf,
     principal_id: String,
@@ -38,8 +39,9 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
+        let database = Database::open(&path).unwrap();
         let service = BootstrapService::with_sources(
-            Database::open(&path).unwrap(),
+            database.clone(),
             Arc::new(FixedClock),
             Arc::new(Sequence(AtomicU64::new(1))),
         );
@@ -50,6 +52,7 @@ impl Fixture {
             })
             .unwrap();
         Self {
+            database,
             service,
             path,
             principal_id: principal.id,
@@ -544,6 +547,9 @@ fn provisioning_validation_membership_and_revocation_are_persistent() {
     let me = f.service.me(&actor).unwrap();
     assert_eq!(me.memberships.len(), 1);
     assert!(me.memberships[0].can_append);
+    // Cold admission refuses live WAL sidecars; hand the file over as a
+    // restarting daemon would.
+    f.database.normalize_for_clean_shutdown().unwrap();
     let reopened = BootstrapService::with_sources(
         Database::open(&f.path).unwrap(),
         Arc::new(FixedClock),
