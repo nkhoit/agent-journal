@@ -147,7 +147,7 @@ impl Server {
                 .execute(move |database| {
                     Ok(journal_service::BootstrapService::new(database.clone())
                         .shared_viewer(&viewer)
-                        .spaces(&journal_protocol::PageQuery::new(None, Some(1))))
+                        .verify())
                 })
                 .await
                 .map_err(|_| ServerError::WebInitialization("viewer check unavailable"))?

@@ -398,6 +398,31 @@ fn ordinary_reads_do_not_acquire_the_writer_lock() {
 }
 
 #[test]
+fn shared_viewer_verification_requires_an_existing_active_principal() {
+    let f = Fixture::new();
+    f.service.shared_viewer("reader").verify().unwrap();
+    f.service
+        .shared_viewer(&f.principal_id("reader"))
+        .verify()
+        .unwrap();
+    for viewer in ["missing", ""] {
+        assert!(
+            f.service.shared_viewer(viewer).verify().is_err(),
+            "{viewer}"
+        );
+    }
+    f.db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z' WHERE id=?",
+            [f.principal_id("reader")],
+        )
+        .unwrap();
+    assert!(f.service.shared_viewer("reader").verify().is_err());
+    assert_eq!(f.count("journal_secrets"), 0);
+}
+
+#[test]
 fn paged_reads_initialize_the_cursor_key_once_for_authenticated_callers() {
     let f = Fixture::new();
     assert_eq!(f.count("journal_secrets"), 0);
