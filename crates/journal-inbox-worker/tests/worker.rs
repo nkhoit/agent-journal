@@ -243,6 +243,79 @@ fn pending_ack_failure_pauses_the_pass() {
     assert!(!worker.continue_immediately(&events));
 }
 
+/// Serves `count` items in fixed-size pages; each cursorless fetch restarts.
+struct Backlog {
+    count: usize,
+}
+
+impl Inbox for Backlog {
+    fn fetch(&self, cursor: Option<&str>) -> Result<InboxPage, ClientError> {
+        let start: usize = cursor.map_or(0, |cursor| cursor.parse().unwrap());
+        let end = (start + PAGE_LIMIT as usize).min(self.count);
+        Ok(Page {
+            items: (start..end)
+                .map(|index| item(&format!("item-{index:05}"), None))
+                .collect(),
+            next_cursor: (end < self.count).then(|| end.to_string()),
+        })
+    }
+
+    fn acknowledge(&self, _: &str) -> Result<(), ClientError> {
+        panic!("rejected items are never acknowledged")
+    }
+}
+
+#[derive(Default)]
+struct Rejecting(std::cell::Cell<usize>);
+
+impl Runtime for Rejecting {
+    fn inject(&self, _: &Route, _: &Envelope, _: &str) -> RuntimeResult<String> {
+        self.0.set(self.0.get() + 1);
+        Err(RuntimeError::RuntimeRejected)
+    }
+}
+
+fn first_pass(worker: &mut Worker<'_, Backlog, Rejecting>, runtime: &Rejecting, count: usize) {
+    for _ in 0..count * 2 {
+        if runtime.0.get() == count {
+            return;
+        }
+        worker.tick(Duration::ZERO).unwrap();
+    }
+    panic!("first pass did not attempt every item");
+}
+
+#[test]
+fn failure_backoff_survives_a_large_backlog_of_rejected_items() {
+    let inbox = Backlog { count: 1000 };
+    let runtime = Rejecting::default();
+    let routes = routes();
+    let mut worker = Worker::new(&inbox, &runtime, &routes);
+    first_pass(&mut worker, &runtime, inbox.count);
+    // Two more full passes at the same instant: every item is still backing off.
+    for _ in 0..inbox.count * 2 + 100 {
+        worker.tick(Duration::ZERO).unwrap();
+    }
+    assert_eq!(runtime.0.get(), inbox.count, "no retry inside its backoff");
+    // Once the backoff elapses, each item is retried exactly once more.
+    for _ in 0..inbox.count * 2 {
+        worker.tick(Duration::from_secs(1)).unwrap();
+    }
+    assert_eq!(runtime.0.get(), inbox.count * 2);
+}
+
+#[test]
+fn failure_backoff_cache_stays_bounded() {
+    let inbox = Backlog {
+        count: FAILURE_LIMIT + 10,
+    };
+    let runtime = Rejecting::default();
+    let routes = routes();
+    let mut worker = Worker::new(&inbox, &runtime, &routes);
+    first_pass(&mut worker, &runtime, inbox.count);
+    assert_eq!(worker.failure_backoffs(), FAILURE_LIMIT);
+}
+
 #[test]
 fn inaccessible_after_handoff_is_not_inferred_success_and_does_not_block() {
     let source = Journal::default();
@@ -388,33 +461,52 @@ fn runtime_backoff_caps_at_256_seconds() {
 }
 
 #[test]
-fn failure_cache_evicts_only_retry_optimization_at_its_bound() {
+fn failure_cache_evicts_the_soonest_due_entry_at_its_bound() {
     let source = Journal::default();
-    source.pages.borrow_mut().extend((0..3).map(|page| {
-        Page {
-            items: (0..if page < 2 { 50 } else { 1 })
-                .map(|offset| item(&format!("failed-{}", page * 50 + offset), Some("unknown")))
-                .collect(),
-            next_cursor: (page < 2).then(|| format!("cursor-{page}")),
-        }
-    }));
+    let failed = (0..=FAILURE_LIMIT)
+        .map(|index| item(&format!("failed-{index:05}"), Some("unknown")))
+        .collect::<Vec<_>>();
+    source
+        .pages
+        .borrow_mut()
+        .extend(
+            failed
+                .chunks(PAGE_LIMIT as usize)
+                .enumerate()
+                .map(|(page, items)| Page {
+                    items: items.to_vec(),
+                    next_cursor: Some(format!("cursor-{page}")),
+                }),
+        );
+    let last = format!("failed-{FAILURE_LIMIT:05}");
     source.pages.borrow_mut().push_back(Page {
-        items: vec![item("failed-0", Some("unknown"))],
+        items: vec![
+            item("failed-00000", Some("unknown")),
+            item(&last, Some("unknown")),
+        ],
         next_cursor: None,
     });
     let runtime = Platform::default();
     let routes = routes();
     let mut worker = Worker::new(&source, &runtime, &routes);
-    for _ in 0..101 {
+    // The first failure is recorded earliest, so its retry is due soonest.
+    let first = worker.tick(Duration::ZERO).unwrap();
+    assert_eq!(first[0].kind, EventKind::RouteUnavailable);
+    for _ in 0..FAILURE_LIMIT {
         assert_eq!(
-            worker.tick(Duration::ZERO).unwrap()[0].kind,
+            worker.tick(Duration::from_millis(1)).unwrap()[0].kind,
             EventKind::RouteUnavailable
         );
     }
+    assert_eq!(worker.failure_backoffs(), FAILURE_LIMIT);
     assert_eq!(
-        worker.tick(Duration::ZERO).unwrap()[0].kind,
+        worker.tick(Duration::from_millis(2)).unwrap()[0].kind,
         EventKind::RouteUnavailable,
-        "the oldest failure may be retried after bounded-cache eviction"
+        "the evicted soonest-due failure may be retried early"
+    );
+    assert!(
+        worker.tick(Duration::from_millis(2)).unwrap().is_empty(),
+        "a retained failure keeps its backoff"
     );
 }
 

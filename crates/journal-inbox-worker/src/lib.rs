@@ -10,7 +10,9 @@ pub mod cli;
 
 pub const PAGE_LIMIT: u64 = 50;
 pub const PENDING_LIMIT: usize = 100;
-const FAILURE_LIMIT: usize = 100;
+/// Failure-backoff entries kept (roughly 150 bytes each). When full, the entry
+/// due soonest is evicted, losing the least backoff.
+pub const FAILURE_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RuntimeError {
@@ -207,7 +209,7 @@ pub struct Worker<'a, J, R> {
     cursor: Option<String>,
     cursor_restart_used: bool,
     pending: VecDeque<Pending>,
-    failures: VecDeque<Pending>,
+    failures: BTreeMap<String, Retry>,
     central: Retry,
 }
 
@@ -221,13 +223,17 @@ impl<'a, J: Inbox, R: Runtime> Worker<'a, J, R> {
             cursor: None,
             cursor_restart_used: false,
             pending: VecDeque::new(),
-            failures: VecDeque::new(),
+            failures: BTreeMap::new(),
             central: Retry::default(),
         }
     }
 
     pub fn pending_acknowledgments(&self) -> usize {
         self.pending.len()
+    }
+
+    pub fn failure_backoffs(&self) -> usize {
+        self.failures.len()
     }
 
     /// Whether the continuous loop should tick again without its idle delay:
@@ -314,8 +320,8 @@ impl<'a, J: Inbox, R: Runtime> Worker<'a, J, R> {
             .any(|pending| pending.id == item.inbox_item_id)
             || self
                 .failures
-                .iter()
-                .any(|failure| failure.id == item.inbox_item_id && failure.retry.after > now)
+                .get(&item.inbox_item_id)
+                .is_some_and(|retry| retry.after > now)
         {
             return Ok(events);
         }
@@ -345,27 +351,26 @@ impl<'a, J: Inbox, R: Runtime> Worker<'a, J, R> {
         };
         let id = item.inbox_item_id;
         if let Err(kind) = outcome {
-            let mut failed = self
-                .failures
-                .iter()
-                .position(|failure| failure.id == id)
-                .and_then(|index| self.failures.remove(index))
-                .unwrap_or(Pending {
-                    id: id.clone(),
-                    retry: Retry::default(),
-                });
-            failed.retry.fail(now);
-            if self.failures.len() == FAILURE_LIMIT {
-                self.failures.pop_front();
+            let mut retry = self.failures.remove(&id).unwrap_or_default();
+            retry.fail(now);
+            if self.failures.len() >= FAILURE_LIMIT {
+                let soonest = self
+                    .failures
+                    .iter()
+                    .min_by_key(|(_, retry)| retry.after)
+                    .map(|(id, _)| id.clone());
+                if let Some(soonest) = soonest {
+                    self.failures.remove(&soonest);
+                }
             }
-            self.failures.push_back(failed);
+            self.failures.insert(id.clone(), retry);
             events.push(Event {
                 item_id: Some(id),
                 kind,
             });
             return Ok(events);
         }
-        self.failures.retain(|failure| failure.id != id);
+        self.failures.remove(&id);
         events.push(self.acknowledge(
             Pending {
                 id,

@@ -33,7 +33,7 @@ One continuous worker is recommended per principal. The API provides no
 reservation, competing-consumer coordination or independent subscription.
 
 The worker holds one page of at most 50 items, a volatile continuation cursor,
-up to 100 failure-delay entries, and up to 100 accepted/ack-pending entries.
+up to 4096 failure-delay entries, and up to 100 accepted/ack-pending entries.
 A tick retries at most one eligible ack, fetches at most one page, and performs
 at most one new handoff. A transient ack failure stops that tick before another
 handoff. Calls use bounded transport timeouts. The configured polling delay
@@ -42,8 +42,9 @@ unavailability; otherwise items already fetched are handed off back-to-back.
 No transaction or database worker is held while sleeping.
 
 Failed routes and runtime handoffs advance the page position without ack.
-Failure delay doubles from one to 256 seconds; evicting a failure-cache entry
-only loses that optimization. At the server's fixed upper bound, traversal
+Failure delay doubles from one to 256 seconds. When the failure cache is full,
+the entry due soonest is evicted; that only loses its remaining delay, so the
+item may be retried early. At the server's fixed upper bound, traversal
 restarts without a cursor, so continuous arrivals cannot postpone earlier failed
 items forever. Cursor state is never a durable checkpoint.
 
