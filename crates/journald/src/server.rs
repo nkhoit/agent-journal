@@ -70,7 +70,9 @@ pub enum ServerError {
     ListenerTask(JoinError),
     #[error("a listener stopped before shutdown")]
     ListenerStopped,
-    #[error("graceful shutdown timed out; hot database state was left fail-closed")]
+    #[error(
+        "graceful shutdown timed out; hot database state was left for verified recovery at the next protected start"
+    )]
     ShutdownTimeout,
 
     #[error("administrative Unix sockets are unsupported on this platform")]
@@ -138,6 +140,13 @@ impl Server {
             Database::open_protected(database_path, audit_path)
         })
         .await??;
+        if let Some(audit_revision) = database.crash_recovered_revision() {
+            tracing::warn!(
+                event = "crash_state_recovered",
+                audit_revision,
+                "replayed SQLite state left by an abrupt stop after verifying it against the external audit"
+            );
+        }
         let state = ServiceState::new(database, config.blocking_limit)
             .map_err(|_| ServerError::InvalidConfig("blocking limit must be positive"))?;
         let web_listener = if let Some(web) = config.web {

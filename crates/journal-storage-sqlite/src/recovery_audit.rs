@@ -152,10 +152,36 @@ impl RecoveryAudit {
     /// Parse an existing lineage without taking the sidecar lock or opening a
     /// SQLite writer. Protected startup calls this before any operation that
     /// could create, replace, or unlink recovery evidence.
-    pub(crate) fn preflight_existing(database: &Database, path: &Path) -> Result<(), StorageError> {
+    pub(crate) fn preflight_existing(
+        database: &Database,
+        path: &Path,
+    ) -> Result<i64, StorageError> {
         let lineage = Self::read_open_lineage(path)?;
         let central = database.connect_recovery_read_only()?;
-        Self::verify_lineage_matches(&central, &lineage)
+        Self::verify_lineage_matches(&central, &lineage)?;
+        Ok(lineage.revision)
+    }
+
+    /// Read-only check that the audit is open with a resolved head, before any
+    /// lock or copy is made for crash recovery.
+    pub(crate) fn preflight_resolved(path: &Path) -> Result<(), StorageError> {
+        Self::read_open_lineage(path).map(drop)
+    }
+
+    /// Durable evidence that protected startup replayed hot SQLite state left
+    /// by an abrupt stop, after proving it against this audit's lineage.
+    pub(crate) fn record_crash_recovery(
+        &self,
+        verified: &crate::crash_recovery::Verified,
+    ) -> Result<(), StorageError> {
+        let detail = serde_json::to_string(verified)?;
+        self.connection()?.execute(
+            "INSERT INTO recovery_events(kind,detail) SELECT 'crash-recovered',?1
+             WHERE NOT EXISTS(SELECT 1 FROM recovery_events
+                              WHERE kind='crash-recovered' AND detail=?1)",
+            [detail],
+        )?;
+        Ok(())
     }
 
     fn read_open_lineage(path: &Path) -> Result<AuditLineage, StorageError> {

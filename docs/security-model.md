@@ -112,7 +112,8 @@ listener futures. Cancelling and awaiting that future closes the listeners and
 releases administrative ownership without requiring detached listener tasks to
 be scheduled. Cancellation is not graceful shutdown or database normalization:
 outstanding request workers can still retain protected audit ownership, and
-hot SQLite state remains fail-closed on restart.
+hot SQLite state is replayed at the next protected start only after it is
+proven against the external audit.
 
 Pending names use bounded safe ASCII and remain inside the final socket path
 budget. Occupied candidates are skipped; bounded exhaustion fails closed.

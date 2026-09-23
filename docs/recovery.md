@@ -69,6 +69,47 @@ intent keeps its predecessor's body as evidence. Admission rejects any other
 body placement. The audit format is recorded in SQLite `user_version`; audits
 written by earlier formats require operator archive/reset.
 
+## Abrupt stops
+
+A daemon killed without graceful shutdown (SIGKILL, OOM, power loss, forced
+drain timeout) leaves hot SQLite state: `-wal`, `-shm` or `-journal` sidecars.
+Unprotected cold admission still refuses any sidecar. Protected startup instead
+proves the hot state before replaying it:
+
+1. Read-only, with sidecars ignored, the main file must have the exact current
+   schema and the audit must be open with a resolved head. Legacy input and
+   unresolved intents are refused before any lock or copy exists.
+2. It takes the audit owner lock, so a live daemon's state is never touched.
+3. It copies the database and its `-wal`/`-journal` into a private
+   `<database>.crash-recovery` directory and lets SQLite replay only the copy.
+4. The replayed copy must pass exact-schema admission, the audit lineage check
+   (open audit, contiguous resolved revisions, matching journal ID, revision
+   and security snapshot) and the full integrity, foreign-key, FTS, sequence,
+   attention and allocation probes. Its audit revision and verification are
+   written, synced, to `verified.json` in the recovery directory.
+5. Only then is the original replayed in place and normalized. It must pass
+   the identical probes, and its table hashes and space heads must equal the
+   verified copy's.
+
+Success records one `crash-recovered` recovery event with the audit revision
+and verification, `journald` logs `crash_state_recovered`, and the recovery
+directory is removed last. While `verified.json` exists, every protected start
+resumes this procedure before normal admission, even when no sidecar remains,
+so a crash at any later step repeats verification and records the event once.
+
+Before `verified.json` exists, symlinked or hard-linked sidecars, an
+unresolved prepared intent, an older replayed state than the audit head (for
+example a lost WAL) or any failed probe refuse startup with the central files
+untouched; follow the archive/reset or protected-restore procedures. After it
+exists the original may already be replayed, so a divergence keeps refusing
+every start; preserve the recovery directory and archive/reset. The copy needs
+free space equal to the database and WAL. A recovery directory without
+`verified.json` is replaced only if it is empty or carries this procedure's
+provenance tag, and holds nothing but the copy's files; any other directory at
+that path refuses startup untouched. The marker is published by synced rename,
+so it is either absent or complete, and each recovery gets its own
+`recovery_id` so separate incidents are recorded separately.
+
 Restoration reconciles audited principal and profile state and revokes all
 restored credentials. Audited post-backup credentials and registration receipts
 are retained as revoked, including rotation/recovery descendants. Existing
@@ -166,8 +207,13 @@ appear complete. Runtime/hook duplicate consequences remain operator concerns.
 Real-file tests cover older backups, post-backup credential lineage, conflicting
 bindings, lost acks, allocation nonreuse, exact approvals, absent/rolled-back
 audit, FTS/attention corruption, locks and process death around prepare/commit
-and reconciliation. Unix CLI tests exercise the protected path. Windows unit
-tests do not prove Unix permissions or deployment ingress.
+and reconciliation. Killed-owner tests cover verified replay of WAL-only commits,
+refusal while the owner lives, unresolved intents, lost WALs, aliased sidecars,
+unrecognized recovery directories, recovery killed after its marker and after
+in-place replay, sticky refusal after divergence, and a SIGKILLed daemon
+restarting through protected startup. Unix CLI
+tests exercise the protected path. Windows unit tests do not prove Unix
+permissions or deployment ingress.
 
 Snapshot size and serialized mutation cost scale with principal, credential and
 security-history state, not record volume, and still require deployment capacity
