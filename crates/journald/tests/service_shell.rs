@@ -1224,6 +1224,12 @@ async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks
             std::net::TcpListener::bind(public_address).expect("public listener was dropped");
         let web = web_address
             .map(|address| std::net::TcpListener::bind(address).expect("web listener was dropped"));
+        // The test itself now holds the released addresses; the restart only
+        // needs fresh ones to prove administrative and audit ownership is free.
+        configuration.public_address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        if let Some(web) = configuration.web.as_mut() {
+            web.address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        }
         let replacement = Server::bind(configuration)
             .await
             .expect("restart without polling detached listener tasks");
