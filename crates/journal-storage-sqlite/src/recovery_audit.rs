@@ -19,8 +19,11 @@ const SECURITY_TABLES: &[&str] = &[
     "registration_receipts",
     "credential_audit",
     "audit_events",
-    "record_relations",
 ];
+
+/// Stored as the audit's `user_version`. Only the head revision retains its
+/// snapshot body; older formats require operator archive/reset.
+const AUDIT_FORMAT: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum Cell {
@@ -161,18 +164,19 @@ impl RecoveryAudit {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        require_format(&audit)?;
         let (journal_id, state): (String, String) = audit.query_row(
             "SELECT journal_id,state FROM control WHERE singleton=1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let events = audit
-            .prepare("SELECT revision,snapshot,outcome FROM events ORDER BY revision")?
+            .prepare("SELECT revision,outcome,snapshot IS NOT NULL FROM events ORDER BY revision")?
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(2)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -181,9 +185,8 @@ impl RecoveryAudit {
                 "audit intent, restore, or reconciliation is unresolved",
             ));
         }
-        let mut latest = None;
-        let mut last_revision = -1;
-        for (expected, (revision, snapshot_json, outcome)) in events.into_iter().enumerate() {
+        let last_revision = i64::try_from(events.len() - 1).expect("audit revision fits i64");
+        for (expected, (revision, outcome, has_body)) in events.into_iter().enumerate() {
             if revision != i64::try_from(expected).expect("audit revision fits i64")
                 || !matches!(outcome.as_str(), "committed" | "reconciled")
             {
@@ -191,13 +194,16 @@ impl RecoveryAudit {
                     "recovery audit lineage is incomplete or unresolved",
                 ));
             }
-            latest = Some(serde_json::from_str::<Snapshot>(&snapshot_json)?);
-            last_revision = revision;
+            if has_body != (revision == last_revision) {
+                return Err(StorageError::RecoveryClosed(
+                    "recovery audit snapshot retention is inconsistent",
+                ));
+            }
         }
         Ok(AuditLineage {
             journal_id,
             revision: last_revision,
-            snapshot: latest.expect("nonempty audit events have a latest snapshot"),
+            snapshot: head_snapshot(&audit)?,
         })
     }
 
@@ -271,6 +277,7 @@ impl RecoveryAudit {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        require_format(&audit)?;
         let _: (String, String) = audit.query_row(
             "SELECT journal_id,state FROM control WHERE singleton=1",
             [],
@@ -387,16 +394,17 @@ impl RecoveryAudit {
         #[cfg(test)]
         initialization_boundary("created");
         let audit_connection = audit_connection(&staging)?;
-        audit_connection.execute_batch(
-            "CREATE TABLE control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+        audit_connection.execute_batch(&format!(
+            "PRAGMA user_version={AUDIT_FORMAT};
+             CREATE TABLE control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                journal_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','closed')));
-             CREATE TABLE events(revision INTEGER PRIMARY KEY, snapshot TEXT NOT NULL,
+             CREATE TABLE events(revision INTEGER PRIMARY KEY, snapshot TEXT,
                outcome TEXT NOT NULL CHECK(outcome IN ('prepared','committed','reconciled')),
                occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
              CREATE TABLE recovery_events(id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
                detail TEXT NOT NULL,
-               occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));",
-        )?;
+               occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));"
+        ))?;
         #[cfg(test)]
         initialization_boundary("schema");
         let snapshot = serde_json::to_string(&snapshot(&central)?)?;
@@ -449,7 +457,7 @@ impl RecoveryAudit {
             audit.query_row("SELECT state FROM control WHERE singleton=1", [], |row| {
                 row.get(0)
             })?;
-        let (revision, _, outcome) = head(&audit)?;
+        let (revision, outcome) = head(&audit)?;
         let anchor: i64 = database
             .connection_factory()
             .connect_read_only()?
@@ -469,7 +477,7 @@ impl RecoveryAudit {
     /// Called before the central commit while its writer transaction is held.
     pub fn prepare(&self, transaction: &Transaction<'_>) -> Result<Option<i64>, StorageError> {
         let audit = self.connection()?;
-        let (revision, _, outcome) = head(&audit)?;
+        let (revision, outcome) = head(&audit)?;
         if outcome == "prepared" {
             return Err(StorageError::RecoveryClosed(
                 "external intent is unresolved",
@@ -492,7 +500,9 @@ impl RecoveryAudit {
 
     pub fn committed(&self, revision: Option<i64>) -> Result<(), StorageError> {
         if let Some(revision) = revision {
-            let changed = self.connection()?.execute(
+            let mut audit = self.connection()?;
+            let transaction = audit.transaction()?;
+            let changed = transaction.execute(
                 "UPDATE events SET outcome='committed' WHERE revision=? AND outcome='prepared'",
                 [revision],
             )?;
@@ -501,6 +511,8 @@ impl RecoveryAudit {
                     "audit completion did not match intent",
                 ));
             }
+            release_superseded_snapshots(&transaction, revision)?;
+            transaction.commit()?;
         }
         Ok(())
     }
@@ -556,7 +568,7 @@ impl RecoveryAudit {
         Database::verify_backup(backup)?;
         let backup_database = Database::open(backup)?;
         let expected = backup_database.recovery_verification()?;
-        let latest: Snapshot = serde_json::from_str(&head(&self.connection()?)?.1)?;
+        let latest = head_snapshot(&self.connection()?)?;
         validate_credential_history(&backup_database.connect_read_only()?, &latest)?;
         standalone_current_database(&backup_database)?;
         drop(backup_database);
@@ -590,7 +602,7 @@ impl RecoveryAudit {
     }
 
     fn require_resolved_recovery_input(&self) -> Result<(), StorageError> {
-        if head(&self.connection()?)?.2 == "prepared" {
+        if head(&self.connection()?)?.1 == "prepared" {
             return Err(StorageError::RecoveryClosed(
                 "archive/reset required: uncertain audit intent cannot be reconciled; preserve the database and external audit; a completed reconciliation may only reopen with its matching approval",
             ));
@@ -612,8 +624,8 @@ impl RecoveryAudit {
             ));
         }
         let audit = self.connection()?;
-        let (revision, serialized, _) = head(&audit)?;
-        let latest: Snapshot = serde_json::from_str(&serialized)?;
+        let (revision, _) = head(&audit)?;
+        let latest = head_snapshot(&audit)?;
         let mut connection = database.connect_unchecked()?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -703,7 +715,7 @@ impl RecoveryAudit {
     ) -> Result<(), StorageError> {
         let _guard = self.lock()?;
         let mut audit = self.connection()?;
-        let (revision, _, _) = head(&audit)?;
+        let (revision, _) = head(&audit)?;
         let connection = database.connect_unchecked()?;
         let clients = identifiers(&connection, "SELECT id FROM principals ORDER BY id")?;
         let anchor: i64 =
@@ -747,6 +759,7 @@ impl RecoveryAudit {
             "UPDATE events SET outcome='reconciled' WHERE revision=?",
             [revision],
         )?;
+        release_superseded_snapshots(&transaction, revision)?;
         transaction.execute("UPDATE control SET state='open' WHERE singleton=1", [])?;
         transaction.execute(
             "INSERT INTO recovery_events(kind,detail) VALUES('verified-restore',?)",
@@ -757,12 +770,47 @@ impl RecoveryAudit {
     }
 }
 
-fn head(connection: &Connection) -> Result<(i64, String, String), StorageError> {
+fn head(connection: &Connection) -> Result<(i64, String), StorageError> {
     Ok(connection.query_row(
-        "SELECT revision,snapshot,outcome FROM events ORDER BY revision DESC LIMIT 1",
+        "SELECT revision,outcome FROM events ORDER BY revision DESC LIMIT 1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
+}
+
+fn head_snapshot(connection: &Connection) -> Result<Snapshot, StorageError> {
+    let body: Option<String> = connection.query_row(
+        "SELECT snapshot FROM events ORDER BY revision DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let body = body.ok_or(StorageError::RecoveryClosed(
+        "recovery audit head snapshot is missing",
+    ))?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// Once a revision resolves, earlier snapshots are no longer authoritative.
+/// Unresolved intents never reach this point, so their predecessor survives.
+fn release_superseded_snapshots(
+    transaction: &Transaction<'_>,
+    revision: i64,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "UPDATE events SET snapshot=NULL WHERE revision<? AND snapshot IS NOT NULL",
+        [revision],
+    )?;
+    Ok(())
+}
+
+fn require_format(connection: &Connection) -> Result<(), StorageError> {
+    let format: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if format != AUDIT_FORMAT {
+        return Err(StorageError::RecoveryClosed(
+            "unsupported recovery audit format; archive/reset required",
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot(connection: &Connection) -> Result<Snapshot, StorageError> {
@@ -1336,11 +1384,11 @@ mod tests {
                     "completed publication must be reused"
                 );
             }
-            let (revision, baseline, outcome) = head(&audit.connection().unwrap()).unwrap();
+            let (revision, outcome) = head(&audit.connection().unwrap()).unwrap();
             assert_eq!(revision, 0);
             assert_eq!(outcome, "committed");
             assert_eq!(
-                serde_json::from_str::<Snapshot>(&baseline).unwrap(),
+                head_snapshot(&audit.connection().unwrap()).unwrap(),
                 snapshot(&database.connect_unchecked().unwrap()).unwrap(),
                 "{stage}"
             );
@@ -1678,6 +1726,116 @@ mod tests {
         assert!(audit.reconcile(&database, true).is_err());
     }
 
+    fn audit_rows(audit: &RecoveryAudit) -> Vec<(i64, Option<String>, String)> {
+        audit
+            .connection()
+            .unwrap()
+            .prepare("SELECT revision,snapshot,outcome FROM events ORDER BY revision")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn retained_bodies(audit: &RecoveryAudit) -> Vec<i64> {
+        audit
+            .connection()
+            .unwrap()
+            .prepare("SELECT revision FROM events WHERE snapshot IS NOT NULL ORDER BY revision")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn protected_admission(fixture: &Fixture, database: Database) -> Result<(), StorageError> {
+        database.normalize_for_clean_shutdown().unwrap();
+        drop(database);
+        Database::open_protected(fixture.0.join("central.db"), fixture.0.join("audit.db")).map(drop)
+    }
+
+    #[test]
+    fn committed_mutations_retain_only_the_head_snapshot() {
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        seed(&database);
+        let audit = fixture.audit(&database);
+        for revision in 1..=5 {
+            mutate(
+                &database,
+                &audit,
+                &format!("UPDATE principals SET display_name='Principal {revision}'"),
+            );
+            assert_eq!(retained_bodies(&audit), vec![revision]);
+        }
+        drop(audit);
+        protected_admission(&fixture, database).unwrap();
+    }
+
+    #[test]
+    fn record_relations_do_not_grow_the_security_snapshot() {
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        seed(&database);
+        let before = snapshot(&database.connect_unchecked().unwrap()).unwrap();
+        database
+            .connect_unchecked()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO records(id,space_id,space_seq,author_principal_id,kind,content,created_at)
+                     VALUES('r3','s',3,'018f1f59-6e90-7000-8000-000000000001','note','reply','2026-01-01T00:00:00Z');
+                 INSERT INTO record_relations(source_record_id,relation_type,target_record_id,created_at)
+                     VALUES('r3','reply-to','r1','2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        let after = snapshot(&database.connect_unchecked().unwrap()).unwrap();
+        assert_eq!(after.tables, before.tables);
+        assert_eq!(after.space_heads, vec![("s".to_owned(), 3)]);
+    }
+
+    #[test]
+    fn unsupported_audit_format_is_refused_without_mutation() {
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        seed(&database);
+        drop(fixture.audit(&database));
+        let path = fixture.0.join("audit.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version=0")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(RecoveryAudit::open(&database, &path).is_err());
+        let error = protected_admission(&fixture, database).unwrap_err();
+        assert!(
+            error.to_string().contains("archive/reset required"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn misplaced_snapshot_bodies_are_refused_at_admission() {
+        for tamper in [
+            "UPDATE events SET snapshot=(SELECT snapshot FROM events WHERE revision=1) WHERE revision=0",
+            "UPDATE events SET snapshot=NULL WHERE revision=1",
+        ] {
+            let fixture = Fixture::new();
+            let database = fixture.database();
+            seed(&database);
+            let audit = fixture.audit(&database);
+            mutate(&database, &audit, "UPDATE memberships SET can_read=0");
+            drop(audit);
+            Connection::open(fixture.0.join("audit.db"))
+                .unwrap()
+                .execute(tamper, [])
+                .unwrap();
+            assert!(protected_admission(&fixture, database).is_err(), "{tamper}");
+        }
+    }
+
     #[test]
     fn crash_child() {
         let Some(root) = std::env::var_os("JOURNAL_AUDIT_CRASH_ROOT") else {
@@ -1767,11 +1925,14 @@ mod tests {
             if stage == "prepared" || stage == "committed" {
                 let before = snapshot(&database.connect_unchecked().unwrap()).unwrap();
                 let evidence = head(&audit.connection().unwrap()).unwrap();
+                // An unresolved intent keeps its predecessor as evidence.
+                assert_eq!(retained_bodies(&audit), vec![evidence.0 - 1, evidence.0]);
+                let rows = audit_rows(&audit);
                 for _ in 0..2 {
                     let error = audit.reconcile(&database, true).unwrap_err();
                     assert!(error.to_string().contains("archive/reset required"));
                     assert!(audit.ensure_open(&database).is_err());
-                    assert_eq!(head(&audit.connection().unwrap()).unwrap(), evidence);
+                    assert_eq!(audit_rows(&audit), rows);
                     assert_eq!(
                         serde_json::to_string(
                             &snapshot(&database.connect_unchecked().unwrap()).unwrap()
@@ -1800,7 +1961,7 @@ mod tests {
                     .unwrap_err();
                 assert!(error.to_string().contains("archive/reset required"));
                 assert!(!destination.exists());
-                assert_eq!(head(&audit.connection().unwrap()).unwrap(), evidence);
+                assert_eq!(audit_rows(&audit), rows);
                 assert!(audit.ensure_open(&database).is_err());
                 continue;
             }

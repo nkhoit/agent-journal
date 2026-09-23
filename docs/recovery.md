@@ -58,9 +58,16 @@ Abandoned prepared input remains archive/reset-required. Restoring or repeatedly
 approving it cannot manufacture certainty.
 
 Snapshots retain current principal/profile/name, public-space and membership
-metadata, credential/digest/registration bindings, security history, relations,
-space heads and recipient allocation high-water marks. They never contain
-plaintext bearer secrets. They do not snapshot all inbox receipts.
+metadata, credential/digest/registration bindings, security history, space heads
+and recipient allocation high-water marks. They never contain plaintext bearer
+secrets. They do not snapshot record relations or all inbox receipts.
+
+The audit keeps every revision's number, outcome and timestamp, but only the
+head revision keeps its snapshot body. Resolving a revision (committed or
+reconciled) clears earlier bodies in the same audit transaction; an unresolved
+intent keeps its predecessor's body as evidence. Admission rejects any other
+body placement. The audit format is recorded in SQLite `user_version`; audits
+written by earlier formats require operator archive/reset.
 
 Restoration reconciles audited principal and profile state and revokes all
 restored credentials. Audited post-backup credentials and registration receipts
@@ -162,7 +169,8 @@ audit, FTS/attention corruption, locks and process death around prepare/commit
 and reconciliation. Unix CLI tests exercise the protected path. Windows unit
 tests do not prove Unix permissions or deployment ingress.
 
-Snapshot growth and serialized mutation cost require deployment capacity
-measurement. There is no audit pruning/rotation command. Loss of authoritative
+Snapshot size and serialized mutation cost scale with principal, credential and
+security-history state, not record volume, and still require deployment capacity
+measurement. There is no audit rotation command. Loss of authoritative
 audit requires protected authoritative review, not clearing the anchor or
 manufacturing a replacement. Live runtime and deployment canaries are not claimed.
