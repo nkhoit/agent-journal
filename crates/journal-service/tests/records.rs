@@ -223,9 +223,8 @@ impl Fixture {
         format!("{:064x}", 2)
     }
 
-    fn stored_append(&self, key: &str) -> AppendResult {
-        let response: String = self
-            .db
+    fn stored_response(&self, key: &str) -> String {
+        self.db
             .connect()
             .unwrap()
             .query_row(
@@ -235,8 +234,7 @@ impl Fixture {
                 rusqlite::params![self.principal_id("writer"), key],
                 |row| row.get(0),
             )
-            .unwrap();
-        decode_json(response.as_bytes()).unwrap()
+            .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -893,8 +891,6 @@ fn append_replay_survives_post_commit_acl_and_disable_changes() {
             .service
             .append_record(&f.token, "space", mutation, &input)
             .unwrap();
-        let stored = f.stored_append(mutation);
-        assert_eq!(first, stored);
         f.db
             .with_transaction(|tx| {
                 match mutation {
@@ -920,11 +916,80 @@ fn append_replay_survives_post_commit_acl_and_disable_changes() {
             .append_record(&f.token, "space", mutation, &input)
             .unwrap();
         assert!(replay.replayed, "{mutation}");
-        assert_eq!(replay.record, stored.record, "{mutation}");
-        assert_eq!(replay.mailbox_created, stored.mailbox_created, "{mutation}");
+        assert_eq!(replay.record, first.record, "{mutation}");
+        assert_eq!(replay.mailbox_created, first.mailbox_created, "{mutation}");
         assert_eq!(f.count("records"), 1);
         assert_eq!(f.count("mailbox_items"), 1);
     }
+}
+
+#[test]
+fn append_replay_is_rebuilt_from_the_immutable_record() {
+    let f = Fixture::new();
+    let root = f
+        .service
+        .append_record(&f.token, "space", "root", &f.input())
+        .unwrap()
+        .record;
+    let other = f
+        .service
+        .append_record(&f.token, "space", "other", &f.input())
+        .unwrap()
+        .record;
+    let input = RecordInput {
+        attention: vec!["reader".into(), "writer".into()],
+        relations: vec![
+            Relation {
+                relation_type: RelationType::RefersTo,
+                record_id: other.id.clone(),
+            },
+            Relation {
+                relation_type: RelationType::ReplyTo,
+                record_id: root.id.clone(),
+            },
+        ],
+        run_id: Some("run-1".into()),
+        routing_key: Some("route".into()),
+        title: Some("  Spaced title  ".into()),
+        ..f.input()
+    };
+    let first = f
+        .service
+        .append_record(&f.token, "space", "rebuilt", &input)
+        .unwrap();
+    assert_eq!(
+        f.stored_response("rebuilt"),
+        "{}",
+        "no second copy of the record"
+    );
+    let replay = f
+        .service
+        .append_record(&f.token, "space", "rebuilt", &input)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.record, first.record);
+    assert_eq!(replay.mailbox_created, 2);
+
+    // Rows written before this change keep serving their stored copy exactly.
+    let mut legacy = f
+        .service
+        .append_record(&f.token, "space", "legacy", &f.input())
+        .unwrap();
+    legacy.mailbox_created = 7;
+    f.db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE idempotency_keys SET response_json=? WHERE idempotency_key='legacy'",
+            [serde_json::to_string(&legacy).unwrap()],
+        )
+        .unwrap();
+    let replay = f
+        .service
+        .append_record(&f.token, "space", "legacy", &f.input())
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.mailbox_created, 7);
+    assert_eq!(replay.record, legacy.record);
 }
 
 #[test]
@@ -957,7 +1022,6 @@ fn append_replay_uses_raw_handles_after_profile_rename_and_alias() {
         .append_record(&f.token, "space", "rename-replay", &input)
         .unwrap();
     assert!(replay.replayed);
-    assert_eq!(replay.record, f.stored_append("rename-replay").record);
     assert_eq!(replay.record, first.record);
 
     let mut renamed_handle = input;

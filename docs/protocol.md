@@ -44,10 +44,13 @@ and reply titles are message-level subjects that never rename the thread.
 `(principal, method, path, key)` and comparison precedes mutable handle
 resolution. The server derives author/time, allocates the space sequence, inserts
 record/relations, attention and every recipient inbox item, and stores the
-idempotency response in one transaction. No attention creates no inbox items.
+idempotency entry in one transaction. No attention creates no inbox items.
 Any failure rolls back all allocations and inserts.
 
 Exact replay returns the original 201 response with `replayed` set to true.
+The entry binds the key to its record rather than copying the response; the
+record, relations and attention are immutable, so replay rebuilds the identical
+response from them.
 Different input with the same key returns 409. A valid,
 unrevoked/unexpired credential is still required, but replay lookup precedes
 mutable profile/access/disabled-principal checks. New appends reject disabled
