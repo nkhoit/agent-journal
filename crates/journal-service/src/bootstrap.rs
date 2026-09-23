@@ -110,6 +110,18 @@ pub struct SharedViewer<'a> {
 }
 
 impl SharedViewer<'_> {
+    /// Startup check that the configured viewer is an existing active
+    /// principal. It uses the writer path without changes, so a server that is
+    /// bound but never served leaves no WAL sidecars for cold admission to
+    /// refuse.
+    pub fn verify(&self) -> Result<(), BootstrapError> {
+        self.service.transaction(|tx| {
+            self.service
+                .read_actor(tx, ReadIdentity::ConfiguredViewer(self.principal))
+                .map(drop)
+        })
+    }
+
     pub fn record(&self, id: &str) -> Result<journal_domain::Record, BootstrapError> {
         self.service
             .get_record_as(ReadIdentity::ConfiguredViewer(self.principal), id)
@@ -774,7 +786,7 @@ impl BootstrapService {
         if actor.class != CredentialClass::PrincipalClient {
             return Err(BootstrapError::Unauthorized);
         }
-        self.transaction(|tx| {
+        self.read(|tx| {
             let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM credentials WHERE id=? AND principal_id=? AND class='principal-client' AND revoked_at IS NULL AND (expires_at IS NULL OR julianday(expires_at)>julianday(?)))",
                 params![actor.credential_id,actor.principal_id,self.now()?],|r|r.get(0))?;
             if !valid {return Err(BootstrapError::Unauthorized);}

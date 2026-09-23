@@ -235,7 +235,7 @@ impl BootstrapService {
         identity: ReadIdentity<'_>,
         id: &str,
     ) -> Result<(Record, bool), BootstrapError> {
-        self.transaction(|tx| {
+        self.read(|tx| {
             let actor = self.read_actor(tx, identity)?;
             let space: String = tx
                 .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
@@ -274,7 +274,7 @@ impl BootstrapService {
         identity: ReadIdentity<'_>,
         ids: &[String],
     ) -> Result<std::collections::HashMap<String, (String, Option<String>)>, BootstrapError> {
-        self.transaction(|tx| {
+        self.read(|tx| {
             let actor = self.read_actor(tx, identity)?;
             let mut result = std::collections::HashMap::new();
             if ids.is_empty() {
@@ -407,7 +407,7 @@ impl BootstrapService {
         query: &PageQuery,
     ) -> Result<RecordPage, BootstrapError> {
         query.validate()?;
-        self.transaction(|tx| {
+        self.read_paged(identity, |tx, codec| {
             let actor = self.read_actor(tx, identity)?;
             let space: String = tx
                 .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
@@ -416,7 +416,6 @@ impl BootstrapService {
                 .optional()?
                 .ok_or(BootstrapError::NotFound)?;
             permitted(tx, &actor, &space, false)?;
-            let codec = self.cursor_codec(tx)?;
             let scope = CursorScope::new(
                 CursorRoute::RecordThread,
                 &serde_json::to_vec(&(&actor, id)).map_err(|_| BootstrapError::InvalidJournal)?,
@@ -520,6 +519,46 @@ impl BootstrapService {
             }
         };
         CursorCodec::new(&secret).map_err(|_| BootstrapError::CorruptJournal)
+    }
+
+    /// Pure reads use a read-only snapshot, so they neither serialize with one
+    /// another nor hold SQLite's writer lock.
+    pub(super) fn read<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, BootstrapError>,
+    ) -> Result<T, BootstrapError> {
+        let mut connection = self.database.connect_read_only()?;
+        let transaction = connection.transaction()?;
+        operation(&transaction)
+    }
+
+    /// Paged reads also need the lazily created cursor key. Its one-time
+    /// initialization is a short audited write for an authenticated caller,
+    /// taken before the read snapshot opens so that snapshot cannot block it.
+    fn read_paged<T>(
+        &self,
+        identity: ReadIdentity<'_>,
+        operation: impl FnOnce(&Transaction<'_>, CursorCodec) -> Result<T, BootstrapError>,
+    ) -> Result<T, BootstrapError> {
+        let mut connection = self.database.connect_read_only()?;
+        let secret: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT secret FROM journal_secrets WHERE name='cursor'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let codec = match secret {
+            Some(secret) => {
+                CursorCodec::new(&secret).map_err(|_| BootstrapError::CorruptJournal)?
+            }
+            None => self.transaction(|tx| {
+                self.read_actor(tx, identity)?;
+                self.cursor_codec(tx)
+            })?,
+        };
+        let transaction = connection.transaction()?;
+        operation(&transaction, codec)
     }
 
     fn record_id(&self, instant: SystemTime) -> Result<String, BootstrapError> {
@@ -651,7 +690,7 @@ impl BootstrapService {
         identity: ReadIdentity<'_>,
         id: &str,
     ) -> Result<Record, BootstrapError> {
-        self.transaction(|tx| {
+        self.read(|tx| {
             let actor = self.read_actor(tx, identity)?;
             let space: String = tx
                 .query_row("SELECT space_id FROM records WHERE id=?", [id], |r| {
@@ -665,7 +704,7 @@ impl BootstrapService {
     }
 
     pub fn get_space(&self, token: &str, id: &str) -> Result<Space, BootstrapError> {
-        self.transaction(|tx| {
+        self.read(|tx| {
             let actor = self.journal_actor(tx, token)?;
             permitted(tx, &actor, id, false)?;
             space(tx, id)
@@ -682,9 +721,8 @@ impl BootstrapService {
         query: &PageQuery,
     ) -> Result<SpacePage, BootstrapError> {
         query.validate()?;
-        self.transaction(|tx| {
+        self.read_paged(identity, |tx, codec| {
             let actor = self.read_actor(tx, identity)?;
-            let codec = self.cursor_codec(tx)?;
             let scope = scope(CursorRoute::Spaces, &(&actor,))?;
             let after = identifier_position(&codec, &scope, query)?;
             let mut stmt = tx.prepare("SELECT s.id FROM spaces s WHERE s.access='public' AND s.id>? ORDER BY s.id LIMIT ?")?;
@@ -700,10 +738,9 @@ impl BootstrapService {
         query: &ListPrincipalsQuery,
     ) -> Result<PrincipalPage, BootstrapError> {
         query.validate()?;
-        self.transaction(|tx| {
+        self.read_paged(ReadIdentity::Bearer(token), |tx, codec| {
             let actor = self.journal_actor(tx, token)?;
             permitted(tx, &actor, &query.space, false)?;
-            let codec = self.cursor_codec(tx)?;
             let scope = scope(CursorRoute::Principals, &(&actor,&query.space))?;
             let after = identifier_position(&codec, &scope, &query.page)?;
             let mut stmt = tx.prepare("SELECT p.id,n.name,p.display_name,p.description,p.profile_revision,p.created_at FROM principals p JOIN principal_names n ON n.principal_id=p.id AND n.kind='current' WHERE p.disabled_at IS NULL AND p.id>? ORDER BY p.id LIMIT ?")?;
@@ -728,10 +765,9 @@ impl BootstrapService {
         query: &ListRecordsQuery,
     ) -> Result<RecordPage, BootstrapError> {
         query.validate()?;
-        self.transaction(|tx| {
+        self.read_paged(identity, |tx, codec| {
             let actor = self.read_actor(tx, identity)?;
             permitted(tx, &actor, space, false)?;
-            let codec = self.cursor_codec(tx)?;
             let author = resolve_space_principal(tx, space, query.author.as_deref())?;
             let attention = resolve_space_principal(tx, space, query.attention.as_deref())?;
             let filters = serde_json::to_vec(&(

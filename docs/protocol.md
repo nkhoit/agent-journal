@@ -77,8 +77,9 @@ not global BM25 statistics. Snippets are untrusted plain text, at most 24 FTS
 tokens and 1024 Unicode scalar values.
 
 Ranked pages are best effort; sequence pages provide deterministic catch-up,
-not snapshots. Search uses a read-only snapshot without reserving the writer.
-Only first-time cursor-secret creation needs a short write transaction.
+not snapshots. Search, like every other principal and viewer read, uses a
+read-only snapshot without reserving the writer. Only first-time cursor-secret
+creation needs a short write transaction.
 Sequence search selects a bounded page before rendering; ranked search may
 scan matching rows. Blocking capacity bounds concurrent work, not query duration.
 

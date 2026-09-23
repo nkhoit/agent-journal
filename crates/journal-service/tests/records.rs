@@ -297,6 +297,160 @@ fn search_reads_do_not_acquire_the_writer_lock() {
 }
 
 #[test]
+fn ordinary_reads_do_not_acquire_the_writer_lock() {
+    let f = Fixture::new();
+    let root = f
+        .service
+        .append_record(&f.token, "space", "read-lock-root", &f.input())
+        .unwrap()
+        .record;
+    let reply = f
+        .service
+        .append_record(
+            &f.token,
+            "space",
+            "read-lock-reply",
+            &RecordInput {
+                relations: vec![Relation {
+                    relation_type: RelationType::ReplyTo,
+                    record_id: root.id.clone(),
+                }],
+                ..f.input()
+            },
+        )
+        .unwrap()
+        .record;
+    let actor = f
+        .service
+        .authenticate(&f.token, CredentialClass::PrincipalClient)
+        .unwrap();
+    let mut connection = f.db.connect().unwrap();
+    let writer = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO spaces(id,name,access,created_at) VALUES ('uncommitted','Uncommitted','public','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    let page = PageQuery::new(None, Some(1));
+    let s = &f.service;
+    assert_eq!(s.get_record(&f.token, &reply.id).unwrap(), reply);
+    assert_eq!(s.get_space(&f.token, "space").unwrap().id, "space");
+    assert!(
+        s.list_spaces(&f.token, &page)
+            .unwrap()
+            .next_cursor
+            .is_some()
+    );
+    let principals = ListPrincipalsQuery {
+        space: "space".into(),
+        page: page.clone(),
+    };
+    assert!(
+        s.list_principals(&f.token, &principals)
+            .unwrap()
+            .next_cursor
+            .is_some()
+    );
+    assert_eq!(
+        s.list_records(&f.token, "space", &ListRecordsQuery::default())
+            .unwrap()
+            .items,
+        vec![root.clone(), reply.clone()]
+    );
+    assert_eq!(
+        s.get_thread(&f.token, &reply.id, &PageQuery::default())
+            .unwrap()
+            .items,
+        vec![root.clone(), reply.clone()]
+    );
+    assert_eq!(s.me(&actor).unwrap().principal.handle, "writer");
+    let viewer = s.shared_viewer("reader");
+    assert_eq!(viewer.record(&reply.id).unwrap(), reply);
+    assert!(viewer.spaces(&page).unwrap().next_cursor.is_some());
+    assert_eq!(
+        viewer
+            .records("space", &ListRecordsQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    assert_eq!(
+        viewer
+            .thread(&reply.id, &PageQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    assert_eq!(viewer.thread_root(&reply.id).unwrap(), (root.clone(), true));
+    assert_eq!(
+        viewer
+            .thread_roots(std::slice::from_ref(&reply.id))
+            .unwrap()[&reply.id]
+            .0,
+        root.id
+    );
+    writer.commit().unwrap();
+}
+
+#[test]
+fn shared_viewer_verification_requires_an_existing_active_principal() {
+    let f = Fixture::new();
+    f.service.shared_viewer("reader").verify().unwrap();
+    f.service
+        .shared_viewer(&f.principal_id("reader"))
+        .verify()
+        .unwrap();
+    for viewer in ["missing", ""] {
+        assert!(
+            f.service.shared_viewer(viewer).verify().is_err(),
+            "{viewer}"
+        );
+    }
+    f.db.connect()
+        .unwrap()
+        .execute(
+            "UPDATE principals SET disabled_at='2026-01-01T00:00:00Z' WHERE id=?",
+            [f.principal_id("reader")],
+        )
+        .unwrap();
+    assert!(f.service.shared_viewer("reader").verify().is_err());
+    assert_eq!(f.count("journal_secrets"), 0);
+}
+
+#[test]
+fn paged_reads_initialize_the_cursor_key_once_for_authenticated_callers() {
+    let f = Fixture::new();
+    assert_eq!(f.count("journal_secrets"), 0);
+    // Rollback-journal mode makes any reader snapshot block the key's writer.
+    f.db.connect()
+        .unwrap()
+        .pragma_update(None, "journal_mode", "DELETE")
+        .unwrap();
+    let page = PageQuery::new(None, Some(1));
+    assert!(matches!(
+        f.service.list_spaces(&f.unbound_token, &page),
+        Err(BootstrapError::Unauthorized)
+    ));
+    assert_eq!(f.count("journal_secrets"), 0);
+    let first = f.service.list_spaces(&f.token, &page).unwrap();
+    assert_eq!(f.count("journal_secrets"), 1);
+    let second = f
+        .service
+        .list_spaces(&f.token, &PageQuery::new(first.next_cursor, Some(1)))
+        .unwrap();
+    assert_eq!(
+        [first.items[0].id.as_str(), second.items[0].id.as_str()],
+        ["other", "space"]
+    );
+    assert_eq!(f.count("journal_secrets"), 1);
+}
+
+#[test]
 fn sequence_search_only_renders_the_selected_page() {
     let f = Fixture::new();
     let connection = f.db.connect().unwrap();
@@ -1008,6 +1162,9 @@ fn concurrent_sequences_and_scoped_resumable_pages() {
         vec![1, 2, 3, 4, 5]
     );
     query.page.cursor = first.next_cursor;
+    // Cold admission refuses live WAL sidecars; hand the file over as a
+    // restarting daemon would.
+    f.db.normalize_for_clean_shutdown().unwrap();
     let restarted = BootstrapService::new(Database::open(&f.path).unwrap());
     assert_eq!(
         restarted
