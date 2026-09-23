@@ -29,31 +29,60 @@ pub(crate) use web::web_router_with_timeout;
 #[derive(Debug, Clone)]
 pub struct ServiceState {
     blocking: BlockingExecutor,
-    inbox_arrivals: tokio::sync::watch::Sender<u64>,
+    inbox_arrivals: std::sync::Arc<InboxArrivals>,
 }
 
 impl ServiceState {
     pub fn new(database: Database, blocking_limit: usize) -> Result<Self, BlockingError> {
         Ok(Self {
             blocking: BlockingExecutor::new(database, blocking_limit)?,
-            inbox_arrivals: tokio::sync::watch::channel(0).0,
+            inbox_arrivals: Default::default(),
         })
     }
 
     pub fn blocking(&self) -> &BlockingExecutor {
         &self.blocking
     }
+}
 
-    /// Wake held inbox long-poll requests. Called after a committed append
-    /// created inbox items; the generation counter only needs to advance,
-    /// since waiters re-query under their own credentials and filters.
-    fn note_inbox_arrival(&self) {
-        self.inbox_arrivals
-            .send_modify(|count| *count = count.wrapping_add(1));
+/// Wake signals for held inbox long-polls, keyed by recipient principal ID.
+/// An entry exists only while some request for that principal is waiting, so
+/// an append wakes just its addressed recipients and memory tracks waiters.
+#[derive(Debug, Default)]
+struct InboxArrivals(std::sync::Mutex<BTreeMap<String, watch::Sender<u64>>>);
+
+impl InboxArrivals {
+    fn subscribe(&self, principal: &str) -> watch::Receiver<u64> {
+        let mut waiters = self.waiters();
+        waiters.retain(|_, sender| sender.receiver_count() > 0);
+        waiters
+            .entry(principal.to_owned())
+            .or_insert_with(|| watch::channel(0).0)
+            .subscribe()
     }
 
-    fn inbox_arrivals(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.inbox_arrivals.subscribe()
+    /// Called after a committed append created inbox items. Waiters re-query
+    /// under their own credentials, so only the generation needs to advance.
+    fn notify(&self, recipients: &[String]) {
+        let mut waiters = self.waiters();
+        for recipient in recipients {
+            if let Some(sender) = waiters.get(recipient) {
+                sender.send_modify(|count| *count = count.wrapping_add(1));
+            }
+        }
+        waiters.retain(|_, sender| sender.receiver_count() > 0);
+    }
+
+    #[cfg(test)]
+    fn waiting_principals(&self) -> usize {
+        self.waiters().len()
+    }
+
+    fn waiters(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, watch::Sender<u64>>> {
+        // The map holds no cross-entry invariant, so a poisoned lock is safe to reuse.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -563,12 +592,13 @@ async fn fetch_inbox_page(
 /// empty page at once so graceful drain is not held for the full bound.
 /// The wait never holds a database transaction or a blocking-executor permit:
 /// each fetch runs separately inside the bounded executor, and the hold itself
-/// is a plain async wait on the inbox-arrival generation counter. Spurious
+/// is a plain async wait on the caller's per-principal arrival signal. Spurious
 /// wakeups only cause an extra re-query under the caller's own credentials.
 async fn inbox_long_poll(
     state: ServiceState,
     request_id: RequestId,
     token: String,
+    principal: &str,
     raw_query: &str,
     shutdown: watch::Receiver<bool>,
 ) -> Response {
@@ -588,7 +618,7 @@ async fn inbox_long_poll(
     let waits = query.wait_seconds > 0 && query.page.cursor.as_deref().is_none_or(|s| s.is_empty());
     // Subscribe before the first fetch so an arrival during the fetch still
     // trips the generation counter observed by `changed()`.
-    let mut arrivals = state.inbox_arrivals();
+    let mut arrivals = state.inbox_arrivals.subscribe(principal);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(query.wait_seconds);
     loop {
         let page = match fetch_inbox_page(&state, &request_id, &token, &query).await {
@@ -642,29 +672,28 @@ async fn journal_operation(
     let replayable_append =
         method == axum::http::Method::POST && route == "/v1/spaces/{space}/records";
     let authentication_token = token.clone();
-    let authentication = bootstrap(
-        state.clone(),
-        request_id.clone(),
-        StatusCode::NO_CONTENT,
+    let principal = match bootstrap_result(
+        &state,
+        &request_id,
         "principal_authentication",
         false,
         move |s| {
             if replayable_append {
                 s.authenticate_append_replay(&authentication_token)
-                    .map(|_| ())
             } else {
                 s.authenticate(
                     &authentication_token,
                     journal_protocol::CredentialClass::PrincipalClient,
                 )
-                .map(|_| ())
             }
+            .map(|credential| credential.principal_id)
         },
     )
-    .await;
-    if authentication.status() != StatusCode::NO_CONTENT {
-        return authentication;
-    }
+    .await
+    {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let query = request.uri().query().unwrap_or("").to_owned();
     let (mut parts, body) = request.into_parts();
     let path =
@@ -740,7 +769,7 @@ async fn journal_operation(
                 // The transaction committed inside the blocking executor;
                 // wake held long-poll readers only when items were created.
                 if appended.mailbox_created > 0 {
-                    state.note_inbox_arrival();
+                    state.inbox_arrivals.notify(&appended.record.attention);
                 }
                 success_response(StatusCode::CREATED, appended)
             }
@@ -748,7 +777,7 @@ async fn journal_operation(
         };
     }
     if route == "/v1/inbox" {
-        return inbox_long_poll(state, request_id, token, &query, shutdown).await;
+        return inbox_long_poll(state, request_id, token, &principal, &query, shutdown).await;
     }
     bootstrap(
         state,
@@ -1140,6 +1169,29 @@ fn new_request_id() -> String {
 mod peer_tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[test]
+    fn inbox_arrivals_wake_only_addressed_waiters_and_forget_idle_principals() {
+        let arrivals = InboxArrivals::default();
+        let alpha = arrivals.subscribe("alpha");
+        let mut beta = arrivals.subscribe("beta");
+        let beta_again = arrivals.subscribe("beta");
+        assert_eq!(arrivals.waiting_principals(), 2);
+
+        arrivals.notify(&["beta".to_owned(), "absent".to_owned()]);
+        assert!(beta.has_changed().unwrap());
+        assert!(beta_again.has_changed().unwrap());
+        assert!(!alpha.has_changed().unwrap());
+        beta.mark_unchanged();
+
+        drop(alpha);
+        arrivals.notify(&["beta".to_owned()]);
+        assert!(beta.has_changed().unwrap());
+        assert_eq!(arrivals.waiting_principals(), 1);
+        drop((beta, beta_again));
+        arrivals.notify(&[]);
+        assert_eq!(arrivals.waiting_principals(), 0);
+    }
 
     #[tokio::test]
     async fn held_inbox_long_poll_returns_promptly_on_shutdown() {
