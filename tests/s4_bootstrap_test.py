@@ -30,11 +30,14 @@ class BootstrapTest(unittest.TestCase):
         self.directory.mkdir(mode=0o700, parents=True)
         self.socket = self.directory / "admin.sock"
         self.database = self.directory / "journal.db"
+        self.audit = self.directory / "audit" / "journal.recovery.db"
+        self.audit.parent.mkdir(mode=0o700)
         self.bin = Path(os.environ.get("AJ_BIN_DIR", "target/debug")).resolve()
         self.trace = self.directory / "trace"
         self.trace_file = self.trace.open("wb")
         self.process = subprocess.Popen(
             [str(self.bin / "journald"), "--database", str(self.database),
+             "--recovery-audit", str(self.audit),
              "--listen", "127.0.0.1:0", "--admin-socket", str(self.socket)],
             stdout=subprocess.DEVNULL, stderr=self.trace_file,
             env={**os.environ, "JOURNAL_LOG_LEVEL": "info"},

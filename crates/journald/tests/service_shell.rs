@@ -45,6 +45,18 @@ impl TempDir {
     fn path(&self, name: &str) -> PathBuf {
         self.path.join(name)
     }
+
+    /// The recovery audit must live outside the database's directory.
+    fn audit(&self) -> PathBuf {
+        use std::os::unix::fs::DirBuilderExt;
+        let directory = self.path("audit");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .expect("create audit directory");
+        directory.join("journal.recovery.db")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -471,7 +483,7 @@ fn config(temporary: &TempDir) -> Config {
     Config {
         web: None,
         database_path: temporary.path("journal.db"),
-        recovery_audit_path: None,
+        recovery_audit_path: temporary.audit(),
         public_address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
         admin_socket_path: temporary.path("admin.sock"),
         blocking_limit: 2,
@@ -485,7 +497,7 @@ fn config(temporary: &TempDir) -> Config {
 async fn daemon_recovery_refusal_preserves_current_central_before_rw_open() {
     let temporary = TempDir::new("rec-admit");
     let settings = config(&temporary);
-    let audit = settings.database_path.with_extension("recovery.db");
+    let audit = settings.recovery_audit_path.clone();
     drop(
         Database::open_protected(&settings.database_path, &audit)
             .expect("initialize protected central"),
@@ -589,7 +601,7 @@ async fn closed_recovery_prevents_shared_viewer_startup() {
     });
     let db = Database::open_protected(
         &configuration.database_path,
-        configuration.database_path.with_extension("recovery.db"),
+        configuration.recovery_audit_path.clone(),
     )
     .unwrap();
     journal_service::BootstrapService::new(db.clone())
@@ -1192,7 +1204,7 @@ async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks
         if web_enabled {
             let database = Database::open_protected(
                 &configuration.database_path,
-                configuration.database_path.with_extension("recovery.db"),
+                configuration.recovery_audit_path.clone(),
             )
             .unwrap();
             journal_service::BootstrapService::new(database)
@@ -1234,6 +1246,24 @@ async fn dropping_polled_serve_releases_listeners_without_scheduling_child_tasks
             .await
             .expect("restart without polling detached listener tasks");
         drop((public, web, replacement));
+    }
+}
+
+#[tokio::test]
+async fn server_refuses_an_audit_in_the_database_directory_before_creating_state() {
+    let temporary = TempDir::new("audit-colocated");
+    let mut settings = config(&temporary);
+    settings.recovery_audit_path = temporary.path("journal.recovery.db");
+    assert!(matches!(
+        Server::bind(settings.clone()).await,
+        Err(ServerError::InvalidConfig(message)) if message.contains("database's directory")
+    ));
+    for artifact in [
+        settings.database_path,
+        settings.recovery_audit_path,
+        settings.admin_socket_path,
+    ] {
+        assert!(fs::symlink_metadata(&artifact).is_err(), "{artifact:?}");
     }
 }
 
@@ -1317,6 +1347,8 @@ fn start_journald(temporary: &TempDir) -> (std::process::Child, mpsc::Receiver<S
         .args([
             "--database",
             temporary.path("journal.db").to_str().unwrap(),
+            "--recovery-audit",
+            temporary.audit().to_str().unwrap(),
             "--listen",
             "127.0.0.1:0",
             "--admin-socket",
@@ -1563,7 +1595,7 @@ fn abrupt_daemon_termination_is_recovered_only_by_protected_startup() {
     ));
     // Protected startup proves the hot state against the external audit and
     // replays it; the committed principal survives the SIGKILL.
-    let recovered = Database::open_protected(&database, database.with_extension("recovery.db"))
+    let recovered = Database::open_protected(&database, temporary.audit())
         .expect("protected startup recovers verified crash state");
     assert!(recovered.crash_recovered_revision().is_some());
     let survived: bool = recovered

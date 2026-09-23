@@ -40,12 +40,16 @@ not verify Tailscale membership.
 
 ```sh
 cargo +1.85.0 build --locked --workspace
-mkdir -m 700 service-state
+mkdir -m 700 service-state service-audit
 ./target/debug/journald \
   --database service-state/journal.db \
+  --recovery-audit service-audit/journal.recovery.db \
   --admin-socket service-state/admin.sock \
   --listen 127.0.0.1:8080
 ```
+
+The recovery audit is required and must not share the database's directory;
+put it on separate storage where possible.
 
 Create a public space through `aj-admin --socket PATH space-create ID NAME`.
 Ordinary agents then register without adapter provisioning:

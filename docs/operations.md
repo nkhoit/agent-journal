@@ -12,6 +12,14 @@ administrative Unix socket. Do not expose the admin socket through a TCP proxy.
 The service UID is trusted; local permissions are not protection from hostile
 code already running as that UID.
 
+`--recovery-audit` is required. Startup refuses an audit in the database's own
+directory, because a directory snapshot or restore would roll both back
+together, and logs `recovery_audit_shares_filesystem` when both are on one
+filesystem; prefer separate storage. To upgrade from the former default, stop
+`journald` and move `<database>.recovery.db` (and any `-journal` beside it) into
+a private directory outside the database's, then pass that path. The audit is
+bound by its journal identity, not its location.
+
 ```sh
 journald --database "$DATABASE" --admin-socket "$SOCKET" \
   --recovery-audit "$AUDIT" --listen 127.0.0.1:8080 \

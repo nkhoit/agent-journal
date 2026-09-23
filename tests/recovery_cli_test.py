@@ -20,7 +20,8 @@ class RecoveryCliTest(unittest.TestCase):
         self.bin_dir = Path(os.environ.get("AJ_BIN_DIR", "target/debug")).resolve()
         self.directory = Path(tempfile.mkdtemp(prefix="recovery-cli-", dir="target"))
         self.database = self.directory / "journal.db"
-        self.audit = self.directory / "audit.db"
+        self.audit = self.directory / "audit" / "audit.db"
+        self.audit.parent.mkdir(mode=0o700)
         self.socket = self.directory / "admin.sock"
         self.trace = self.directory / "trace"
         self.trace_file = self.trace.open("wb")
