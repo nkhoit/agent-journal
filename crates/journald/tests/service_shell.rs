@@ -1486,7 +1486,7 @@ fn graceful_daemon_shutdown_normalizes_runtime_sqlite_sidecars() {
 }
 
 #[test]
-fn abrupt_daemon_termination_leaves_hot_sidecars_fail_closed() {
+fn abrupt_daemon_termination_is_recovered_only_by_protected_startup() {
     use std::io::{Read, Write};
 
     let temporary = TempDir::new("s3-crash");
@@ -1537,6 +1537,21 @@ fn abrupt_daemon_termination_leaves_hot_sidecars_fail_closed() {
             kind: "central database"
         })
     ));
+    // Protected startup proves the hot state against the external audit and
+    // replays it; the committed principal survives the SIGKILL.
+    let recovered = Database::open_protected(&database, database.with_extension("recovery.db"))
+        .expect("protected startup recovers verified crash state");
+    assert!(recovered.crash_recovered_revision().is_some());
+    let survived: bool = recovered
+        .connect_read_only()
+        .expect("read recovered database")
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM principal_names WHERE name='crash-writer')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query recovered principal");
+    assert!(survived, "the committed principal survives the crash");
 }
 
 #[test]

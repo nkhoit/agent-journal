@@ -128,8 +128,11 @@ prepared input requires archive/reset. Never manufacture an audit, unlink an
 owner lock, delete handoff evidence or erase history to force reopening.
 
 Graceful daemon shutdown drains listeners and normalizes its own SQLite state.
-Hot sidecars after abrupt/forced shutdown are evidence, not files to delete
-automatically. Invalid socket owner markers and replaced lock paths fail closed.
+After an abrupt or forced stop, protected startup replays hot sidecars only
+after proving them against the external audit (see
+[abrupt stops](recovery.md#abrupt-stops)) and logs `crash_state_recovered`.
+When that proof fails the sidecars are evidence, not files to delete. Invalid
+socket owner markers and replaced lock paths fail closed.
 Follow protected artifact identity checks before any manual repair.
 
 ## Shared viewer and acceptance

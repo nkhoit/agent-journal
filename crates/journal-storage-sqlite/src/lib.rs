@@ -15,6 +15,7 @@ use rusqlite::{
 };
 use thiserror::Error;
 
+mod crash_recovery;
 mod recovery;
 pub use recovery::{RecoveryVerification, TableVerification};
 mod recovery_audit;
@@ -269,6 +270,7 @@ impl ConnectionFactory {
 pub struct Database {
     factory: ConnectionFactory,
     audit: Option<std::sync::Arc<RecoveryAudit>>,
+    crash_recovered_revision: Option<i64>,
 }
 
 impl Database {
@@ -313,6 +315,7 @@ impl Database {
             return Ok(Self {
                 factory,
                 audit: None,
+                crash_recovered_revision: None,
             });
         }
     }
@@ -351,6 +354,12 @@ impl Database {
         self.audit.as_deref()
     }
 
+    /// The audit revision whose hot SQLite state protected startup replayed
+    /// after verifying it, when the previous owner stopped abruptly.
+    pub fn crash_recovered_revision(&self) -> Option<i64> {
+        self.crash_recovered_revision
+    }
+
     pub fn recovery_status(&self) -> Result<RecoveryStatus, StorageError> {
         match &self.audit {
             Some(audit) => {
@@ -368,10 +377,29 @@ impl Database {
     ) -> Result<Self, StorageError> {
         let path = path.as_ref();
         let audit_path = audit_path.as_ref();
+        let mut owner = None;
+        let mut recovered = None;
         // Existing input is admitted read-only before an audit lock, SQLite
         // writer, or recovery artifact can be created. This keeps every legacy
         // database and malformed current lineage byte-for-byte untouched.
         let mut database = if path.exists() {
+            let resuming = crash_recovery::pending(path)?;
+            let hot = sqlite_sidecar_entries_exist(path)?
+                && !entry_exists(&initialization_lock_path(path))?;
+            if (resuming || hot) && RecoveryAudit::entry_exists(audit_path)? {
+                // Hot state from an abrupt stop, or an interrupted recovery of
+                // it. Legacy input and unresolved audits are refused read-only
+                // first; then the owner lock excludes a live daemon, and nothing
+                // is replayed in place until a private copy proves the result
+                // matches the audit.
+                if !resuming {
+                    verify_main_file_schema(path)?;
+                }
+                RecoveryAudit::preflight_resolved(audit_path)?;
+                let lock = RecoveryAudit::acquire_lock(audit_path)?;
+                recovered = Some(crash_recovery::recover(path, audit_path)?);
+                owner = Some(lock);
+            }
             let database = Self::open_existing(path)?;
             RecoveryAudit::preflight_admission(&database, audit_path)?;
             database
@@ -383,9 +411,19 @@ impl Database {
             }
             Self::open(path)?
         };
-        let lock = RecoveryAudit::acquire_lock(audit_path)?;
+        let lock = match owner {
+            Some(lock) => lock,
+            None => RecoveryAudit::acquire_lock(audit_path)?,
+        };
         let audit = RecoveryAudit::open_with_lock(&database, audit_path, lock, true)?;
         audit.ensure_open(&database)?;
+        if let Some(recovery) = recovered {
+            // The pending marker is cleared only after the evidence commits, so
+            // a crash here repeats verification and records the event once.
+            audit.record_crash_recovery(&recovery.verified)?;
+            database.crash_recovered_revision = Some(recovery.verified.audit_revision);
+            recovery.complete()?;
+        }
         database.audit = Some(std::sync::Arc::new(audit));
         Ok(database)
     }
@@ -404,6 +442,7 @@ impl Database {
         Ok(Self {
             factory,
             audit: None,
+            crash_recovered_revision: None,
         })
     }
 
@@ -700,6 +739,34 @@ fn sqlite_sidecar_entries_exist(path: &Path) -> Result<bool, StorageError> {
         }
     }
     Ok(false)
+}
+
+fn entry_exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(StorageError::ResetRequired {
+            kind: "central database",
+        }),
+    }
+}
+
+/// Check the main file's exact schema while ignoring any sidecar. The schema is
+/// always in the main file: initialization checkpoints it before WAL use.
+fn verify_main_file_schema(path: &Path) -> Result<(), StorageError> {
+    let reset = || StorageError::ResetRequired {
+        kind: "central database",
+    };
+    let path = absolute_path(path)?;
+    let uri = immutable_uri(&path).ok_or_else(reset)?;
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|_| reset())?;
+    verify_schema(&connection)
 }
 
 fn initialization_lock_path(path: &Path) -> PathBuf {
