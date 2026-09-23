@@ -550,7 +550,7 @@ async fn shared_web_listener_is_opt_in_isolated_and_checks_viewer() {
     assert!(Server::bind(configuration.clone()).await.is_err());
     let db = Database::open_protected(
         temporary.path("journal.db"),
-        temporary.path("journal.recovery.db"),
+        &configuration.recovery_audit_path,
     )
     .unwrap();
     journal_service::BootstrapService::new(db.clone())
