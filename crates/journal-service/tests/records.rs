@@ -993,6 +993,92 @@ fn append_replay_is_rebuilt_from_the_immutable_record() {
 }
 
 #[test]
+fn recipients_resolving_to_one_principal_are_invalid_not_conflicts() {
+    let f = Fixture::new();
+    let reader_id = f.principal_id("reader");
+    let reader = f
+        .service
+        .authenticate(&f.reader_token(), CredentialClass::PrincipalClient)
+        .unwrap();
+    f.service
+        .update_own_profile(
+            &reader,
+            "rename-reader",
+            &ProfileUpdateRequest {
+                handle: "reader-renamed".into(),
+                display_name: "Reader".into(),
+                description: None,
+                expected_profile_revision: 1,
+            },
+        )
+        .unwrap();
+    for (key, attention) in [
+        (
+            "handle-and-id",
+            vec!["reader-renamed".to_owned(), reader_id.clone()],
+        ),
+        (
+            "handle-and-alias",
+            vec!["reader-renamed".to_owned(), "reader".to_owned()],
+        ),
+    ] {
+        let input = RecordInput {
+            attention,
+            ..f.input()
+        };
+        assert!(
+            matches!(
+                f.service.append_record(&f.token, "space", key, &input),
+                Err(BootstrapError::InvalidJournal)
+            ),
+            "{key}"
+        );
+    }
+    for table in ["records", "attention", "mailbox_items", "idempotency_keys"] {
+        assert_eq!(f.count(table), 0, "{table}");
+    }
+}
+
+#[test]
+fn only_state_collisions_map_to_conflict() {
+    let f = Fixture::new();
+    let record = f
+        .service
+        .append_record(&f.token, "space", "immutable", &f.input())
+        .unwrap()
+        .record;
+    let connection = f.db.connect().unwrap();
+    let failure = |sql: &str, params: &[&dyn rusqlite::ToSql]| {
+        BootstrapError::from(connection.execute(sql, params).unwrap_err())
+    };
+    // Invariant guards mean server code or persisted data is wrong.
+    assert!(matches!(
+        failure(
+            "UPDATE records SET content='changed' WHERE id=?",
+            &[&record.id]
+        ),
+        BootstrapError::Sqlite(_)
+    ));
+    assert!(matches!(
+        failure("DELETE FROM mailbox_items", &[]),
+        BootstrapError::Sqlite(_)
+    ));
+    // A taken name, and a name that shadows a principal ID, collide with state.
+    let writer = f.principal_id("writer");
+    let reader = f.principal_id("reader");
+    let name = "INSERT INTO principal_names(name,principal_id,kind,created_at)
+                VALUES (?,?,'alias','2026-01-01T00:00:00Z')";
+    assert!(matches!(
+        failure(name, &[&"reader", &writer]),
+        BootstrapError::Conflict
+    ));
+    assert!(matches!(
+        failure(name, &[&reader, &writer]),
+        BootstrapError::Conflict
+    ));
+}
+
+#[test]
 fn append_replay_uses_raw_handles_after_profile_rename_and_alias() {
     let f = Fixture::new();
     let input = f.input();
