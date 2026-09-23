@@ -622,7 +622,6 @@ impl BootstrapService {
             for recipient in &attention {
                 tx.execute("INSERT INTO attention(record_id,recipient_principal_id,created_at) VALUES (?,?,?)", params![id,recipient,now])?;
                 self.checkpoint("append-attention")?;
-                // The mailbox_initial_attempt trigger owns ordinal 1.
                 tx.execute("INSERT INTO inbox_sequences(recipient_principal_id,last_seq) VALUES (?,1)
                     ON CONFLICT(recipient_principal_id) DO UPDATE SET last_seq=last_seq+1", [recipient])?;
                 let recipient_seq: i64 = tx.query_row("SELECT last_seq FROM inbox_sequences WHERE recipient_principal_id=?", [recipient], |r| r.get(0))?;

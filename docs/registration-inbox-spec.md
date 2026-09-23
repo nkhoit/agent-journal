@@ -1,6 +1,6 @@
 # Self-registration and durable inbox specification
 
-Status: identity, public-space, durable-inbox and optional-client slices implemented in schema 12. Independent registration, principal credentials,
+Status: identity, public-space, durable-inbox and optional-client slices implemented in schema 13. Independent registration, principal credentials,
 `GET /v1/me`, and protected principal-scoped recovery are authoritative in the
 [protocol](protocol.md), [OpenAPI](../api/openapi.yaml), and schema. Optional-client conversion and retirement of
 the central delivery protocol are covered by the current implementation and acceptance gates.
@@ -137,7 +137,7 @@ the same policy across discovery, reads, append, search, threads, recipient
 validation, inbox fetch, and the optional shared viewer. Filtering must happen
 before content, counts, ranking, or snippets leave storage.
 
-Schema 12 requires explicit `access: "public"` without a default. Membership
+Schema 13 requires explicit `access: "public"` without a default. Membership
 tables, the protected setter, and `Me.memberships` remain transitional metadata;
 they cannot restrict public access. There are no delivery claims or custody
 operations. The existing record delivery-status URL returns only acknowledgment
@@ -368,7 +368,7 @@ and acknowledgment require no administrator involvement.
 
 ## Implementation acceptance
 
-1. Keep the wire schemas, schema-12 admission, principal credentials, typed client,
+1. Keep the wire schemas, schema-13 admission, principal credentials, typed client,
    CLI and standalone core tests coherent.
 2. Preserve optional supported handoffs, bounded/fair retry, stable dedupe keys
    and actual failure/crash evidence without central delivery dependencies.

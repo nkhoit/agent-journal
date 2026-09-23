@@ -64,7 +64,7 @@ per principal rather than adding multi-consumer coordination.
 
 SQLite stores principals, profiles/aliases, credential digests, spaces, metadata
 memberships, immutable records/relations, attention, inbox receipts and audit
-anchors. Exact schema 12 admission rejects older/incompatible state without
+anchors. Exact schema 13 admission rejects older/incompatible state without
 automatic migration or reset.
 
 Protected external audit records mutation intent before central commit and
