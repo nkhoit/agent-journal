@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -14,7 +14,7 @@ const DEFAULT_PUBLIC_PORT: u16 = 8080;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub database_path: PathBuf,
-    pub recovery_audit_path: Option<PathBuf>,
+    pub recovery_audit_path: PathBuf,
     pub public_address: SocketAddr,
     pub admin_socket_path: PathBuf,
     pub blocking_limit: usize,
@@ -141,7 +141,8 @@ impl Config {
         };
         Ok(Self {
             database_path: database_path.ok_or(ConfigError::Missing("--database"))?,
-            recovery_audit_path,
+            recovery_audit_path: recovery_audit_path
+                .ok_or(ConfigError::Missing("--recovery-audit"))?,
             public_address: public_address.unwrap_or_else(|| {
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PUBLIC_PORT)
             }),
@@ -155,10 +156,45 @@ impl Config {
     }
 
     pub const fn usage() -> &'static str {
-        "Usage: journald --database PATH --admin-socket PATH [--recovery-audit PATH] [--listen ADDRESS] \
+        "Usage: journald --database PATH --recovery-audit PATH --admin-socket PATH [--listen ADDRESS] \
          [--blocking-limit COUNT] [--max-body-bytes BYTES] \
          [--web-listen LOOPBACK_ADDRESS --web-viewer PRINCIPAL]"
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuditPlacement {
+    SharedDirectory,
+    SharedFilesystem,
+    Separate,
+}
+
+/// Where the recovery audit sits relative to the database. A directory-level
+/// snapshot or restore rolls back everything in one directory together, which
+/// would defeat the audit's rollback detection. Both parents must exist.
+pub(crate) fn audit_placement(database: &Path, audit: &Path) -> std::io::Result<AuditPlacement> {
+    let database_directory = std::fs::canonicalize(parent(database))?;
+    let audit_directory = std::fs::canonicalize(parent(audit))?;
+    if database_directory == audit_directory {
+        return Ok(AuditPlacement::SharedDirectory);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata(&database_directory)?.dev()
+            == std::fs::metadata(&audit_directory)?.dev()
+        {
+            return Ok(AuditPlacement::SharedFilesystem);
+        }
+    }
+    Ok(AuditPlacement::Separate)
+}
+
+/// A bare relative path's parent is empty; that directory is `.`.
+fn parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, option: &str) -> Result<(), ConfigError> {
@@ -196,7 +232,14 @@ mod tests {
 
     #[test]
     fn shared_web_requires_explicit_loopback_and_principal_pair() {
-        let base = ["--database", "journal.db", "--admin-socket", "admin.sock"];
+        let base = [
+            "--database",
+            "journal.db",
+            "--recovery-audit",
+            "audit/journal.recovery.db",
+            "--admin-socket",
+            "admin.sock",
+        ];
         assert!(Config::parse(base).unwrap().web.is_none());
         for extra in [
             vec!["--web-listen", "127.0.0.1:8081"],
@@ -236,7 +279,7 @@ mod tests {
         .expect("parse configuration");
 
         assert_eq!(config.database_path, PathBuf::from("journal.db"));
-        assert_eq!(config.recovery_audit_path, Some(PathBuf::from("audit.db")));
+        assert_eq!(config.recovery_audit_path, PathBuf::from("audit.db"));
         assert_eq!(config.public_address, "127.0.0.1:9000".parse().unwrap());
         assert_eq!(config.admin_socket_path, PathBuf::from("admin.sock"));
         assert_eq!(config.blocking_limit, 4);
@@ -251,6 +294,8 @@ mod tests {
         let config = Config::parse([
             "--database",
             "journal.db",
+            "--recovery-audit",
+            "audit/journal.recovery.db",
             "--admin-socket",
             "admin.sock",
             "--blocking-limit",
@@ -276,7 +321,16 @@ mod tests {
     #[test]
     fn rejects_missing_duplicate_unknown_and_zero_options() {
         assert!(matches!(
-            Config::parse(["--database", "journal.db"]),
+            Config::parse(["--database", "journal.db", "--admin-socket", "admin.sock"]),
+            Err(ConfigError::Missing("--recovery-audit"))
+        ));
+        assert!(matches!(
+            Config::parse([
+                "--database",
+                "journal.db",
+                "--recovery-audit",
+                "audit/journal.recovery.db"
+            ]),
             Err(ConfigError::Missing("--admin-socket"))
         ));
         assert!(matches!(
@@ -305,5 +359,35 @@ mod tests {
             Config::parse(["--wat", "value"]),
             Err(ConfigError::Unknown(option)) if option == "--wat"
         ));
+    }
+
+    #[test]
+    fn audit_placement_refuses_the_database_directory_and_missing_parents() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(format!("target/audit-placement-{}", std::process::id()));
+        let separate = root.join("audit");
+        std::fs::create_dir_all(&separate).unwrap();
+        let database = root.join("journal.db");
+        for audit in [
+            root.join("journal.recovery.db"),
+            root.join(".").join("audit.db"),
+        ] {
+            assert_eq!(
+                audit_placement(&database, &audit).unwrap(),
+                AuditPlacement::SharedDirectory
+            );
+        }
+        let placement = audit_placement(&database, &separate.join("journal.recovery.db")).unwrap();
+        assert_ne!(placement, AuditPlacement::SharedDirectory);
+        #[cfg(unix)]
+        assert_eq!(placement, AuditPlacement::SharedFilesystem);
+        // A bare relative path lives in the current directory.
+        assert_eq!(
+            audit_placement(Path::new("journal.db"), Path::new("audit.db")).unwrap(),
+            AuditPlacement::SharedDirectory
+        );
+        assert!(audit_placement(&database, &root.join("missing").join("audit.db")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -25,7 +25,10 @@ archive/reset; do not remove the marker to bypass an active initializer.
 
 The central `recovery_anchor` holds a random journal identity, monotonic audit
 revision, audit-required marker and inbox cursor epoch. `journald --recovery-audit
-PATH` selects the external audit; the default is a sibling recovery database.
+PATH` selects the external audit and is required. Startup refuses an audit in
+the database's own directory, because a directory-level snapshot or restore
+would roll both back together and defeat rollback detection, and logs
+`recovery_audit_shares_filesystem` when both are on one filesystem.
 Its parent must already be private. Audit/lock files are private regular files;
 symlinks, hard-linked audits and unsafe parents are rejected. Never unlink the
 persistent owner lock to bypass a live owner.
@@ -39,9 +42,9 @@ is unrequired at revision zero. A durably published matching revision-zero
 lineage can be adopted after a crash before the central marker commits.
 Required, malformed, foreign, mismatched or closed audits are never replaced.
 
-The external audit uses rollback journaling and `synchronous=EXTRA`. A sibling
-is a separate recovery unit, not a separate disk fault domain. Protect and
-replicate it independently; never overwrite it with a central backup.
+The external audit uses rollback journaling and `synchronous=EXTRA`. A separate
+directory is a separate recovery unit, not a separate disk fault domain. Protect
+and replicate it independently; never overwrite it with a central backup.
 Missing required audit, older audit head, foreign journal, unresolved intent or
 closed gate refuses service admission.
 

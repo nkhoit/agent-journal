@@ -89,12 +89,20 @@ fn write_private(path: &Path, value: &str) {
 }
 
 fn start_journald(fixture: &Fixture, address: std::net::SocketAddr) -> support::Process {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(fixture.directory.join("audit"))
+        .expect("audit directory");
     let mut child = Command::new(env!("CARGO_BIN_EXE_journald"));
     child
         .current_dir(&fixture.directory)
         .args([
             "--database",
             "journal.db",
+            "--recovery-audit",
+            "audit/journal.recovery.db",
             "--admin-socket",
             "admin.sock",
             "--listen",

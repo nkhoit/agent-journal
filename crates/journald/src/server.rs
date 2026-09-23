@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinError;
 
-use crate::config::Config;
+use crate::config::{AuditPlacement, Config, audit_placement};
 use crate::executor::BlockingError;
 #[cfg(unix)]
 use crate::http::{
@@ -115,6 +115,23 @@ impl Server {
             ));
         }
         validate_admin_socket_parent(&config.admin_socket_path)?;
+        match audit_placement(&config.database_path, &config.recovery_audit_path) {
+            Ok(AuditPlacement::SharedDirectory) => {
+                return Err(ServerError::InvalidConfig(
+                    "the recovery audit must not share the database's directory",
+                ));
+            }
+            Ok(AuditPlacement::SharedFilesystem) => tracing::warn!(
+                event = "recovery_audit_shares_filesystem",
+                "the recovery audit is on the database's filesystem; a filesystem-level snapshot restore would roll both back together"
+            ),
+            Ok(AuditPlacement::Separate) => {}
+            Err(_) => {
+                return Err(ServerError::InvalidConfig(
+                    "the database and recovery audit directories must exist",
+                ));
+            }
+        }
         if config.web.as_ref().is_some_and(|web| !web.validate()) {
             return Err(ServerError::InvalidConfig(
                 "web requires a loopback address and valid viewer",
@@ -132,10 +149,7 @@ impl Server {
             })?;
 
         let database_path = config.database_path.clone();
-        let audit_path = config
-            .recovery_audit_path
-            .clone()
-            .unwrap_or_else(|| database_path.with_extension("recovery.db"));
+        let audit_path = config.recovery_audit_path.clone();
         let database = tokio::task::spawn_blocking(move || {
             Database::open_protected(database_path, audit_path)
         })
