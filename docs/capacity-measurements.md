@@ -26,7 +26,9 @@ The driver accepts at most three sizes, each 100..20000. The fixture accepts onl
 a record count: no production database, audit, credential or endpoint input.
 It exclusively creates a private temporary root and separate central/audit/copy
 subdirectories, holds the existing audit owner, and removes its own fixture on
-normal completion/error unwinding. All principals, credentials and content are
+normal completion/error unwinding. Backup/probe workers use scoped threads and
+all join results are collected before propagating errors, so their file cleanup
+waits for the audited append to finish. All principals, credentials and content are
 synthetic. The public router binds only an ephemeral IPv4 loopback port; admin
 operations are not mounted. The fixture's intermediate endpoint stays inside
 the driver. Published JSON contains only aggregate measurements/configuration,
@@ -218,4 +220,37 @@ Validation on Rust 1.85.0:
   browser test using Playwright 1.61.0 and installed Chromium 151.0.7922.173 passed
   rendering/CSP/navigation/policy/receipt/listener checks. This used an external
   launch override, not a repository or gate change. Pinned Chromium acceptance
-  still needs CI or another environment with download access.
+  was subsequently confirmed by remote CI on `996474a`: [run 168](https://github.com/nkhoit/agent-journal/actions/runs/36679040931)
+  passed all four jobs, including pinned browser and privileged foreign-UID gates.
+
+## Backup worker drain correction
+
+The stored JSON and timing tables above describe successful runs before this
+error-path correction and remain unchanged. Independent review found that an
+error in the pre-admitted read or an earlier backup/reader join could return
+before the append worker was joined. Fixture unwinding could then remove the
+central/audit files while an admitted write was still running.
+
+The backup measurement now scopes all three workers and collects every join
+result before propagating read, operation or panic errors. Scoped ownership also
+drains on unwinding before the explicit joins. The correction changes fixture
+lifetime handling only; no production operation, default or query algorithm changes.
+
+`cargo +1.85.0 test --locked -p journald --example capacity_fixture` exercises
+five deterministic failure cases: pre-admitted SQLite read failure, backup
+error/panic, and reader error/panic. An injected clock holds a real append inside
+its protected transaction. Each case proves the parent cannot return or remove
+files while the writer is held, then releases it and checks the committed record,
+inbox allocation and full recovery verification before cleanup. Test-only hooks
+are absent from release builds and introduce no CLI/configuration options.
+The regression reproduced the original early return, then passed with the fix.
+The initial test setup also had an E0521 borrowed-hook compilation error, corrected
+before reproducing the old behavior.
+
+A fresh 1,000-record release smoke checks the corrected harness's normal backup,
+HTTP, final-count and cleanup path. This is validation of the lifetime correction;
+it is not a replacement measurement series for the earlier 1k/5k/10k tables.
+The follow-up full `make check CARGO="cargo +1.85.0" OPENAPI_STANDARDS_LINT=1`
+passed, including 311 workspace tests (none ignored), Clippy, contracts, recovery,
+conformance, Markdown and hygiene. Remote CI for the corrected head is recorded
+in the PR.

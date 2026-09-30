@@ -187,6 +187,21 @@ fn backup_measurement(
     fixture: &Fixture,
     round: usize,
 ) -> Result<Value, Box<dyn std::error::Error>> {
+    backup_measurement_inner(
+        db,
+        fixture,
+        round,
+        #[cfg(all(test, unix))]
+        None,
+    )
+}
+
+fn backup_measurement_inner(
+    db: &Database,
+    fixture: &Fixture,
+    round: usize,
+    #[cfg(all(test, unix))] hooks: Option<&tests::DrainHooks>,
+) -> Result<Value, Box<dyn std::error::Error>> {
     let raw = fixture.0.join("copies").join(format!("raw-{round}.db"));
     let start = Instant::now();
     let raw_result = db.backup_to(&raw)?;
@@ -201,50 +216,147 @@ fn backup_measurement(
         .0
         .join("copies")
         .join(format!("protected-{round}.db"));
-    let copy = db.clone();
-    let dest = destination.clone();
-    let started = Instant::now();
-    let backup = std::thread::spawn(move || {
-        let result = copy.recovery_audit().unwrap().backup(&copy, &dest);
-        (Instant::now(), result)
-    });
-    // Destination reservation occurs under the audit mutex. Observe it before probing.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !destination.exists() && !backup.is_finished() && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    let probe_start_offset_ms = ms(started);
-    let observed_during_backup = destination.exists() && !backup.is_finished();
-    let read_db = db.clone();
-    let reader = std::thread::spawn(move || {
-        let start = Instant::now();
-        let result = read_db.connect_read_only().and_then(|c| {
-            c.query_row("SELECT count(*) FROM records", [], |r| r.get::<_, i64>(0))
-                .map_err(StorageError::from)
+    let (
+        result,
+        protected_total_ms,
+        probe_start_offset_ms,
+        observed_during_backup,
+        preadmitted_count,
+        preadmitted_read_ms,
+        new_read_ms,
+        append_ms,
+    ) = std::thread::scope(|scope| -> Result<_, Box<dyn std::error::Error>> {
+        let copy = db.clone();
+        let dest = destination.clone();
+        let started = Instant::now();
+        let backup = scope.spawn(move || {
+            #[cfg(all(test, unix))]
+            if let Some(hooks) = hooks {
+                match hooks.fault {
+                    tests::Fault::BackupError => {
+                        return (
+                            Instant::now(),
+                            Err(StorageError::BackupIntegrity(
+                                "injected backup failure".into(),
+                            )),
+                        );
+                    }
+                    tests::Fault::BackupPanic => panic!("injected backup worker panic"),
+                    _ => {}
+                }
+            }
+            let result = copy.recovery_audit().unwrap().backup(&copy, &dest);
+            (Instant::now(), result)
         });
-        (ms(start), result)
-    });
-    let write_db = db.clone();
-    let writer = std::thread::spawn(move || {
+        // Destination reservation occurs under the audit mutex. Observe it before probing.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !destination.exists() && !backup.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let probe_start_offset_ms = ms(started);
+        let observed_during_backup = destination.exists() && !backup.is_finished();
+        let read_db = db.clone();
+        let reader = scope.spawn(move || {
+            let start = Instant::now();
+            #[cfg(all(test, unix))]
+            if let Some(hooks) = hooks {
+                match hooks.fault {
+                    tests::Fault::ReaderError => {
+                        return (
+                            ms(start),
+                            Err(StorageError::BackupIntegrity(
+                                "injected reader failure".into(),
+                            )),
+                        );
+                    }
+                    tests::Fault::ReaderPanic => panic!("injected reader worker panic"),
+                    _ => {}
+                }
+            }
+            let result = read_db.connect_read_only().and_then(|c| {
+                c.query_row("SELECT count(*) FROM records", [], |r| r.get::<_, i64>(0))
+                    .map_err(StorageError::from)
+            });
+            (ms(start), result)
+        });
+        let write_db = db.clone();
+        let writer = scope.spawn(move || {
+            let start = Instant::now();
+            let service = BootstrapService::new(write_db);
+            #[cfg(all(test, unix))]
+            let service = hooks.map(|hooks| hooks.writer.clone()).unwrap_or(service);
+            let result = service.append_record(
+                &token(3),
+                "bench",
+                &format!("backup-probe-{round}"),
+                &input(round, true),
+            );
+            #[cfg(all(test, unix))]
+            if let Some(hooks) = hooks {
+                let verified = hooks
+                    .database
+                    .recovery_verification()
+                    .is_ok_and(|verification| {
+                        ["records", "mailbox_items"].into_iter().all(|name| {
+                            verification
+                                .tables
+                                .iter()
+                                .any(|table| table.name == name && table.rows == 1)
+                        })
+                    });
+                let files_present = hooks.root.join("central/journal.db").exists()
+                    && hooks.root.join("audit/recovery.db").exists();
+                let _ = hooks
+                    .writer_done
+                    .send((result.is_ok(), verified, files_present));
+            }
+            (ms(start), result)
+        });
+        #[cfg(all(test, unix))]
+        if let Some(hooks) = hooks {
+            // The injected clock stops the append inside its protected transaction.
+            hooks
+                .writer_entered
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))?;
+            hooks.at_error_boundary.send(())?;
+        }
         let start = Instant::now();
-        let result = BootstrapService::new(write_db).append_record(
-            &token(3),
-            "bench",
-            &format!("backup-probe-{round}"),
-            &input(round, true),
-        );
-        (ms(start), result)
-    });
-    let start = Instant::now();
-    let preadmitted_count: i64 =
-        existing.query_row("SELECT count(*) FROM records", [], |r| r.get(0))?;
-    let preadmitted_read_ms = ms(start);
-    let (finished, result) = backup.join().map_err(|_| "backup thread panicked")?;
-    let result = result?;
-    let (new_read_ms, read_result) = reader.join().map_err(|_| "reader panicked")?;
-    read_result?;
-    let (append_ms, append_result) = writer.join().map_err(|_| "writer panicked")?;
-    append_result?;
+        #[cfg(all(test, unix))]
+        let read_sql =
+            if hooks.is_some_and(|hooks| matches!(hooks.fault, tests::Fault::PreadmittedRead)) {
+                "SELECT count(*) FROM missing_capacity_fixture_table"
+            } else {
+                "SELECT count(*) FROM records"
+            };
+        #[cfg(not(all(test, unix)))]
+        let read_sql = "SELECT count(*) FROM records";
+        let preadmitted_result = existing.query_row(read_sql, [], |r| r.get::<_, i64>(0));
+        let preadmitted_read_ms = ms(start);
+        // Drain all workers before inspecting any result. The scope also drains on
+        // unwinding or an error before these explicit joins (including spawn failure).
+        let backup_result = backup.join();
+        let reader_result = reader.join();
+        let writer_result = writer.join();
+        let preadmitted_count = preadmitted_result?;
+        let (finished, result) = backup_result.map_err(|_| "backup thread panicked")?;
+        let result = result?;
+        let (new_read_ms, read_result) = reader_result.map_err(|_| "reader panicked")?;
+        read_result?;
+        let (append_ms, append_result) = writer_result.map_err(|_| "writer panicked")?;
+        append_result?;
+        Ok((
+            result,
+            finished.duration_since(started).as_secs_f64() * 1000.0,
+            probe_start_offset_ms,
+            observed_during_backup,
+            preadmitted_count,
+            preadmitted_read_ms,
+            new_read_ms,
+            append_ms,
+        ))
+    })?;
     let backup_db = Database::open(&destination)?;
     let same = backup_db.recovery_verification()? == result && result == expected;
     drop(backup_db);
@@ -252,7 +364,7 @@ fn backup_measurement(
         return Err("backup verification/evidence mismatch".into());
     }
     Ok(json!({"copy_plus_basic_verification_ms":copy_basic_ms,
-        "separate_full_verification_ms":verification_ms,"protected_total_ms":finished.duration_since(started).as_secs_f64()*1000.0,
+        "separate_full_verification_ms":verification_ms,"protected_total_ms":protected_total_ms,
         "probe_start_offset_ms":probe_start_offset_ms,"observed_destination_while_backup_running":observed_during_backup,
         "new_read_ms":new_read_ms,"audited_append_ms":append_ms,"preadmitted_read_ms":preadmitted_read_ms,
         "preadmitted_record_count":preadmitted_count,"backup_records":raw_result.record_count,
@@ -371,4 +483,155 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(db);
     drop(fixture);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use journal_service::{Clock, OsSecretSource};
+    use std::sync::{Mutex, atomic::AtomicBool, mpsc};
+    use std::time::SystemTime;
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Fault {
+        PreadmittedRead,
+        BackupError,
+        BackupPanic,
+        ReaderError,
+        ReaderPanic,
+    }
+    pub struct DrainHooks {
+        pub fault: Fault,
+        pub writer: BootstrapService,
+        pub database: Database,
+        pub root: PathBuf,
+        pub writer_entered: Mutex<mpsc::Receiver<()>>,
+        pub at_error_boundary: mpsc::Sender<()>,
+        pub writer_done: mpsc::Sender<(bool, bool, bool)>,
+    }
+    struct HeldWriterClock {
+        first: AtomicBool,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl Clock for HeldWriterClock {
+        fn now(&self) -> SystemTime {
+            if self.first.swap(false, Ordering::SeqCst) {
+                let _ = self.entered.send(());
+                // Dropping the controller's sender also releases the test writer.
+                let _ = self.release.lock().unwrap().recv();
+            }
+            SystemTime::now()
+        }
+    }
+    struct ReleaseOnDrop(Option<mpsc::Sender<()>>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[test]
+    fn backup_failures_drain_audited_writer_before_fixture_cleanup() {
+        for fault in [
+            Fault::PreadmittedRead,
+            Fault::BackupError,
+            Fault::BackupPanic,
+            Fault::ReaderError,
+            Fault::ReaderPanic,
+        ] {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (boundary_tx, boundary_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (writer_done_tx, writer_done_rx) = mpsc::channel();
+            let (returned_tx, returned_rx) = mpsc::channel();
+            let (root_tx, root_rx) = mpsc::channel();
+            let clock = Arc::new(HeldWriterClock {
+                first: AtomicBool::new(true),
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            });
+            std::thread::scope(|scope| {
+                let release = ReleaseOnDrop(Some(release_tx));
+                let parent = scope.spawn(move || {
+                    // Reproduce main's ownership/unwinding: the error drops Fixture.
+                    let operation = || -> Result<(), Box<dyn std::error::Error>> {
+                        let fixture = Fixture::new()?;
+                        root_tx.send(fixture.0.clone())?;
+                        let db = Database::open_protected(
+                            fixture.0.join("central/journal.db"),
+                            fixture.0.join("audit/recovery.db"),
+                        )?;
+                        let service = BootstrapService::new(db.clone());
+                        for (index, handle) in [(2, "recipient"), (3, "writer")] {
+                            service.register(
+                                &token(index),
+                                &RegistrationRequest {
+                                    handle: handle.into(),
+                                    display_name: handle.into(),
+                                },
+                            )?;
+                        }
+                        service.create_space(&SpaceCreateRequest {
+                            id: "bench".into(),
+                            name: "Drain regression".into(),
+                            access: SpaceAccess::Public,
+                        })?;
+                        let hooks = DrainHooks {
+                            fault,
+                            writer: BootstrapService::with_sources(
+                                db.clone(),
+                                clock,
+                                Arc::new(OsSecretSource),
+                            ),
+                            database: db.clone(),
+                            root: fixture.0.clone(),
+                            writer_entered: Mutex::new(entered_rx),
+                            at_error_boundary: boundary_tx,
+                            writer_done: writer_done_tx,
+                        };
+                        backup_measurement_inner(&db, &fixture, 0, Some(&hooks))?;
+                        Ok(())
+                    };
+                    let _ = returned_tx.send(operation().is_err());
+                });
+                let root = root_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                boundary_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let early = returned_rx.recv_timeout(Duration::from_millis(100));
+                let retained_while_writer_held = root.join("central/journal.db").exists()
+                    && root.join("audit/recovery.db").exists();
+                drop(release);
+                let writer = writer_done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let returned_error = match early {
+                    Ok(value) => value,
+                    Err(_) => returned_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                };
+                parent.join().unwrap();
+                // Assert after release/join so even a failing regression test drains.
+                assert!(
+                    matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+                    "{fault:?}: parent returned before writer drained"
+                );
+                assert!(
+                    retained_while_writer_held,
+                    "{fault:?}: files removed during audited append"
+                );
+                assert_eq!(
+                    writer,
+                    (true, true, true),
+                    "{fault:?}: append, verification or file retention failed"
+                );
+                assert!(
+                    returned_error,
+                    "{fault:?}: injected failure did not propagate"
+                );
+                assert!(
+                    !root.exists(),
+                    "{fault:?}: fixture was not cleaned after drain"
+                );
+            });
+        }
+    }
 }
