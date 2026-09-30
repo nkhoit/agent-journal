@@ -25,7 +25,7 @@ const SECURITY_TABLES: &[&str] = &[
 /// snapshot body; older formats require operator archive/reset.
 const AUDIT_FORMAT: i64 = 1;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum Cell {
     Null,
     Integer(i64),
@@ -596,6 +596,7 @@ impl RecoveryAudit {
         let expected = backup_database.recovery_verification()?;
         let latest = head_snapshot(&self.connection()?)?;
         validate_credential_history(&backup_database.connect_read_only()?, &latest)?;
+        validate_security_history(&backup_database.connect_read_only()?, &latest)?;
         standalone_current_database(&backup_database)?;
         drop(backup_database);
         Database::restore_backup(backup, destination)?;
@@ -893,6 +894,7 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
         ));
     }
     validate_credential_history(transaction, latest)?;
+    validate_security_history(transaction, latest)?;
     // Restoring identity bindings never restores active credentials.
     transaction.execute_batch(
         "UPDATE credentials SET revoked_at=coalesce(revoked_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -949,6 +951,7 @@ fn restore_security(transaction: &Transaction<'_>, latest: &Snapshot) -> Result<
         }
     }
     restore_credential_history(transaction, latest)?;
+    restore_security_history(transaction, latest)?;
     for (recipient, head) in &latest.inbox_heads {
         if *head <= 0 {
             return Err(StorageError::RecoveryClosed(
@@ -1066,6 +1069,82 @@ fn restore_credential_history(
                 "INSERT INTO registration_receipts(
                     token_hash,credential_id,principal_id,request_json,response_json,created_at)
                  VALUES (?,?,?,?,?,?)",
+                rusqlite::params_from_iter(row.iter().map(Cell::value)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_security_history(
+    connection: &Connection,
+    latest: &Snapshot,
+) -> Result<(), StorageError> {
+    for (table, columns) in [("credential_audit", 5), ("audit_events", 7)] {
+        let audited = security_rows(latest, table)?;
+        let mut identities = std::collections::HashMap::new();
+        for row in audited {
+            let valid_id = if table == "credential_audit" {
+                matches!(row.first(), Some(Cell::Integer(_)))
+            } else {
+                matches!(row.first(), Some(Cell::Text(_)))
+            };
+            if row.len() != columns || !valid_id {
+                return Err(StorageError::RecoveryClosed(
+                    "security history snapshot shape differs",
+                ));
+            }
+            if identities.insert(&row[0], row).is_some() {
+                return Err(StorageError::RecoveryClosed(
+                    "security history snapshot contains conflicting identities",
+                ));
+            }
+        }
+        let mut statement = connection.prepare(&format!("SELECT * FROM {table}"))?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let existing = (0..columns)
+                .map(|index| {
+                    Ok(match row.get::<_, Value>(index)? {
+                        Value::Null => Cell::Null,
+                        Value::Integer(value) => Cell::Integer(value),
+                        Value::Text(value) => Cell::Text(value),
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // Every backup row must be recognized in full by the surviving audit.
+            // Unknown history is evidence to preserve, not authority to adopt.
+            if !identities
+                .get(&existing[0])
+                .is_some_and(|candidate| **candidate == existing)
+            {
+                return Err(StorageError::RecoveryClosed(
+                    "security history binding conflicts",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_security_history(
+    transaction: &Transaction<'_>,
+    latest: &Snapshot,
+) -> Result<(), StorageError> {
+    // Credential references are restored first. Reconciliation checks all
+    // deferred foreign keys before publishing its prepared snapshot.
+    for (table, columns) in [("credential_audit", 5), ("audit_events", 7)] {
+        let placeholders = (1..=columns)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        for row in security_rows(latest, table)? {
+            transaction.execute(
+                &format!(
+                    "INSERT INTO {table} SELECT {placeholders}
+                     WHERE NOT EXISTS(SELECT 1 FROM {table} WHERE id=?1)"
+                ),
                 rusqlite::params_from_iter(row.iter().map(Cell::value)),
             )?;
         }
@@ -1576,6 +1655,213 @@ mod tests {
         drop(audit);
         let reopened = fixture.audit(&database);
         assert!(reopened.ensure_open(&database).is_err());
+    }
+
+    #[test]
+    fn older_backup_preserves_security_history_after_approved_restore_reopen() {
+        let fixture = Fixture::new();
+        let database = fixture.database();
+        seed(&database);
+        let audit = fixture.audit(&database);
+        mutate(
+            &database,
+            &audit,
+            "INSERT INTO credential_audit(id,credential_id,operation,occurred_at,reason)
+                 VALUES(4,'c','issued','2026-01-01T00:00:00Z',NULL);
+             INSERT INTO audit_events VALUES('before','principal-profile-updated',NULL,
+                 'principal','018f1f59-6e90-7000-8000-000000000001','{}','2026-01-01T00:00:00Z');",
+        );
+        audit
+            .backup(&database, &fixture.0.join("backup.db"))
+            .unwrap();
+        mutate(
+            &database,
+            &audit,
+            "INSERT INTO credentials(id,principal_id,class,token_hash,created_at)
+                 VALUES('a-successor','018f1f59-6e90-7000-8000-000000000001',
+                     'principal-client','successor-digest','2026-01-02T00:00:00Z');
+             UPDATE credentials SET revoked_at='2026-01-02T00:00:00Z',
+                 replacement_credential_id='a-successor',revocation_reason='rotation' WHERE id='c';
+             INSERT INTO credential_audit(id,credential_id,operation,occurred_at,reason)
+                 VALUES(17,'c','rotated','2026-01-02T00:00:00Z','rotation'),
+                       (42,'a-successor','issued','2026-01-02T00:00:00Z',NULL);
+             INSERT INTO audit_events VALUES('after','principal-profile-updated',
+                 '018f1f59-6e90-7000-8000-000000000001','principal',
+                 '018f1f59-6e90-7000-8000-000000000001','{\"reason\":\"retained\"}',
+                 '2026-01-02T00:00:00Z');",
+        );
+        let expected = snapshot(&database.connect_unchecked().unwrap()).unwrap();
+        assert_eq!(
+            head_snapshot(&audit.connection().unwrap()).unwrap(),
+            expected
+        );
+        let mut approval = audit
+            .restore(
+                &fixture.0.join("backup.db"),
+                &fixture.0.join("restored.db"),
+                true,
+            )
+            .unwrap();
+        let restored = Database::open(fixture.0.join("restored.db")).unwrap();
+        let after_restore = snapshot(&restored.connect_unchecked().unwrap()).unwrap();
+        assert!(audit.reopen(&restored, &approval).is_err());
+        approval.inventory_complete = true;
+        approval.accepted_record_loss = true;
+        audit.reopen(&restored, &approval).unwrap();
+        let after_reopen = snapshot(&restored.connect_unchecked().unwrap()).unwrap();
+        let surviving_head = head_snapshot(&audit.connection().unwrap()).unwrap();
+        assert_eq!(retained_bodies(&audit), vec![approval.audit_revision]);
+        assert_eq!(
+            restored
+                .connect_unchecked()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM credentials WHERE revoked_at IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        restored.normalize_for_clean_shutdown().unwrap();
+        drop(restored);
+        drop(audit);
+        let restored =
+            Database::open_protected(fixture.0.join("restored.db"), fixture.0.join("audit.db"))
+                .unwrap();
+        let after_restart = snapshot(&restored.connect_unchecked().unwrap()).unwrap();
+        for table in ["credential_audit", "audit_events"] {
+            for (stage, actual) in [
+                ("restore", &after_restore),
+                ("reopen", &after_reopen),
+                ("surviving head", &surviving_head),
+                ("protected restart", &after_restart),
+            ] {
+                assert_eq!(
+                    security_rows(actual, table).unwrap(),
+                    security_rows(&expected, table).unwrap(),
+                    "{table} after {stage}"
+                );
+            }
+        }
+        restored
+            .with_transaction(|transaction| {
+                transaction.execute(
+                    "INSERT INTO credential_audit(credential_id,operation,occurred_at,reason)
+                 VALUES('a-successor','revoked','2026-01-03T00:00:00Z','after restart')",
+                    [],
+                )?;
+                assert_eq!(transaction.last_insert_rowid(), 43);
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn conflicting_or_unrecognized_security_history_keeps_recovery_closed() {
+        for operation in ["restore", "reconcile"] {
+            for conflict in [
+                "UPDATE credential_audit SET reason='conflicting evidence' WHERE id=1",
+                "UPDATE audit_events SET detail_json='{\"conflict\":true}' WHERE id='event'",
+                "INSERT INTO credential_audit VALUES(99,'c','revoked','2026-01-03T00:00:00Z','unknown')",
+                "INSERT INTO audit_events VALUES('unknown','principal-disabled',NULL,'principal',
+                     '018f1f59-6e90-7000-8000-000000000001','{}','2026-01-03T00:00:00Z')",
+            ] {
+                let fixture = Fixture::new();
+                let database = fixture.database();
+                seed(&database);
+                let audit = fixture.audit(&database);
+                mutate(&database, &audit,
+                    "INSERT INTO credential_audit VALUES(1,'c','issued','2026-01-01T00:00:00Z',NULL);
+                     INSERT INTO audit_events VALUES('event','principal-profile-updated',NULL,
+                         'principal','018f1f59-6e90-7000-8000-000000000001','{}',
+                         '2026-01-01T00:00:00Z');");
+                let backup_path = fixture.0.join("backup.db");
+                let destination = fixture.0.join("restored.db");
+                audit.backup(&database, &backup_path).unwrap();
+                let before_audit = audit_rows(&audit);
+                Connection::open(&backup_path)
+                    .unwrap()
+                    .execute_batch(conflict)
+                    .unwrap();
+                let backup = Database::open(&backup_path).unwrap();
+                let before_backup = snapshot(&backup.connect_unchecked().unwrap()).unwrap();
+                backup.normalize_for_clean_shutdown().unwrap();
+                let result = if operation == "restore" {
+                    audit.restore(&backup_path, &destination, true)
+                } else {
+                    audit.reconcile(&backup, true)
+                };
+                assert!(
+                    matches!(
+                        result,
+                        Err(StorageError::RecoveryClosed(
+                            "security history binding conflicts"
+                        ))
+                    ),
+                    "{operation}: {conflict}: {result:?}"
+                );
+                assert!(!destination.exists());
+                assert_eq!(
+                    snapshot(&backup.connect_unchecked().unwrap()).unwrap(),
+                    before_backup
+                );
+                assert_eq!(audit_rows(&audit), before_audit);
+                assert_eq!(audit.connection().unwrap().query_row(
+                    "SELECT count(*) FROM recovery_events WHERE kind IN ('reconciled','verified-restore')",
+                    [], |row| row.get::<_, i64>(0),
+                ).unwrap(), 0);
+                assert!(audit.ensure_open(&database).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_security_history_snapshot_cannot_prepare_reconciliation() {
+        for invalid in ["credential reference", "duplicate id", "row shape"] {
+            let fixture = Fixture::new();
+            let database = fixture.database();
+            seed(&database);
+            let audit = fixture.audit(&database);
+            let before = snapshot(&database.connect_unchecked().unwrap()).unwrap();
+            let mut latest = before.clone();
+            let history = &mut latest.tables[SECURITY_TABLES
+                .iter()
+                .position(|table| *table == "credential_audit")
+                .unwrap()];
+            let mut row = vec![
+                Cell::Integer(1),
+                Cell::Text("c".into()),
+                Cell::Text("issued".into()),
+                Cell::Text("2026-01-01T00:00:00Z".into()),
+                Cell::Null,
+            ];
+            match invalid {
+                "credential reference" => row[1] = Cell::Text("missing-credential".into()),
+                "duplicate id" => history.push(row.clone()),
+                "row shape" => {
+                    row.pop();
+                }
+                _ => unreachable!(),
+            }
+            history.push(row);
+            audit
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE events SET snapshot=? WHERE revision=0",
+                    [serde_json::to_string(&latest).unwrap()],
+                )
+                .unwrap();
+            let before_audit = audit_rows(&audit);
+            assert!(audit.reconcile(&database, true).is_err(), "{invalid}");
+            assert_eq!(
+                snapshot(&database.connect_unchecked().unwrap()).unwrap(),
+                before
+            );
+            assert_eq!(audit_rows(&audit), before_audit);
+            assert!(audit.ensure_open(&database).is_err());
+        }
     }
 
     #[test]

@@ -29,6 +29,22 @@ impl Drop for Directory {
     }
 }
 
+fn security_history(database: &Database) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let connection = database.connect_read_only().unwrap();
+    [("credential_audit", 5), ("audit_events", 7)]
+        .into_iter()
+        .map(|(table, columns)| {
+            connection
+                .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+                .unwrap()
+                .query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        })
+        .collect()
+}
+
 #[test]
 fn older_backup_retains_revoked_post_backup_registration_and_rotation_bindings() {
     let directory = Directory::new();
@@ -78,6 +94,19 @@ fn older_backup_retains_revoked_post_backup_registration_and_rotation_bindings()
             reason: None,
         })
         .unwrap();
+    service
+        .revoke(
+            &recovered.replacement_secret.credential_id,
+            Some("post-backup revocation"),
+        )
+        .unwrap();
+    let expected_history = security_history(&database);
+    assert!(expected_history.iter().all(|rows| !rows.is_empty()));
+    let last_history_id: i64 = database
+        .connect_read_only()
+        .unwrap()
+        .query_row("SELECT max(id) FROM credential_audit", [], |row| row.get(0))
+        .unwrap();
     let expected_credentials: i64 = database
         .connect_read_only()
         .unwrap()
@@ -85,15 +114,18 @@ fn older_backup_retains_revoked_post_backup_registration_and_rotation_bindings()
         .unwrap();
     let audit = database.recovery_audit().unwrap();
     let mut approval = audit.restore(&backup, &restored, true).unwrap();
+    let restored_database = Database::open(&restored).unwrap();
+    assert_eq!(security_history(&restored_database), expected_history);
     approval.inventory_complete = true;
     approval.accepted_record_loss = true;
-    audit
-        .reopen(&Database::open(&restored).unwrap(), &approval)
-        .unwrap();
+    audit.reopen(&restored_database, &approval).unwrap();
+    assert_eq!(security_history(&restored_database), expected_history);
+    drop(restored_database);
     drop(service);
     drop(database);
 
     let database = Database::open_protected(&restored, &audit_path).unwrap();
+    assert_eq!(security_history(&database), expected_history);
     let service = BootstrapService::new(database.clone());
     for token in [
         &alpha,
@@ -160,6 +192,19 @@ fn older_backup_retains_revoked_post_backup_registration_and_rotation_bindings()
             )
             .unwrap(),
         "alias"
+    );
+    service
+        .recover_principal(&PrincipalRecoveryRequest {
+            principal_id: registration.principal.id,
+            reason: Some("after protected restart".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT max(id) FROM credential_audit", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        last_history_id + 1
     );
 }
 
