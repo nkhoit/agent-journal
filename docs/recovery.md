@@ -120,6 +120,11 @@ identity/digest/receipt bindings must match; conflicting bindings fail closed
 before destination publication. Rotation references may be restored in either
 row order using deferred foreign keys, verified before preparing recovery output.
 Immutable receipt guards are not disabled and history is not replaced/deleted.
+Security-history rows in `credential_audit` and `audit_events` are restored after
+credential bindings, preserving their original IDs and complete contents.
+Matching backup rows are retained once; conflicting IDs or backup-only history
+unrecognized by the surviving audit refuse recovery with the gate closed. The
+reconciled head retains this history when prior snapshot bodies are pruned.
 
 This retention matters: an old token must not become a new registration because
 its digest was absent from the backup. A clean reset that discards the audit is
