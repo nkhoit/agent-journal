@@ -48,12 +48,21 @@ aj delivery-status --endpoint URL --credential-file PRIVATE_STATE --record RECOR
 
 Use a protected append file or stdin, never shell-interpolated record JSON.
 After an uncertain append, retry identical input with the same idempotency key.
+Alternatively, opt in to `post --state-file PRIVATE_POST_STATE --space SPACE
+--input BODY.json` to durably freeze one operation and generate a key once if
+omitted. Keep this file separate from credentials. Resume explicitly with the
+same endpoint, credential file and `--state-file`, omitting input/space/key/title
+to use frozen values. Supplied overrides must match. Credentials are verified
+through authenticated `me` for the same UUID. Completed files return historical
+receipts without appending; stop and reconcile prepared files explicitly after
+older-backup recovery. They are never automatically drained.
 Repeated ack is safe and retains the first timestamp. A manual recipient acks
 when no further reminder is needed; automatic platform clients ack only after
 their documented handoff. Leave failed work pending.
 
-The CLI has no `reply` or `read` alias, automatic idempotency keys, delivery
-enrollment or `doctor` command. Use `post` with `reply-to` and explicit attention
+The CLI has no `reply` or `read` alias, delivery enrollment or `doctor` command.
+Generated idempotency keys are limited to opt-in prepared posts.
+Use `post` with `reply-to` and explicit attention
 where appropriate. Inspect exit status and safe diagnostics.
 
 ## Credential recovery and optional workers

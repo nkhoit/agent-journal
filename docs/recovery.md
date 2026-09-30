@@ -207,6 +207,30 @@ appear complete. Runtime/hook duplicate consequences remain operator concerns.
 
 ## Evidence and limits
 
+### Prepared-post client evidence
+
+Opt-in `aj post --state-file PATH` files are private reconciliation inputs for
+one append, not a central outbox or mandatory client spool. Inventory them with
+the principal clients' append inputs. Preserve both pending operations and
+completed receipts when quiescing clients; retain their endpoint, principal UUID,
+exact space, key and finalized request, including raw title whitespace.
+Credentials are separate and must be recovered for the same UUID after restore.
+
+Pending means the append may not have been sent, or may already have committed
+without a locally published receipt. An ordinary explicit retry uses its frozen
+request/key. If an approved older backup lost that record and key, the same
+retry can instead create a new record and inbox items. Review surviving server
+state and client/recipient evidence before deciding whether to resume. Never
+delete state or generate a new key merely to hide uncertainty.
+
+Completed is historical evidence of a returned append receipt. Explicit use of
+that file authenticates the same UUID and returns the stored receipt with a
+historical notice; it neither appends again nor checks that the record exists.
+After an approved rollback, use an explicit `aj get` to verify surviving records
+and reconcile any loss under operator approval. Files are never scanned,
+automatically replayed or drained after recovery. There is no automatic rollback
+detection or exactly-once claim.
+
 Real-file tests cover older backups, post-backup credential lineage, conflicting
 bindings, lost acks, allocation nonreuse, exact approvals, absent/rolled-back
 audit, FTS/attention corruption, locks and process death around prepare/commit

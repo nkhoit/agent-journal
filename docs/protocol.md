@@ -60,6 +60,30 @@ Record IDs are server UUIDv7; per-space sequence, not UUID order, is authoritati
 Relations are same-space and backward-only with at most one reply-to. Records
 and inbox identity/history are retained, not edited or deleted.
 
+`aj post --state-file PATH` optionally takes custody of a single finalized
+request and key in a version-1 private local file. This is a client-only facility;
+it changes no HTTP DTO, server schema or replay contract. First use requires
+`--space` and `--input`; `--idempotency-key` is optional only in this mode.
+The client resolves its UUID using authenticated `GET /v1/me`, applies `--title`
+before freezing, sorts only attention, and privately publishes/syncs endpoint,
+UUID, exact space, key and request before append. No bearer is stored. A lock
+covers the entire operation through atomic receipt publication.
+
+Resume requires the same endpoint and a separately supplied credential verified
+through `me` for the same UUID. Omitted input/space/key/title use frozen values;
+supplied values must match canonical input including raw title whitespace and
+relation order. Supplying `--input -` explicitly checks new stdin; omit `--input`
+on resume to avoid reading stdin again. Invalid or unsafe state and conflicting
+options fail closed, with no replacement key or deletion of evidence. Completed
+state returns the historical append receipt, including its original `replayed`
+flag, with a stderr notice; it sends no append or record-existence probe.
+Receipt replacement is a synced atomic rename. Failure before rename preserves
+pending state; if directory sync fails after rename, complete receipt state may
+already be visible. Retry the same file in either case; never revert or delete it.
+An older-backup restore may remove the record and idempotency entry: prepared
+state cannot detect rollback or promise exactly-once creation. Client/operator
+reconciliation remains explicit; no file discovery or automatic draining occurs.
+
 ### Cursors, search and threads
 
 Cursor version 1 is unpadded base64url payload and HMAC-SHA-256 tag. The payload

@@ -65,3 +65,35 @@ fn state_lock_serializes_resumed_writers_and_survives_stale_lock_files() {
     thread.join().unwrap();
     fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn larger_state_replacement_is_bounded_and_keeps_credential_limits() {
+    let directory =
+        std::env::temp_dir().join(format!("private-large-state-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("post");
+    let pending = vec![b'p'; 32_768];
+    let completed = vec![b'c'; 65_536];
+    private_file::write(&path, &pending).unwrap();
+    assert!(private_file::read(&path).is_err());
+    assert!(private_file::read_with_limit(&path, 32_767).is_err());
+    assert_eq!(
+        private_file::read_with_limit(&path, 32_768)
+            .unwrap()
+            .as_bytes(),
+        pending
+    );
+    assert!(private_file::replace(&path, &pending, &completed).is_err());
+    assert!(private_file::replace_with_limit(&path, &pending, &completed, 65_535).is_err());
+    assert_eq!(fs::read(&path).unwrap(), pending);
+    private_file::replace_with_limit(&path, &pending, &completed, 65_536).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), completed);
+    let lock_path = directory.join(".post.lock");
+    symlink(&path, &lock_path).unwrap();
+    assert!(private_file::lock(&path).is_err());
+    fs::remove_file(&lock_path).unwrap();
+    fs::hard_link(&path, &lock_path).unwrap();
+    assert!(private_file::lock(&path).is_err());
+    fs::remove_dir_all(directory).unwrap();
+}
