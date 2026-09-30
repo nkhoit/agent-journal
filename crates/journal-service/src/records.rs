@@ -1017,7 +1017,7 @@ pub(super) fn record(tx: &Transaction<'_>, id: &str) -> Result<Record, Bootstrap
     Ok(record)
 }
 
-fn space(tx: &Transaction<'_>, id: &str) -> Result<Space, BootstrapError> {
+pub(super) fn space(tx: &Transaction<'_>, id: &str) -> Result<Space, BootstrapError> {
     Ok(tx.query_row(
         "SELECT id,name,created_at,archived_at,access FROM spaces WHERE id=?",
         [id],

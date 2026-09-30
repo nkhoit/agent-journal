@@ -91,8 +91,10 @@ class BootstrapTest(unittest.TestCase):
             self.assertNotIn(secret, " ".join(map(str, args)))
         return result
 
-    def request(self, path, token=None, method="GET", body=None):
+    def request(self, path, token=None, method="GET", body=None, idempotency_key=None):
         headers = {"Content-Type": "application/json"} if body is not None else {}
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         if token:
             headers["Authorization"] = "Bearer " + token
         request = urllib.request.Request(self.endpoint + path, data=body,
@@ -191,6 +193,59 @@ class BootstrapTest(unittest.TestCase):
         thread = threading.Thread(target=run)
         thread.start()
         return endpoint, thread, failures
+
+    def test_lifecycle_cli_lost_response_archive_replay_and_explicit_recovery(self):
+        self.provision()
+        token = self.secrets[-1]
+        body = self.directory / "record.json"
+        body.write_text(json.dumps({"kind": "note", "content": "retained history",
+                                    "attention": [self.principal_id]}))
+        post = ("post", "--endpoint", self.endpoint, "--credential-file",
+                self.directory / "principal", "--space", "space-example",
+                "--idempotency-key", "lifecycle", "--input", body)
+        committed = json.loads(self.cli("aj", *post).stdout)
+        archived = json.loads(self.admin("space-archive", "space-example", "finished").stdout)
+        self.assertIsNotNone(archived["archived_at"])
+        self.assertEqual(json.loads(self.admin("space-archive", "space-example", "retry").stdout), archived)
+        replay = json.loads(self.cli("aj", *post).stdout)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["record"], committed["record"])
+        self.cli("aj", *post[:-3], "new", "--input", body, succeeds=False)
+        status, inbox = self.request("/v1/inbox", token)
+        self.assertEqual(status, 200)
+        item = json.loads(inbox)["items"][0]["inbox_item_id"]
+        self.assertEqual(self.request(f"/v1/inbox/{item}/ack", token, "POST")[0], 204)
+        self.assertEqual(self.request("/v1/records/" + committed["record"]["id"], token)[0], 200)
+        self.admin("space-unarchive", "space-example", "reopened")
+        self.cli("aj", *post[:-3], "new", "--input", body)
+        responses = []
+        proxy, thread, failures = self.proxy(lambda payload: responses.append(json.loads(payload)),
+                                            unix=True, lose_response=True)
+        self.admin("principal-disable", self.principal_id, "suspended",
+                   socket_path=proxy, succeeds=False)
+        thread.join(PROCESS_TIMEOUT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        disabled = responses[0]
+        self.assertTrue(disabled["principal"]["disabled"])
+        history = sqlite3.connect(self.database).execute(
+            "SELECT * FROM audit_events ORDER BY id").fetchall()
+        self.assertEqual(json.loads(self.admin("principal-disable", self.principal_id, "retry").stdout), disabled)
+        self.assertEqual(sqlite3.connect(self.database).execute(
+            "SELECT * FROM audit_events ORDER BY id").fetchall(), history)
+        for path in ("/v1/me", "/v1/spaces", "/v1/inbox"):
+            self.assertEqual(self.request(path, token)[0], 401)
+        self.assertEqual(self.request(f"/v1/inbox/{item}/ack", token, "POST")[0], 401)
+        self.assertEqual(self.request("/v1/me/profile", token, "PATCH", json.dumps({
+            "handle": "changed", "display_name": "Changed", "expected_profile_revision": 1
+        }).encode(), idempotency_key="disabled-profile")[0], 401)
+        self.cli("aj", *post, succeeds=False)
+        self.admin("principal-enable", self.principal_id, "resume")
+        self.assertEqual(self.request("/v1/me", token)[0], 401)
+        self.cli("aj", *post, succeeds=False)
+        self.admin("principal-recover", self.principal_id, self.directory / "replacement", "explicit recovery")
+        replacement = self.credential("replacement")
+        self.assertEqual(self.request("/v1/me", replacement["secret"])[0], 200)
 
     def test_registered_principal_inbox_cli_without_adapter(self):
         self.admin("space-create", "inbox-space", "Inbox Space")

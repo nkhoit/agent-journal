@@ -77,3 +77,9 @@ operations:
 - operation_id: revokeCredential
   method: POST
   path: /v1/admin/credentials/revoke
+- operation_id: setPrincipalState
+  method: POST
+  path: /v1/admin/principals/state
+- operation_id: setSpaceArchive
+  method: POST
+  path: /v1/admin/spaces/archive

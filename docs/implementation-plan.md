@@ -29,6 +29,7 @@ tests together. An empty test, ignored test or successful stub is not acceptance
 | Wire contract | Exact 22 paths/23 operations, references/security/body shapes, required nullable fields, duplicate-key and unknown-field rejection, mutation tests |
 | Schema admission | Fresh schema 13, exact objects/constraints, older schema/audit rejection without reset, sidecar/hardlink safeguards |
 | Registration | Durable client preparation, exact replay, concurrent retries, body/handle conflict, no revoked/expired/disabled token reuse, process interruption |
+| Lifecycle | Protected socket/CLI desired states, exact UUID selection, atomic revocation, archive replay/acks, repeat-safe history, held reads/viewer, append races, audit failure and older-backup reopen |
 | Principal recovery | Atomic revoke/replace, UUID/profile/inbox retention, disabled state, response loss and private-write failures recoverable by UUID |
 | Records | UUIDv7 IDs, immutable content, atomic record/attention/inbox/idempotency, rollback and process-kill boundaries, exact replay after mutable policy/profile changes |
 | Reads | Bounded keyset list/search/thread, policy before ranking/snippets/counts, malformed filters/cursors, depth/node/edge limits |

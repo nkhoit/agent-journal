@@ -1620,3 +1620,149 @@ fn binary_handles_sigterm_immediately_after_readiness() {
     assert!(status.success(), "journald exit status: {status}");
     assert!(!admin_socket.exists(), "admin socket removed after SIGTERM");
 }
+
+async fn lifecycle_admin(socket: &std::path::Path, path: &str, body: &str, status: &str) -> Value {
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let response = unix_request(socket, request.as_bytes()).await;
+    assert!(
+        response.starts_with(&format!("HTTP/1.1 {status}")),
+        "{response}"
+    );
+    serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_socket_lifecycle_revokes_held_inbox_and_shared_viewer_authority() {
+    use journal_protocol::*;
+    let temporary = TempDir::new("lifecycle-socket");
+    let mut settings = config(&temporary);
+    settings.web = Some(journald::WebConfig {
+        address: "127.0.0.1:0".parse().unwrap(),
+        viewer: "viewer".into(),
+    });
+    let database =
+        Database::open_protected(&settings.database_path, &settings.recovery_audit_path).unwrap();
+    let service = journal_service::BootstrapService::new(database.clone());
+    let token = "a".repeat(64);
+    let registration = service
+        .register(
+            &token,
+            &RegistrationRequest {
+                handle: "viewer".into(),
+                display_name: "Viewer".into(),
+            },
+        )
+        .unwrap()
+        .receipt;
+    service
+        .create_space(&SpaceCreateRequest {
+            id: "space".into(),
+            name: "Space".into(),
+            access: domain::SpaceAccess::Public,
+        })
+        .unwrap();
+    drop(service);
+    drop(database);
+    let server = Server::bind(settings).await.unwrap();
+    let public = server.public_address();
+    let web = server.web_address().unwrap().unwrap();
+    let socket = server.admin_socket_path().to_owned();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(server.serve(async move {
+        let _ = shutdown_rx.await;
+    }));
+    let request = |path: &str| {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        )
+    };
+    let response = tcp_request(
+        web,
+        b"GET /web HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    let hold_request = request("/v1/inbox?wait_seconds=30");
+    let mut held = tokio::spawn(async move { tcp_request(public, hold_request.as_bytes()).await });
+    assert!(
+        timeout(Duration::from_millis(150), &mut held)
+            .await
+            .is_err(),
+        "inbox should hold"
+    );
+    let disabled=serde_json::json!({"principal_id":registration.principal.id,"disabled":true,"reason":"suspend"}).to_string();
+    let result = lifecycle_admin(&socket, "/v1/admin/principals/state", &disabled, "200").await;
+    assert_eq!(result["principal"]["disabled"], true);
+    assert!(result["disabled_at"].is_string());
+    assert_eq!(
+        lifecycle_admin(&socket, "/v1/admin/principals/state", &disabled, "200").await,
+        result
+    );
+    let response = timeout(Duration::from_secs(3), held)
+        .await
+        .expect("disable must wake held inbox")
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    for path in ["/web", "/web/spaces/space"] {
+        let response = tcp_request(web, request(path).as_bytes()).await;
+        assert!(!response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(!response.contains("Viewer"));
+    }
+    let enable =
+        serde_json::json!({"principal_id":registration.principal.id,"disabled":false}).to_string();
+    lifecycle_admin(&socket, "/v1/admin/principals/state", &enable, "200").await;
+    let response = tcp_request(public, request("/v1/me").as_bytes()).await;
+    assert!(
+        response.starts_with("HTTP/1.1 401"),
+        "enable must not revive token: {response}"
+    );
+    let response = tcp_request(web, request("/web").as_bytes()).await;
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "viewer is credential independent"
+    );
+    for path in ["/v1/admin/principals/state", "/v1/admin/spaces/archive"] {
+        for address in [public, web] {
+            let response=tcp_request(address,format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await;
+            assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        }
+    }
+    for body in [
+        "[]",
+        "{}",
+        r#"{"principal_id":"viewer","disabled":true}"#,
+        r#"{"principal_id":"018f1f59-6e90-7000-8000-000000000001","disabled":true,"reason":null}"#,
+        r#"{"principal_id":"018f1f59-6e90-7000-8000-000000000001","disabled":true,"disabled":false}"#,
+    ] {
+        let error = lifecycle_admin(&socket, "/v1/admin/principals/state", body, "400").await;
+        assert_eq!(
+            error["error"]["code"],
+            if body.contains("\"disabled\":false") {
+                "invalid-json"
+            } else {
+                "invalid-request"
+            }
+        );
+    }
+    let error = lifecycle_admin(
+        &socket,
+        "/v1/admin/principals/state",
+        r#"{"principal_id":"018f1f59-6e90-7000-8000-000000000001","disabled":true}"#,
+        "404",
+    )
+    .await;
+    assert_eq!(error["error"]["code"], "not-found");
+    let error = lifecycle_admin(
+        &socket,
+        "/v1/admin/spaces/archive",
+        r#"{"space_id":"unknown","archived":true}"#,
+        "404",
+    )
+    .await;
+    assert_eq!(error["error"]["code"], "not-found");
+    shutdown_tx.send(()).unwrap();
+    serving.await.unwrap().unwrap();
+}

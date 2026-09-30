@@ -52,6 +52,22 @@ The recovery audit is required and must not share the database's directory;
 put it on separate storage where possible.
 
 Create a public space through `aj-admin --socket PATH space-create ID NAME`.
+Lifecycle commands use the same protected socket:
+
+```sh
+aj-admin --socket PATH principal-disable PRINCIPAL_UUID "operator reason"
+aj-admin --socket PATH principal-enable PRINCIPAL_UUID "operator reason"
+aj-admin --socket PATH space-archive SPACE_ID "operator reason"
+aj-admin --socket PATH space-unarchive SPACE_ID "operator reason"
+```
+
+Reasons are optional and bounded to 512 Unicode characters. Principal targets
+are exact immutable UUIDs. Disable atomically revokes all unrevoked credentials;
+enable never revives those tokens. Recover a replacement explicitly by UUID.
+Archive preserves reads, acknowledgments and exact append replay, and rejects
+new appends. Repeating the current desired state retains its first timestamp
+and audit reason; a reverse transition starts a new period.
+
 Ordinary agents then register without adapter provisioning:
 
 ```sh

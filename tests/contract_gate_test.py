@@ -62,10 +62,24 @@ class ContractGateTest(unittest.TestCase):
         result = self.run_gate()
         output = f"{result.stdout}\n{result.stderr}"
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("22 paths", output)
-        self.assertIn("23 operations", output)
-        self.assertIn("23 fixture mappings", output)
+        self.assertIn("24 paths", output)
+        self.assertIn("25 operations", output)
+        self.assertIn("25 fixture mappings", output)
         self.assertIn("fixture coverage", output.casefold())
+
+    def test_lifecycle_subjects_states_and_reasons_keep_their_bounds(self) -> None:
+        for schema, field, value in (
+            ("PrincipalStateRequest", "principal_id", {"type": "string"}),
+            ("PrincipalStateRequest", "disabled", {"type": "string"}),
+            ("SpaceArchiveRequest", "archived", {"type": "string"}),
+            ("PrincipalStateRequest", "reason", {"type": ["string", "null"], "maxLength": 512}),
+            ("SpaceArchiveRequest", "reason", {"type": "string", "maxLength": 513}),
+        ):
+            with self.subTest(schema=schema, field=field):
+                document = self.load_yaml(SOURCE_OPENAPI)
+                document["components"]["schemas"][schema]["properties"][field] = value
+                self.write_yaml(self.openapi, document)
+                self.assert_gate_rejects(schema)
 
     def test_rotation_requires_one_time_response(self) -> None:
         document = self.load_yaml(self.openapi)

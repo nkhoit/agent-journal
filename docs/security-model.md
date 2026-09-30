@@ -27,9 +27,19 @@ Attention recipients must be active and able to read the space. Relations are
 same-space and backward-only. Current policy is applied before search ranking,
 snippets, counts, threads or inbox content leave storage.
 
-Exact immutable append replay is the documented exception to a later principal
-disablement: an otherwise valid credential may recover its already-committed
-response. It grants no new append or ordinary read.
+The append replay engine checks current credential validity before returning a
+committed response, but does not reapply mutable space or principal policy.
+Protected principal disable atomically revokes all unrevoked bindings, including
+expired ones, so old tokens cannot use even exact replay after disable or enable.
+Space archive alone keeps exact committed replay available. Neither replay nor
+membership metadata grants administrative authority.
+
+Protected lifecycle requests select principals by exact immutable UUID and spaces
+by exact ID. Desired-state repeats preserve timestamps and reason history. Real
+transitions, credential revocations and the external security snapshot commit
+through the established audited mutation path; enable never clears revocations.
+Issuance/recovery remains explicit, including any replacement deliberately issued
+while disabled (unusable until enable).
 
 Inbox identity/recipient/sequence are immutable. Fetch does not reserve or ack.
 Bodyless ack rechecks active recipient and current space access even on repeat.
@@ -40,7 +50,12 @@ Record receipt visibility is narrower than record visibility. An authorized
 author sees all recipients, an addressed recipient only itself, other readers
 receive 404. The projection contains acknowledgment receipts only, not runtime
 attempts or processing outcomes. Disabling a principal prevents future central
-access, not recall of content already fetched or handed off.
+access, not recall of content already fetched or handed off. Mutations serialize
+through the protected writer transaction; ordinary and configured-viewer reads
+authorize inside their SQLite snapshot. Reads that already authorized before the
+transition may finish. Reads held behind that writer see the committed state.
+Long-poll inbox waits hold neither transaction nor worker permit; disable wakes
+them and they reauthorize, including at timeout or shutdown.
 
 ## Shared read-only browser access
 
@@ -62,8 +77,10 @@ reach it. Local processes can also reach loopback; this is not isolation from
 other users on the service host.
 
 Read-only requests recheck active viewer and current policy. Use a dedicated
-viewer principal for receipt-summary scope. Disabling it stops future responses,
-not copies already rendered.
+viewer principal for receipt-summary scope. Disabling it denies subsequent read
+transactions, including requests held behind a protected writer, and leaves
+already-rendered copies outside central control.
+Re-enable restores this configured credential-independent viewer's access.
 
 Responses and errors use no-store, no-referrer, MIME-sniffing protection and CSP
 forbidding scripts, styles, images, frames, plugins, external connections and

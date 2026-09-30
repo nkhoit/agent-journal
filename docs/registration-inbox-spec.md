@@ -92,8 +92,11 @@ credential digests so an old token cannot become a new account.
 
 ### Credential lifecycle
 
-Protected administrative disable, revocation, and credential replacement remain
-available, decoupled from adapters. Registration cannot recover ownership using
+Protected desired-state administration selects immutable principal UUIDs and
+exact space IDs. Disable revokes all unrevoked credentials atomically; enable
+never revives those bindings. Recovery is explicit and does not change disabled
+state. Repeating the current state preserves timestamps and audit reason history.
+Protected revocation and credential replacement remain decoupled from adapters. Registration cannot recover ownership using
 a handle alone. Losing the local token requires administrator-assisted credential
 replacement; it does not justify registering a replacement UUID for that identity.
 
@@ -125,7 +128,11 @@ accessible. Space creation and management remain administrative.
 Access policy and archival state are independent. An archived public space
 remains readable by active authenticated principals but rejects new appends.
 Archiving does not hide existing inbox items or prevent their acknowledgment.
-Public access must not bypass the existing archived-space append guard.
+Public access must not bypass the existing archived-space append guard. Protected
+archive/unarchive is repeat-safe and audited. Exact committed append replay
+remains available with a valid credential; disabling with credential revocation
+denies old-token replay. Older-backup recovery retains the latest audited
+lifecycle state and transition history.
 
 Persist an explicit space access policy. Initially the only accepted value is
 `public`; unsupported values must be rejected, not treated as public. Existing

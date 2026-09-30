@@ -369,6 +369,61 @@ pub struct PrincipalRecoveryResponse {
     pub replacement_secret: OneTimeReplacementSecret,
 }
 
+/// Protected desired state; the subject is an exact immutable UUID, not a name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalStateRequest {
+    pub principal_id: String,
+    pub disabled: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reason: Option<String>,
+}
+
+impl PrincipalStateRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        validate_uuid_v7("principal_id", &self.principal_id)?;
+        if let Some(reason) = &self.reason {
+            validate_chars("reason", reason, 0, 512)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalStateResponse {
+    pub principal: domain::Principal,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub disabled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpaceArchiveRequest {
+    pub space_id: String,
+    pub archived: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reason: Option<String>,
+}
+
+impl SpaceArchiveRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        validate_identifier("space_id", &self.space_id)?;
+        if let Some(reason) = &self.reason {
+            validate_chars("reason", reason, 0, 512)?;
+        }
+        Ok(())
+    }
+}
+
 /// A principal-client may update only its own mutable descriptor. A retired
 /// current handle becomes a permanent alias; the immutable principal ID and
 /// every authority-bearing binding remain unchanged.

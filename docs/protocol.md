@@ -54,7 +54,9 @@ response from them.
 Different input with the same key returns 409. A valid,
 unrevoked/unexpired credential is still required, but replay lookup precedes
 mutable profile/access/disabled-principal checks. New appends reject disabled
-recipients and archived spaces.
+recipients and archived spaces. Protected disable revokes credentials atomically,
+so those old tokens cannot recover even a committed append response. Archival
+alone leaves exact replay available.
 
 Record IDs are server UUIDv7; per-space sequence, not UUID order, is authoritative.
 Relations are same-space and backward-only with at most one reply-to. Records
@@ -165,7 +167,34 @@ OpenAPI declares `security: []` with explicit protected-transport extensions.
 There is no admin bearer header or public admin route.
 
 Retained commands are `principal-create`, `principal-recover`, `space-create`,
+`principal-disable`, `principal-enable`, `space-archive`, `space-unarchive`,
 `membership-set`, `credential-rotate`, `credential-revoke` and `metrics`.
+
+POST `/v1/admin/principals/state` accepts `{principal_id, disabled, reason?}`.
+The principal ID must be a lowercase UUIDv7 and is looked up by primary key,
+including when disabled. Handles, aliases and UUID-looking names never resolve
+here. The response is `{principal, disabled_at}`; `disabled_at` is null when
+enabled. POST `/v1/admin/spaces/archive` accepts `{space_id, archived, reason?}`
+and returns the space descriptor, including its optional `archived_at`.
+
+Both operations use strict object requests, required boolean desired states and
+optional non-null reasons of at most 512 Unicode scalar values. Unknown IDs
+return typed 404; malformed requests return 400. Duplicate JSON keys retain the
+transport's `invalid-json` error. Caller identity never grants admin authority.
+
+A real transition records server time and a protected audit event with desired
+state and reason. Disable also revokes every unrevoked credential in that same
+transaction and records each revocation. Enable changes no credentials. A repeat
+of the already-current state changes nothing, including timestamps, original
+reason, semantic history and external audit revision. A lost response can be
+retried with the same desired state; after an intervening reverse transition it
+is a new request to establish that state, not replay of an earlier operation.
+Archival preserves exact append replay, reads, acknowledgments and record history.
+
+Credential recovery remains explicit and preserves disabled state. A replacement
+issued explicitly during suspension is unusable until enable; it is a new binding,
+not revival of a revoked token. The usual resume flow is enable, then recovery.
+
 Credential rotation immediately revokes and replaces one principal credential
 while retaining expiration. Replacement secrets are written once to private
 files, never stdout. Lost response or file-write failure requires repeatable
