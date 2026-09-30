@@ -734,6 +734,7 @@ dependencies = [
 name = "journal-runtime-muse"
 version = "0.1.0"
 dependencies = [
+ "journal-domain",
  "journal-inbox-worker",
  "serde",
  "serde_json",
