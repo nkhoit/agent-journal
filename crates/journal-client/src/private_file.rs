@@ -6,7 +6,7 @@ pub fn lock(path: &Path) -> io::Result<std::fs::File> {
     use fs2::FileExt;
     use std::{
         fs::{self, OpenOptions},
-        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     };
     let parent = path
         .parent()
@@ -21,15 +21,29 @@ pub fn lock(path: &Path) -> io::Result<std::fs::File> {
         .file_name()
         .ok_or_else(|| io::Error::other("invalid credential path"))?;
     let lock_path = parent.join(format!(".{}.lock", name.to_string_lossy()));
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 => {
+            return Err(io::Error::other("invalid credential state lock"));
+        }
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(lock_path)?;
+        .open(&lock_path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+    let named = fs::symlink_metadata(&lock_path)?;
+    if !named.is_file()
+        || named.ino() != metadata.ino()
+        || named.dev() != metadata.dev()
+        || metadata.nlink() != 1
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
         return Err(io::Error::other("invalid credential state lock"));
     }
     file.lock_exclusive()?;
@@ -110,7 +124,19 @@ pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
 
 #[cfg(unix)]
 pub fn replace(path: &Path, expected: &[u8], contents: &[u8]) -> io::Result<()> {
-    replace_with_parent_sync(path, expected, contents, |parent| {
+    replace_with_limit(path, expected, contents, 16_384)
+}
+
+/// Replace a larger private state file using the same durable publication rules.
+/// Existing credential callers retain their 16 KiB read/replacement bound.
+#[cfg(unix)]
+pub fn replace_with_limit(
+    path: &Path,
+    expected: &[u8],
+    contents: &[u8],
+    max_bytes: u64,
+) -> io::Result<()> {
+    replace_with_parent_sync(path, expected, contents, max_bytes, |parent| {
         std::fs::File::open(parent)?.sync_all()
     })
 }
@@ -120,6 +146,7 @@ fn replace_with_parent_sync(
     path: &Path,
     expected: &[u8],
     contents: &[u8],
+    max_bytes: u64,
     sync_parent: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     use std::{
@@ -142,7 +169,12 @@ fn replace_with_parent_sync(
         return Err(io::Error::other("secret input changed during read"));
     }
     let mut actual = Vec::new();
-    current.take(16_385).read_to_end(&mut actual)?;
+    current
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut actual)?;
+    if actual.len() as u64 > max_bytes || contents.len() as u64 > max_bytes {
+        return Err(io::Error::other("private state is too large"));
+    }
     if actual != expected {
         return Err(io::Error::other("secret input changed before replacement"));
     }
@@ -158,7 +190,11 @@ fn replace_with_parent_sync(
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(contents)?;
         file.sync_all()?;
+        #[cfg(test)]
+        tests::publication_checkpoint("before-rename");
         fs::rename(&staging, path)?;
+        #[cfg(test)]
+        tests::publication_checkpoint("after-rename");
         sync_parent(parent)
     })();
     if result.is_err() {
@@ -198,6 +234,19 @@ fn create_staging(
 
 #[cfg(not(unix))]
 pub fn replace(_path: &Path, _expected: &[u8], _contents: &[u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "private credential files require Unix",
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn replace_with_limit(
+    _path: &Path,
+    _expected: &[u8],
+    _contents: &[u8],
+    _max_bytes: u64,
+) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "private credential files require Unix",
@@ -251,6 +300,72 @@ mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
 
+    pub(super) fn publication_checkpoint(boundary: &str) {
+        if std::env::var("AJ_PRIVATE_FILE_TEST_BOUNDARY").as_deref() == Ok(boundary) {
+            let marker = std::env::var("AJ_PRIVATE_FILE_TEST_MARKER").unwrap();
+            fs::write(&marker, b"ready").unwrap();
+            fs::File::open(marker).unwrap().sync_all().unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_process_helper() {
+        let Ok(path) = std::env::var("AJ_PRIVATE_FILE_TEST_PATH") else {
+            return;
+        };
+        replace_with_limit(Path::new(&path), b"pending", b"completed", 1_048_576).unwrap();
+    }
+
+    #[test]
+    fn killed_receipt_publication_leaves_complete_pending_or_completed_state() {
+        use std::{
+            process::Command,
+            time::{Duration, Instant},
+        };
+        let directory =
+            std::env::temp_dir().join(format!("private-file-kill-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        for boundary in ["before-rename", "after-rename"] {
+            let path = directory.join(boundary);
+            let marker = directory.join(format!("{boundary}-marker"));
+            write(&path, b"pending").unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "private_file::tests::replacement_process_helper"])
+                .env("AJ_PRIVATE_FILE_TEST_PATH", &path)
+                .env("AJ_PRIVATE_FILE_TEST_MARKER", &marker)
+                .env("AJ_PRIVATE_FILE_TEST_BOUNDARY", boundary)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert!(marker.exists(), "child did not reach publication boundary");
+            assert_eq!(
+                read(&path).unwrap(),
+                if boundary == "before-rename" {
+                    "pending"
+                } else {
+                    "completed"
+                }
+            );
+            if boundary == "before-rename" {
+                // The orphan from process death neither replaces evidence nor
+                // prevents the next durable publication.
+                replace_with_limit(&path, b"pending", b"completed", 1_048_576).unwrap();
+                assert_eq!(read(&path).unwrap(), "completed");
+            }
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn rename_success_is_visible_after_directory_sync_failure() {
         let directory =
@@ -260,7 +375,7 @@ mod tests {
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         let path = directory.join("registration");
         write(&path, b"pending").unwrap();
-        let error = replace_with_parent_sync(&path, b"pending", b"completed", |_| {
+        let error = replace_with_parent_sync(&path, b"pending", b"completed", 16_384, |_| {
             Err(io::Error::other("synthetic directory sync failure"))
         })
         .unwrap_err();

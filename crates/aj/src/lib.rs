@@ -2,6 +2,8 @@ use journal_client::{Client, HttpTransport, private_file};
 use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path};
 
+mod prepared_post;
+
 const USAGE: &str = "Usage: aj COMMAND [OPTIONS]
 
 Commands:
@@ -9,6 +11,7 @@ Commands:
   me --endpoint URL --credential-file PATH
   spaces --endpoint URL --credential-file PATH [--cursor CURSOR] [--limit N]
   post --endpoint URL --credential-file PATH --space SPACE --idempotency-key KEY --input PATH|- [--title TITLE]
+  post --endpoint URL --credential-file PATH --state-file PATH [--space SPACE --input PATH|-] [--idempotency-key KEY] [--title TITLE]
   get --endpoint URL --credential-file PATH --record RECORD_ID
   list --endpoint URL --credential-file PATH --space SPACE [filters]
   search --endpoint URL --credential-file PATH --space SPACE --q QUERY [filters]
@@ -222,6 +225,22 @@ fn read_input(input: &str) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
+fn post_input(
+    input: &str,
+    title: Option<&str>,
+) -> Result<journal_client::journal_protocol::AppendRecordRequest, &'static str> {
+    let bytes = read_input(input)?;
+    let mut request: journal_client::journal_protocol::AppendRecordRequest =
+        journal_client::journal_protocol::decode_json(&bytes).map_err(|_| "invalid append JSON")?;
+    if let Some(title) = title {
+        if request.title.is_some() {
+            return Err("cannot combine --title with a title in --input JSON");
+        }
+        request.title = Some(title.to_string());
+    }
+    Ok(request)
+}
+
 /// True when a post deserves the untitled-thread nudge: a newly created
 /// (not replayed) untitled root. Titled roots, replies, failures, and
 /// idempotent replays stay silent.
@@ -254,7 +273,13 @@ fn journal(
         "inbox-ack" => &["--item"],
         "me" => &[],
         "spaces" => &["--cursor", "--limit"],
-        "post" => &["--space", "--idempotency-key", "--input", "--title"],
+        "post" => &[
+            "--space",
+            "--idempotency-key",
+            "--input",
+            "--title",
+            "--state-file",
+        ],
         "get" => &["--record"],
         "thread" => &["--record", "--cursor", "--limit"],
         "search" => &[
@@ -299,6 +324,9 @@ fn journal(
             .copied()
             .ok_or("missing required command option")
     };
+    if command == "post" && options.contains_key("--state-file") {
+        return prepared_post::run(&options, output, error);
+    }
     let bytes = private_file::read(Path::new(required("--credential-file")?))
         .map_err(|_| "cannot read private credential file")?;
     let credential: OneTimePrincipalClientSecret =
@@ -346,14 +374,7 @@ fn journal(
         "search" => serde_json::to_value(client.search(token,required("--space")?,&SearchRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
         "list" => serde_json::to_value(client.list(token,required("--space")?,&ListRecordsQuery::from_query(&query).map_err(|_|"invalid filters")?).map_err(|_|"request failed")?),
         "post" => {
-            let bytes = read_input(required("--input")?)?;
-            let mut request: AppendRecordRequest = decode_json(&bytes).map_err(|_|"invalid append JSON")?;
-            if let Some(title) = options.get("--title").copied() {
-                if request.title.is_some() {
-                    return Err("cannot combine --title with a title in --input JSON");
-                }
-                request.title = Some(title.to_string());
-            }
+            let request = post_input(required("--input")?, options.get("--title").copied())?;
             let result = client.append(token,required("--space")?,required("--idempotency-key")?,&request).map_err(|_|"append failed or response lost; retry identical input with the same idempotency key")?;
             // Nudge once, on stderr, after a successful new untitled root append.
             // Replies, failures, and idempotent replays stay silent. Records are

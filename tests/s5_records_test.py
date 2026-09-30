@@ -5,6 +5,7 @@ import sqlite3
 import unittest
 
 import s4_bootstrap_test
+from prepared_post_test import PreparedPostTest
 
 
 class RecordsTest(s4_bootstrap_test.BootstrapTest):
@@ -99,5 +100,7 @@ class RecordsTest(s4_bootstrap_test.BootstrapTest):
 
 if __name__ == "__main__":
     suite = unittest.TestSuite([RecordsTest("test_journal_cli_and_lost_response")])
+    suite.addTests(PreparedPostTest(name) for name in PreparedPostTest.__dict__
+                   if name.startswith("test_"))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     raise SystemExit(not result.wasSuccessful())
