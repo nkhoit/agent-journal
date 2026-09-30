@@ -154,6 +154,115 @@ fn drop_files(drop_dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
+fn maximum_escape_heavy_record_survives_append_fetch_and_muse_handoff() {
+    use journal_inbox_worker::{Envelope, Route, Runtime};
+    let fixture = Fixture::new();
+    let metadata = "\u{0001}".repeat(wire::domain::MAX_IDENTIFIER_CHARS);
+    fixture
+        ._service
+        .create_space(&wire::SpaceCreateRequest {
+            access: wire::domain::SpaceAccess::Public,
+            id: metadata.clone(),
+            name: "Boundary space".into(),
+        })
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut daemon = start_journald(&fixture, address);
+    wait_for_journald(address, &mut daemon);
+    let client = Client::new(HttpTransport::new(&format!("http://{address}")).unwrap());
+    let mut input = wire::AppendRecordRequest {
+        kind: "note".into(),
+        content: "parent".into(),
+        attention: vec![],
+        run_id: Some(metadata.clone()),
+        routing_key: Some(metadata.clone()),
+        relations: vec![],
+        title: None,
+    };
+    let parent = client
+        .append(&fixture.principal_credential, &metadata, "parent", &input)
+        .unwrap();
+    input.content = "\u{0001}".repeat(wire::domain::MAX_CONTENT_BYTES);
+    input.attention = vec!["destination".into()];
+    input.relations = vec![wire::domain::Relation {
+        relation_type: wire::domain::RelationType::ReplyTo,
+        record_id: parent.record.id,
+    }];
+    let appended = client
+        .append(&fixture.principal_credential, &metadata, "boundary", &input)
+        .unwrap();
+    assert_eq!(appended.record.content, input.content);
+    let page = client
+        .inbox(&fixture.principal_credential, &wire::InboxQuery::default())
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    let item = &page.items[0];
+    assert!(item.acknowledged_at.is_none());
+    assert_eq!(item.record, appended.record);
+    let envelope = Envelope::from_item(item);
+    assert_eq!(envelope.source_run.as_deref(), Some(metadata.as_str()));
+    assert_eq!(envelope.routing_key.as_deref(), Some(metadata.as_str()));
+    assert_eq!(
+        envelope.reply_to,
+        Some(input.relations[0].record_id.clone())
+    );
+    let drop_dir = fixture.directory.join("boundary-drop");
+    std::fs::create_dir(&drop_dir).unwrap();
+    std::fs::set_permissions(&drop_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = journal_runtime_muse::MuseRuntime::new(drop_dir.to_str().unwrap()).unwrap();
+    let route = Route {
+        key: metadata,
+        runtime_target: "\"".repeat(255),
+        enabled: true,
+    };
+    let rendered = envelope.render();
+    let receipt = runtime
+        .inject(&route, &envelope, &rendered)
+        .expect("publish complete legal record");
+    let path = drop_dir.join(&receipt);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() > 256 * 1024);
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["body"], rendered);
+    assert_eq!(payload["routing_key"], route.key);
+    assert_eq!(payload["target_chat"], route.runtime_target);
+    assert_eq!(payload["dedupe_key"], item.inbox_item_id);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        runtime.inject(&route, &envelope, &rendered).unwrap(),
+        receipt
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    // Fetch/handoff leaves the central item pending; acknowledgment follows
+    // only after the complete file is published.
+    assert_eq!(
+        client
+            .inbox(&fixture.principal_credential, &wire::InboxQuery::default())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    client
+        .acknowledge_inbox_item(&fixture.principal_credential, &item.inbox_item_id)
+        .unwrap();
+    assert!(
+        client
+            .inbox(&fixture.principal_credential, &wire::InboxQuery::default())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 #[cfg(unix)]
 fn cli_once_drops_to_muse_then_acknowledges_with_restart_idempotence() {
     let fixture = Fixture::new();

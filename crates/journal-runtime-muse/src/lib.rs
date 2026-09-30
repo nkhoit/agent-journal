@@ -18,6 +18,7 @@
 //! seen-set on that key. Existing identical files replay without rewriting;
 //! consumed files may be recreated after a crash before acknowledgment.
 
+use journal_domain::{MAX_CONTENT_BYTES, MAX_IDENTIFIER_CHARS};
 use journal_inbox_worker::{Envelope, Route, Runtime, RuntimeError, RuntimeResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,14 +27,31 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const STATUS: &str = "supported";
 
-/// Maximum serialized drop payload: 64 KiB record body plus envelope metadata
-/// and JSON framing, with headroom. Larger payloads are rejected, not
-/// truncated.
-const MAX_DROP_BYTES: usize = 256 * 1024;
+// A content byte needs at most six JSON bytes (e.g. U+0001). Each of the
+// eight rendered metadata strings has at most MAX_IDENTIFIER_CHARS scalars:
+// quoting once in Envelope::render and again in DropPayload needs at most
+// seven bytes per scalar (\u0001 becomes \\u0001), plus four quote bytes.
+// Seven payload fields also contain identifiers quoted once: at most six
+// bytes per scalar plus two quotes. This covers four-byte UTF-8 scalars too.
+// The target permits 255 bytes, with at most twofold quote escaping. The
+// remaining fixed labels, JSON keys, separators, version and hash fit within
+// 1024 bytes; a regression checks that framing separately.
+const MAX_CHAT_ID_BYTES: usize = 255;
+const MAX_DROP_FRAMING_BYTES: usize = 1024;
+const MAX_DROP_BYTES: usize = 6 * MAX_CONTENT_BYTES
+    + 8 * (7 * MAX_IDENTIFIER_CHARS + 4)
+    + 7 * (6 * MAX_IDENTIFIER_CHARS + 2)
+    + 2 * MAX_CHAT_ID_BYTES
+    + 2
+    + MAX_DROP_FRAMING_BYTES;
+const STAGING_CREATE_ATTEMPTS: usize = 128;
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const DROP_EXTENSION: &str = ".drop.json";
 const DROP_FILE_PREFIX: &str = "muse-";
 
@@ -220,7 +238,7 @@ fn validate_drop_dir(drop_dir: &str) -> RuntimeResult<PathBuf> {
 /// as data.
 fn validate_chat_id(chat_id: &str) -> RuntimeResult<()> {
     if chat_id.is_empty()
-        || chat_id.len() > 255
+        || chat_id.len() > MAX_CHAT_ID_BYTES
         || chat_id.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
         || chat_id.contains("..")
         || chat_id.contains(['/', '\\'])
@@ -233,14 +251,24 @@ fn validate_chat_id(chat_id: &str) -> RuntimeResult<()> {
     Ok(())
 }
 
-/// Durably create the drop file: exclusive create, write, fsync the file,
-/// no-clobber publication, fsync the directory.
-fn write_drop_file(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
+fn create_staging_file(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = STAGING_SEQUENCE.fetch_add(STAGING_CREATE_ATTEMPTS as u64, Ordering::Relaxed);
+    create_staging_file_at(path, timestamp, sequence)
+}
+
+fn create_staging_file_at(
+    path: &Path,
+    timestamp: u128,
+    sequence: u64,
+) -> std::io::Result<(PathBuf, fs::File)> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or(RuntimeError::RuntimeRejected)?;
-    let staging = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
+        .ok_or_else(|| std::io::Error::other("invalid drop path"))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -248,8 +276,27 @@ fn write_drop_file(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
-        .open(&staging)
+    for offset in 0..STAGING_CREATE_ATTEMPTS {
+        let sequence = sequence.wrapping_add(offset as u64);
+        let staging = path.with_file_name(format!(
+            ".{file_name}.tmp.{}.{timestamp}.{sequence}",
+            std::process::id()
+        ));
+        match options.open(&staging) {
+            Ok(file) => return Ok((staging, file)),
+            // Clock/PID reuse can collide with an earlier process instance.
+            // Skip unknown files without removing or modifying them.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("staging candidates exhausted"))
+}
+
+/// Durably create the drop file: exclusive create, write, fsync the file,
+/// no-clobber publication, fsync the directory.
+fn write_drop_file(path: &Path, bytes: &[u8]) -> RuntimeResult<()> {
+    let (staging, mut file) = create_staging_file(path)
         .map_err(|_| RuntimeError::RuntimeUnavailable("muse drop point unavailable".into()))?;
     let result = (|| {
         file.write_all(bytes)
@@ -308,6 +355,250 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    fn private_dir(name: &str) -> PathBuf {
+        use std::os::unix::fs::DirBuilderExt;
+        let dir = std::env::temp_dir().join(format!(
+            "muse-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn assert_publication_and_replay(dir: &Path, item: &Envelope, target: &Route) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let runtime = MuseRuntime::new(dir.to_str().unwrap()).unwrap();
+        let rendered = item.render();
+        let expected = DropPayload::new(&target.runtime_target, item, &rendered);
+        let receipt = runtime.inject(target, item, &rendered).expect("publish");
+        assert_eq!(receipt, drop_file_name(&item.inbox_item_id));
+        let path = dir.join(&receipt);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes, serde_json::to_vec(&expected).unwrap());
+        let decoded: DropPayload = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, expected);
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        for _ in 0..3 {
+            assert_eq!(runtime.inject(target, item, &rendered).unwrap(), receipt);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(fs::metadata(&path).unwrap().ino(), metadata.ino());
+            assert_eq!(
+                fs::metadata(&path).unwrap().modified().unwrap(),
+                metadata.modified().unwrap()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_pid_orphan_staging_file_does_not_block_publication() {
+        let dir = private_dir("same-pid-orphan");
+        let item = envelope("item-orphan");
+        let filename = drop_file_name(&item.inbox_item_id);
+        let orphan = dir.join(format!(".{filename}.tmp.{}", std::process::id()));
+        let evidence = b"unknown interrupted attempt";
+        fs::write(&orphan, evidence).unwrap();
+        assert_publication_and_replay(&dir, &item, &route());
+        assert_eq!(fs::read(&orphan).unwrap(), evidence);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn domain_valid_control_heavy_content_is_publishable_by_muse() {
+        let input = journal_domain::RecordInput {
+            kind: "note".into(),
+            content: "\u{0001}".repeat(journal_domain::MAX_CONTENT_BYTES),
+            run_id: None,
+            attention: vec!["destination".into()],
+            routing_key: None,
+            relations: vec![],
+            title: None,
+        };
+        input.validate().unwrap();
+        let dir = private_dir("content-boundary");
+        let mut item = envelope("item-content-boundary");
+        item.body = input.content;
+        let bytes = serde_json::to_vec(&DropPayload::new("main", &item, &item.render())).unwrap();
+        assert!(bytes.len() > 256 * 1024);
+        assert_publication_and_replay(&dir, &item, &route());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maximum_content_and_metadata_publish_and_replay_without_truncation() {
+        let dir = private_dir("metadata-boundary");
+        for (index, scalar) in ["\u{0001}", "\"", "\\", "\u{1f642}"]
+            .into_iter()
+            .enumerate()
+        {
+            let metadata = scalar.repeat(MAX_IDENTIFIER_CHARS);
+            let input = journal_domain::RecordInput {
+                kind: "note".into(),
+                content: "\u{0001}".repeat(MAX_CONTENT_BYTES),
+                run_id: Some(metadata.clone()),
+                attention: vec![metadata.clone()],
+                routing_key: Some(metadata.clone()),
+                relations: vec![journal_domain::Relation {
+                    relation_type: journal_domain::RelationType::ReplyTo,
+                    record_id: metadata.clone(),
+                }],
+                title: None,
+            };
+            input.validate().unwrap();
+            // Use the wire identifier bound even for server-generated IDs,
+            // which are currently shorter UUIDs. Every rendered field is full.
+            let item = Envelope {
+                inbox_item_id: format!("{index}{}", scalar.repeat(MAX_IDENTIFIER_CHARS - 1)),
+                record_id: metadata.clone(),
+                space_id: metadata.clone(),
+                from_principal: metadata.clone(),
+                source_run: Some(metadata.clone()),
+                reply_to: Some(metadata.clone()),
+                addressed_to: metadata.clone(),
+                routing_key: Some(metadata),
+                body: input.content,
+            };
+            let mut target = route();
+            target.runtime_target = "\"".repeat(MAX_CHAT_ID_BYTES);
+            let bytes = serde_json::to_vec(&DropPayload::new(
+                &target.runtime_target,
+                &item,
+                &item.render(),
+            ))
+            .unwrap();
+            assert!(bytes.len() > 256 * 1024);
+            assert!(bytes.len() <= MAX_DROP_BYTES);
+            assert_publication_and_replay(&dir, &item, &target);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fixed_drop_framing_fits_the_derived_bound() {
+        let item = Envelope {
+            inbox_item_id: String::new(),
+            record_id: String::new(),
+            space_id: String::new(),
+            from_principal: String::new(),
+            source_run: None,
+            reply_to: None,
+            addressed_to: String::new(),
+            routing_key: None,
+            body: String::new(),
+        };
+        let bytes = serde_json::to_vec(&DropPayload::new("", &item, &item.render())).unwrap();
+        assert!(bytes.len() <= MAX_DROP_FRAMING_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_allocations_are_private_and_unique_for_each_attempt() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_dir("staging-attempts");
+        let path = dir.join(drop_file_name("item-attempts"));
+        let (first, mut file) = create_staging_file(&path).unwrap();
+        file.write_all(b"unpublished evidence").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        for _ in 0..3 {
+            let (staging, file) = create_staging_file(&path).unwrap();
+            assert_ne!(staging, first);
+            assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            drop(file);
+            fs::remove_file(staging).unwrap();
+        }
+        assert_eq!(fs::read(first).unwrap(), b"unpublished evidence");
+        assert!(!path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn occupied_staging_candidates_are_skipped_and_exhaustion_preserves_orphans() {
+        let dir = private_dir("staging-collisions");
+        let filename = drop_file_name("item-collision");
+        let path = dir.join(&filename);
+        let candidate = |timestamp, sequence| {
+            dir.join(format!(
+                ".{filename}.tmp.{}.{timestamp}.{sequence}",
+                std::process::id()
+            ))
+        };
+        let orphan = candidate(42, 0);
+        fs::write(&orphan, b"unknown orphan").unwrap();
+        let (staging, file) = create_staging_file_at(&path, 42, 0).unwrap();
+        assert_eq!(staging, candidate(42, 1));
+        drop(file);
+        fs::remove_file(staging).unwrap();
+        assert_eq!(fs::read(orphan).unwrap(), b"unknown orphan");
+        for offset in 0..STAGING_CREATE_ATTEMPTS {
+            fs::write(candidate(43, offset), b"retained evidence").unwrap();
+        }
+        assert!(create_staging_file_at(&path, 43, 0).is_err());
+        for offset in 0..STAGING_CREATE_ATTEMPTS {
+            assert_eq!(
+                fs::read(candidate(43, offset)).unwrap(),
+                b"retained evidence"
+            );
+        }
+        assert!(!path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_race_replays_exact_bytes_and_preserves_conflicts() {
+        let dir = private_dir("publication-race");
+        let path = dir.join(drop_file_name("item-race"));
+        let bytes = b"exact payload";
+        // Exercise the no-clobber branch when a final file appears after the
+        // caller's initial absence check, without relying on scheduler timing.
+        fs::write(&path, bytes).unwrap();
+        write_drop_file(&path, bytes).unwrap();
+        assert_eq!(
+            write_drop_file(&path, b"conflict"),
+            Err(RuntimeError::RuntimeRejected)
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_existing_drop_is_rejected_without_overwrite() {
+        let dir = private_dir("oversized-existing");
+        let item = envelope("item-oversized");
+        let path = dir.join(drop_file_name(&item.inbox_item_id));
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_DROP_BYTES as u64).unwrap();
+        assert_eq!(read_drop_file(&path).unwrap().len(), MAX_DROP_BYTES);
+        file.set_len(MAX_DROP_BYTES as u64 + 1).unwrap();
+        assert!(read_drop_file(&path).is_err());
+        let runtime = MuseRuntime::new(dir.to_str().unwrap()).unwrap();
+        assert_eq!(
+            runtime.inject(&route(), &item, &item.render()),
+            Err(RuntimeError::RuntimeRejected)
+        );
+        assert_eq!(
+            write_drop_file(&path, b"new payload"),
+            Err(RuntimeError::RuntimeRejected)
+        );
+        assert_eq!(file.metadata().unwrap().len(), MAX_DROP_BYTES as u64 + 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn drop_crash_child() {
         let Ok(root) = std::env::var("MUSE_CRASH_ROOT") else {
@@ -363,6 +654,16 @@ mod tests {
             assert!(!child.wait().unwrap().success());
             let path = drop_dir.join(drop_file_name("item-crash"));
             assert_eq!(path.exists(), stage == "published");
+            let orphans: Vec<_> = fs::read_dir(&drop_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|entry| entry != &path)
+                .map(|entry| {
+                    let bytes = fs::read(&entry).unwrap();
+                    (entry, bytes)
+                })
+                .collect();
+            assert_eq!(orphans.len(), 1, "killed attempt leaves its staging file");
             let runtime = MuseRuntime::new(drop_dir.to_str().unwrap()).unwrap();
             let item = envelope("item-crash");
             let receipt = runtime.inject(&route(), &item, &item.render()).unwrap();
@@ -372,6 +673,10 @@ mod tests {
                 receipt
             );
             assert_eq!(fs::read(path).unwrap(), bytes);
+            for (orphan, evidence) in orphans {
+                assert_eq!(fs::read(orphan).unwrap(), evidence);
+            }
+            assert_publication_and_replay(&drop_dir, &item, &route());
             fs::remove_dir_all(root).unwrap();
         }
     }

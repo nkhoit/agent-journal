@@ -65,12 +65,17 @@ Each item publishes `muse-<sha256(inbox_item_id)>.drop.json`. Local payload vers
 routing key, private `target_chat`, rendered body and content SHA-256.
 The key is the stable inbox item ID; there is no attempt identifier.
 
-Publication exclusively creates a private staging file, writes and fsyncs it,
-publishes without clobbering another file, removes its staging link, then syncs
+Publication exclusively creates a private staging file with a unique name per
+attempt, skipping occupied names and preserving unknown orphans. It writes and
+fsyncs the staging file, publishes without clobbering another file, removes its
+staging link, then syncs
 the directory. Exact existing payload replay syncs the file and directory before
 returning the same receipt. Conflicting, unreadable, oversized or symlink files
 fail closed without replacement. A vanished drop point is unavailable.
 Hooks must watch only published `.drop.json` files, never staging files.
+The serialized read/write cap derives from the 64 KiB content limit, worst-case
+JSON escaping and bounded metadata, including metadata quoted twice through the
+rendered envelope. Legal content and metadata are preserved without truncation.
 
 Durable drop publication is not hook processing, queued-turn durability, or model
 comprehension. If a hook consumes/removes the file before an interrupted client
