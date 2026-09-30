@@ -1,0 +1,1272 @@
+{
+  "format": 1,
+  "source_revision": "789267c8611dd00f5055606bdf4897684efc827d",
+  "harness_sha256": {
+    "scripts/measure_capacity.py": "5694855dce6ccbefbcfe50af628007b09e2410f1d3703e483602d75ce319eecc",
+    "crates/journald/examples/capacity_fixture.rs": "c94b87d727d94730ed3f7d42d788c9d87efa97ca92d3310f3690d26f76225f60"
+  },
+  "hardware": {
+    "architecture": "x86_64",
+    "os": "Linux",
+    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+    "visible_cpus": 5,
+    "cpu_max": "400000 100000",
+    "memory_max_bytes": "17179869184",
+    "filesystem_note": "disposable temp filesystem; no cold-cache isolation"
+  },
+  "config": {
+    "profile": "release (caller must build accordingly)",
+    "blocking_limit": 8,
+    "tokio_workers": 2,
+    "search_limit": 50,
+    "search_samples": 7,
+    "backup_rounds": 3,
+    "query": "synthetic common term matching every record",
+    "bounded_work_not_wall_deadline": true
+  },
+  "runs": [
+    {
+      "baseline": {
+        "addressed_every": 10,
+        "backup": [
+          {
+            "audited_append_ms": 46.184035,
+            "backup_records": 1000,
+            "copy_plus_basic_verification_ms": 28.074948,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 44.281628000000005,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.032087,
+            "preadmitted_record_count": 1000,
+            "probe_start_offset_ms": 0.7362099999999999,
+            "protected_total_ms": 43.988956,
+            "separate_full_verification_ms": 13.530409,
+            "verification_equal": true
+          },
+          {
+            "audited_append_ms": 46.496036,
+            "backup_records": 1001,
+            "copy_plus_basic_verification_ms": 27.619174,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 44.635951999999996,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.039347999999999994,
+            "preadmitted_record_count": 1001,
+            "probe_start_offset_ms": 0.611866,
+            "protected_total_ms": 44.216261,
+            "separate_full_verification_ms": 13.813278,
+            "verification_equal": true
+          },
+          {
+            "audited_append_ms": 48.132028,
+            "backup_records": 1002,
+            "copy_plus_basic_verification_ms": 28.274834,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 45.980534000000006,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.051156,
+            "preadmitted_record_count": 1002,
+            "probe_start_offset_ms": 0.6073689999999999,
+            "protected_total_ms": 45.516162,
+            "separate_full_verification_ms": 13.858645,
+            "verification_equal": true
+          }
+        ],
+        "content_bytes": 494,
+        "database_bytes": 2183168,
+        "executor": {
+          "aborted_read_waiter": {
+            "capacity_rejected_after_abort": true,
+            "drained": true,
+            "finished_after_abort": true,
+            "read_closure_ms": 13.381518,
+            "read_completed": true
+          },
+          "attempted": 240,
+          "closure_work_ms": 8885.053297999999,
+          "completed": 137,
+          "limit": 8,
+          "mean_active_closures": 6.761354577311461,
+          "peak_active_closures": 8,
+          "rejected_at_capacity": 103,
+          "search_closure": {
+            "max_ms": 129.175163,
+            "median_ms": 62.326350000000005,
+            "min_ms": 18.592231,
+            "n": 137,
+            "p95_ms": 105.883506,
+            "samples_ms": [
+              18.592231,
+              19.589377000000002,
+              23.165401,
+              23.720048000000002,
+              25.051403,
+              28.01559,
+              28.967679999999998,
+              32.473008,
+              32.960781000000004,
+              33.414132,
+              33.51411,
+              33.68636,
+              34.202999999999996,
+              35.03364,
+              35.086317,
+              36.23659,
+              36.512438,
+              36.834825,
+              37.069798,
+              37.472484,
+              37.512939,
+              37.578576000000005,
+              38.330158000000004,
+              38.671794000000006,
+              39.641019,
+              40.177874,
+              41.72245,
+              42.245053,
+              42.82325,
+              43.347876,
+              43.879012,
+              44.570676,
+              44.921611,
+              45.149564000000005,
+              45.355628,
+              45.427825,
+              45.449046,
+              45.534022,
+              46.53619,
+              47.304353,
+              47.665954000000006,
+              47.923500000000004,
+              48.284099,
+              48.661767000000005,
+              49.332034,
+              49.451832,
+              50.038961,
+              50.278946,
+              51.070403,
+              51.248591000000005,
+              52.113682000000004,
+              53.245949,
+              53.758326000000004,
+              55.818987,
+              55.96285,
+              56.501757,
+              56.739619,
+              56.763835,
+              57.411189,
+              57.693160999999996,
+              57.889211,
+              58.643633,
+              59.331766,
+              59.957657999999995,
+              60.041737999999995,
+              60.811006,
+              61.42105,
+              61.66361800000001,
+              62.326350000000005,
+              62.791127,
+              63.090751,
+              64.122308,
+              64.922968,
+              65.12271,
+              65.169889,
+              66.410916,
+              66.463874,
+              67.363511,
+              67.59265500000001,
+              68.989142,
+              69.121087,
+              71.191818,
+              71.622184,
+              72.548731,
+              73.138585,
+              73.796017,
+              73.850739,
+              75.116552,
+              75.34673699999999,
+              75.89828899999999,
+              77.520881,
+              78.350209,
+              78.689462,
+              79.232626,
+              80.962896,
+              81.290296,
+              81.624335,
+              81.66772499999999,
+              83.088048,
+              83.69849599999999,
+              84.142453,
+              84.181566,
+              84.418987,
+              85.21820500000001,
+              85.690419,
+              86.310496,
+              86.925913,
+              86.945142,
+              87.770384,
+              88.00781500000001,
+              88.736338,
+              89.550318,
+              89.762933,
+              90.87418799999999,
+              91.13919,
+              91.785286,
+              92.157567,
+              93.39370299999999,
+              94.060946,
+              94.679321,
+              95.575758,
+              95.939927,
+              97.019545,
+              97.861481,
+              98.928541,
+              99.143759,
+              99.203056,
+              99.869578,
+              101.602939,
+              102.429493,
+              105.883506,
+              106.185944,
+              106.588589,
+              108.604148,
+              112.64389700000001,
+              123.02163900000001,
+              129.175163
+            ]
+          },
+          "wall_ms": 1314.093677,
+          "workers": 12
+        },
+        "principals": 3,
+        "records": 1000,
+        "search": {
+          "rank": {
+            "max_ms": 14.263563999999999,
+            "median_ms": 13.686719,
+            "min_ms": 13.347077,
+            "n": 7,
+            "p95_ms": 14.263563999999999,
+            "samples_ms": [
+              13.347077,
+              13.383972,
+              13.538791,
+              13.686719,
+              13.876681,
+              14.189745,
+              14.263563999999999
+            ]
+          },
+          "seq": {
+            "max_ms": 5.082243,
+            "median_ms": 4.679727,
+            "min_ms": 4.6336390000000005,
+            "n": 7,
+            "p95_ms": 5.082243,
+            "samples_ms": [
+              4.6336390000000005,
+              4.660029000000001,
+              4.661361,
+              4.679727,
+              4.810631,
+              4.888527,
+              5.082243
+            ]
+          }
+        },
+        "seed_ms": 1687.346349,
+        "sqlite": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "journal_mode": "wal",
+          "page_size": 4096,
+          "sqlite_version": "3.53.2",
+          "synchronous": 2
+        },
+        "wal_bytes": 317272
+      },
+      "http_control": {
+        "wall_ms": 391.8039069999395,
+        "search_workers": 0,
+        "search_attempts_per_worker": 0,
+        "search_statuses": {},
+        "successful_search_latency": {
+          "n": 0
+        },
+        "tcp_read_disconnects_sent": 0,
+        "other_principal": {
+          "attempted_rounds": 30,
+          "statuses": {
+            "append": {
+              "201": 30
+            },
+            "inbox": {
+              "200": 30
+            },
+            "ack": {
+              "204": 30
+            }
+          },
+          "success_latency": {
+            "append": {
+              "n": 30,
+              "min_ms": 3.1890410000414704,
+              "median_ms": 3.7059050000607385,
+              "p95_ms": 5.085042000018802,
+              "max_ms": 7.154755999977169
+            },
+            "inbox": {
+              "n": 30,
+              "min_ms": 3.372902999899452,
+              "median_ms": 3.7240620000602576,
+              "p95_ms": 4.0890630000376404,
+              "max_ms": 4.641840999966007
+            },
+            "ack": {
+              "n": 30,
+              "min_ms": 2.738153000109378,
+              "median_ms": 3.127188999997088,
+              "p95_ms": 3.907804000050419,
+              "max_ms": 4.561351999996077
+            }
+          },
+          "rounds_reaching_ack": {
+            "n": 30,
+            "min_ms": 9.875358000044798,
+            "median_ms": 10.58152300004167,
+            "p95_ms": 12.523448000024473,
+            "max_ms": 15.978097000015623
+          }
+        }
+      },
+      "http_loaded": {
+        "wall_ms": 1182.1500019999576,
+        "search_workers": 12,
+        "search_attempts_per_worker": 24,
+        "search_statuses": {
+          "200": 92,
+          "503": 196
+        },
+        "successful_search_latency": {
+          "n": 92,
+          "min_ms": 16.788632000043435,
+          "median_ms": 62.350703999982215,
+          "p95_ms": 109.18888899993817,
+          "max_ms": 145.7147049999321
+        },
+        "tcp_read_disconnects_sent": 24,
+        "other_principal": {
+          "attempted_rounds": 30,
+          "statuses": {
+            "append": {
+              "503": 20,
+              "201": 10
+            },
+            "inbox": {
+              "503": 21,
+              "200": 9
+            },
+            "ack": {
+              "204": 9
+            }
+          },
+          "success_latency": {
+            "append": {
+              "n": 10,
+              "min_ms": 17.178488000013203,
+              "median_ms": 30.68684300001223,
+              "p95_ms": 54.27748299996438,
+              "max_ms": 54.27748299996438
+            },
+            "inbox": {
+              "n": 9,
+              "min_ms": 16.91901300000609,
+              "median_ms": 23.756163999905766,
+              "p95_ms": 47.4976880000213,
+              "max_ms": 47.4976880000213
+            },
+            "ack": {
+              "n": 9,
+              "min_ms": 12.91247399990425,
+              "median_ms": 27.528136999990238,
+              "p95_ms": 44.604354000057356,
+              "max_ms": 44.604354000057356
+            }
+          },
+          "rounds_reaching_ack": {
+            "n": 9,
+            "min_ms": 50.0668099999757,
+            "median_ms": 77.8767299999572,
+            "p95_ms": 141.26895899994452,
+            "max_ms": 141.26895899994452
+          },
+          "before_last_search_worker_finished": {
+            "append": {
+              "statuses": {
+                "503": 20,
+                "201": 10
+              },
+              "success_latency": {
+                "n": 10,
+                "min_ms": 17.178488000013203,
+                "median_ms": 30.68684300001223,
+                "p95_ms": 54.27748299996438,
+                "max_ms": 54.27748299996438
+              }
+            },
+            "inbox": {
+              "statuses": {
+                "503": 21,
+                "200": 9
+              },
+              "success_latency": {
+                "n": 9,
+                "min_ms": 16.91901300000609,
+                "median_ms": 23.756163999905766,
+                "p95_ms": 47.4976880000213,
+                "max_ms": 47.4976880000213
+              }
+            },
+            "ack": {
+              "statuses": {
+                "204": 9
+              },
+              "success_latency": {
+                "n": 9,
+                "min_ms": 12.91247399990425,
+                "median_ms": 27.528136999990238,
+                "p95_ms": 44.604354000057356,
+                "max_ms": 44.604354000057356
+              }
+            }
+          },
+          "last_search_worker_finished_ms": 1180.904508000026
+        }
+      },
+      "final": {
+        "final_records": 1043,
+        "full_verification_passed": true
+      }
+    },
+    {
+      "baseline": {
+        "addressed_every": 10,
+        "backup": [
+          {
+            "audited_append_ms": 219.30506699999998,
+            "backup_records": 5000,
+            "copy_plus_basic_verification_ms": 123.064433,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 216.216145,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.12257199999999999,
+            "preadmitted_record_count": 5000,
+            "probe_start_offset_ms": 0.748427,
+            "protected_total_ms": 215.061535,
+            "separate_full_verification_ms": 76.08587999999999,
+            "verification_equal": true
+          },
+          {
+            "audited_append_ms": 220.50262,
+            "backup_records": 5001,
+            "copy_plus_basic_verification_ms": 121.830225,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 217.792818,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.12486499999999999,
+            "preadmitted_record_count": 5001,
+            "probe_start_offset_ms": 0.639867,
+            "protected_total_ms": 217.335927,
+            "separate_full_verification_ms": 73.873134,
+            "verification_equal": true
+          },
+          {
+            "audited_append_ms": 209.475261,
+            "backup_records": 5002,
+            "copy_plus_basic_verification_ms": 123.25523,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 210.852506,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.184443,
+            "preadmitted_record_count": 5002,
+            "probe_start_offset_ms": 0.7920320000000001,
+            "protected_total_ms": 207.22648199999998,
+            "separate_full_verification_ms": 88.563601,
+            "verification_equal": true
+          }
+        ],
+        "content_bytes": 494,
+        "database_bytes": 9945088,
+        "executor": {
+          "aborted_read_waiter": {
+            "capacity_rejected_after_abort": true,
+            "drained": true,
+            "finished_after_abort": true,
+            "read_closure_ms": 57.012164,
+            "read_completed": true
+          },
+          "attempted": 240,
+          "closure_work_ms": 47131.86550799999,
+          "completed": 160,
+          "limit": 8,
+          "mean_active_closures": 7.64360387985659,
+          "peak_active_closures": 8,
+          "rejected_at_capacity": 80,
+          "search_closure": {
+            "max_ms": 459.93978899999996,
+            "median_ms": 292.912831,
+            "min_ms": 118.212968,
+            "n": 160,
+            "p95_ms": 405.826204,
+            "samples_ms": [
+              118.212968,
+              126.930246,
+              135.152005,
+              136.95745200000002,
+              137.637854,
+              144.743683,
+              159.29115,
+              165.876864,
+              167.60311,
+              169.344088,
+              171.828704,
+              173.872209,
+              177.265092,
+              179.28998900000002,
+              186.925573,
+              194.292262,
+              199.360393,
+              201.89845,
+              204.380075,
+              206.700685,
+              208.71769700000002,
+              209.528038,
+              209.77913900000001,
+              213.31455899999997,
+              216.273473,
+              217.685884,
+              217.99383,
+              222.068175,
+              222.159112,
+              222.50518,
+              223.84586000000002,
+              224.568926,
+              225.015721,
+              225.234637,
+              226.577223,
+              227.51782300000002,
+              227.95856,
+              228.312328,
+              228.809679,
+              228.83673199999998,
+              228.92553199999998,
+              229.493051,
+              231.84854299999998,
+              232.117146,
+              233.500157,
+              234.06766000000002,
+              234.201538,
+              240.004951,
+              242.38094800000002,
+              243.133262,
+              243.632441,
+              244.164027,
+              249.17497899999998,
+              250.58809599999998,
+              256.92711499999996,
+              257.099489,
+              258.989392,
+              260.87149700000003,
+              261.849977,
+              268.90065899999996,
+              269.165082,
+              269.385671,
+              271.217823,
+              273.888445,
+              274.128101,
+              276.51509400000003,
+              279.210004,
+              279.915978,
+              281.042933,
+              281.168192,
+              281.421937,
+              282.13802799999996,
+              282.695598,
+              286.08851699999997,
+              287.04786,
+              289.377943,
+              290.218768,
+              291.073088,
+              291.53569,
+              292.461484,
+              292.912831,
+              294.464848,
+              294.967363,
+              296.80412099999995,
+              297.281824,
+              297.38518600000003,
+              301.220648,
+              302.029044,
+              305.490582,
+              308.91186799999997,
+              310.02884600000004,
+              316.343908,
+              319.362643,
+              321.41931800000003,
+              321.754297,
+              324.162107,
+              324.42832100000004,
+              327.00482,
+              327.982624,
+              330.133802,
+              332.422455,
+              333.259384,
+              334.631495,
+              336.421224,
+              336.988815,
+              341.14889700000003,
+              345.04046700000004,
+              345.371641,
+              346.282812,
+              346.675913,
+              346.771709,
+              347.55456000000004,
+              349.022601,
+              349.02962199999996,
+              350.59746800000005,
+              350.609351,
+              351.896983,
+              355.716887,
+              356.73431100000005,
+              357.610283,
+              360.557455,
+              361.366717,
+              363.329907,
+              366.106977,
+              368.91893799999997,
+              369.647286,
+              370.678583,
+              373.28540599999997,
+              374.33319,
+              374.420035,
+              375.699419,
+              377.04479499999997,
+              377.924938,
+              378.60513299999997,
+              380.584539,
+              381.16891499999997,
+              382.711869,
+              383.011638,
+              383.225981,
+              383.230642,
+              383.977387,
+              386.923613,
+              388.41621799999996,
+              389.092149,
+              390.714004,
+              390.94061899999997,
+              397.79990399999997,
+              398.356351,
+              398.63589,
+              401.705533,
+              405.780135,
+              405.826204,
+              410.412939,
+              419.862032,
+              426.688663,
+              429.530725,
+              429.968237,
+              432.356493,
+              455.378257,
+              459.93978899999996
+            ]
+          },
+          "wall_ms": 6166.1836809999995,
+          "workers": 12
+        },
+        "principals": 3,
+        "records": 5000,
+        "search": {
+          "rank": {
+            "max_ms": 59.380541,
+            "median_ms": 57.389844000000004,
+            "min_ms": 56.030152,
+            "n": 7,
+            "p95_ms": 59.380541,
+            "samples_ms": [
+              56.030152,
+              56.152642,
+              56.277088000000006,
+              57.389844000000004,
+              57.980118,
+              58.167145000000005,
+              59.380541
+            ]
+          },
+          "seq": {
+            "max_ms": 15.58438,
+            "median_ms": 10.952132,
+            "min_ms": 9.814468,
+            "n": 7,
+            "p95_ms": 15.58438,
+            "samples_ms": [
+              9.814468,
+              10.242992,
+              10.453674,
+              10.952132,
+              11.120011000000002,
+              11.238887,
+              15.58438
+            ]
+          }
+        },
+        "seed_ms": 10140.874679999999,
+        "sqlite": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "journal_mode": "wal",
+          "page_size": 4096,
+          "sqlite_version": "3.53.2",
+          "synchronous": 2
+        },
+        "wal_bytes": 333752
+      },
+      "http_control": {
+        "wall_ms": 446.332282999947,
+        "search_workers": 0,
+        "search_attempts_per_worker": 0,
+        "search_statuses": {},
+        "successful_search_latency": {
+          "n": 0
+        },
+        "tcp_read_disconnects_sent": 0,
+        "other_principal": {
+          "attempted_rounds": 30,
+          "statuses": {
+            "append": {
+              "201": 30
+            },
+            "inbox": {
+              "200": 30
+            },
+            "ack": {
+              "204": 30
+            }
+          },
+          "success_latency": {
+            "append": {
+              "n": 30,
+              "min_ms": 3.9148060000115947,
+              "median_ms": 4.3682210000497435,
+              "p95_ms": 5.132196999966254,
+              "max_ms": 6.2243840000064665
+            },
+            "inbox": {
+              "n": 30,
+              "min_ms": 3.5073420000344413,
+              "median_ms": 3.9322810000612662,
+              "p95_ms": 6.083334999971157,
+              "max_ms": 6.951661000016429
+            },
+            "ack": {
+              "n": 30,
+              "min_ms": 3.536183999926834,
+              "median_ms": 3.84498200003236,
+              "p95_ms": 5.180418999998437,
+              "max_ms": 6.036275999917962
+            }
+          },
+          "rounds_reaching_ack": {
+            "n": 30,
+            "min_ms": 11.4995619999263,
+            "median_ms": 12.563858000021355,
+            "p95_ms": 15.04676800004745,
+            "max_ms": 15.224786999965545
+          }
+        }
+      },
+      "http_loaded": {
+        "wall_ms": 6292.122384999971,
+        "search_workers": 12,
+        "search_attempts_per_worker": 24,
+        "search_statuses": {
+          "200": 166,
+          "503": 122
+        },
+        "successful_search_latency": {
+          "n": 166,
+          "min_ms": 73.97406799998407,
+          "median_ms": 254.01292100002593,
+          "p95_ms": 429.3633329999693,
+          "max_ms": 515.766499999927
+        },
+        "tcp_read_disconnects_sent": 24,
+        "other_principal": {
+          "attempted_rounds": 30,
+          "statuses": {
+            "append": {
+              "503": 30
+            },
+            "inbox": {
+              "503": 30
+            },
+            "ack": {}
+          },
+          "success_latency": {
+            "append": {
+              "n": 0
+            },
+            "inbox": {
+              "n": 0
+            },
+            "ack": {
+              "n": 0
+            }
+          },
+          "rounds_reaching_ack": {
+            "n": 0
+          },
+          "before_last_search_worker_finished": {
+            "append": {
+              "statuses": {
+                "503": 30
+              },
+              "success_latency": {
+                "n": 0
+              }
+            },
+            "inbox": {
+              "statuses": {
+                "503": 30
+              },
+              "success_latency": {
+                "n": 0
+              }
+            },
+            "ack": {
+              "statuses": {},
+              "success_latency": {
+                "n": 0
+              }
+            }
+          },
+          "last_search_worker_finished_ms": 6291.043517999924
+        }
+      },
+      "final": {
+        "final_records": 5033,
+        "full_verification_passed": true
+      }
+    },
+    {
+      "baseline": {
+        "addressed_every": 10,
+        "backup": [
+          {
+            "audited_append_ms": 408.278144,
+            "backup_records": 10000,
+            "copy_plus_basic_verification_ms": 250.702104,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 404.667328,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.382536,
+            "preadmitted_record_count": 10000,
+            "probe_start_offset_ms": 0.869497,
+            "protected_total_ms": 403.882346,
+            "separate_full_verification_ms": 165.038144,
+            "verification_equal": true
+          },
+          {
+            "audited_append_ms": 414.417207,
+            "backup_records": 10001,
+            "copy_plus_basic_verification_ms": 247.005144,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 411.17832799999996,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.23607899999999998,
+            "preadmitted_record_count": 10001,
+            "probe_start_offset_ms": 0.643082,
+            "protected_total_ms": 410.470615,
+            "separate_full_verification_ms": 156.631319,
+            "verification_equal": true
+          },
+          {
+            "audited_append_ms": 405.313786,
+            "backup_records": 10002,
+            "copy_plus_basic_verification_ms": 244.96490400000002,
+            "durable_backup_timestamp_present": true,
+            "new_read_ms": 402.336749,
+            "observed_destination_while_backup_running": true,
+            "preadmitted_read_ms": 0.238343,
+            "preadmitted_record_count": 10002,
+            "probe_start_offset_ms": 0.629422,
+            "protected_total_ms": 401.135866,
+            "separate_full_verification_ms": 154.941137,
+            "verification_equal": true
+          }
+        ],
+        "content_bytes": 494,
+        "database_bytes": 19656704,
+        "executor": {
+          "aborted_read_waiter": {
+            "capacity_rejected_after_abort": true,
+            "drained": true,
+            "finished_after_abort": true,
+            "read_closure_ms": 117.80305100000001,
+            "read_completed": true
+          },
+          "attempted": 240,
+          "closure_work_ms": 83106.22276599996,
+          "completed": 160,
+          "limit": 8,
+          "mean_active_closures": 7.6639779605072045,
+          "peak_active_closures": 8,
+          "rejected_at_capacity": 80,
+          "search_closure": {
+            "max_ms": 783.1125420000001,
+            "median_ms": 559.264927,
+            "min_ms": 159.53135500000002,
+            "n": 160,
+            "p95_ms": 734.6342930000001,
+            "samples_ms": [
+              159.53135500000002,
+              184.574429,
+              189.899813,
+              214.50244199999997,
+              214.689103,
+              245.934195,
+              247.427479,
+              271.500415,
+              282.939577,
+              284.782791,
+              289.763874,
+              291.81124600000004,
+              294.566802,
+              296.94505,
+              298.328803,
+              299.076014,
+              299.949817,
+              306.44681,
+              306.88645599999995,
+              307.39891400000005,
+              307.69273400000003,
+              310.677797,
+              311.112505,
+              321.647781,
+              323.185728,
+              327.294751,
+              329.751116,
+              330.24781199999995,
+              330.966526,
+              331.113681,
+              331.404365,
+              334.64300000000003,
+              336.66364100000004,
+              338.96977499999997,
+              350.71621400000004,
+              351.342958,
+              354.633979,
+              356.233442,
+              359.17325500000004,
+              359.92728800000003,
+              369.69178400000004,
+              372.658556,
+              373.349594,
+              382.686725,
+              399.410005,
+              405.729697,
+              409.267464,
+              417.928545,
+              418.176682,
+              418.69860800000004,
+              426.781727,
+              431.11787499999997,
+              443.432906,
+              444.454437,
+              448.85961000000003,
+              452.371868,
+              452.714024,
+              454.27146,
+              462.806831,
+              469.633849,
+              474.642764,
+              474.729801,
+              482.836971,
+              485.31524199999996,
+              507.642853,
+              507.950243,
+              508.588488,
+              510.03925100000004,
+              511.0933600000001,
+              512.957424,
+              513.523762,
+              525.765367,
+              529.759909,
+              532.041026,
+              535.400785,
+              539.1703799999999,
+              546.8546309999999,
+              547.230039,
+              552.3974310000001,
+              556.727185,
+              559.264927,
+              560.8656,
+              561.148074,
+              564.669592,
+              566.1451069999999,
+              570.87997,
+              572.1871560000001,
+              574.227571,
+              581.087294,
+              581.408126,
+              588.4647130000001,
+              588.9967780000001,
+              589.51658,
+              592.9133250000001,
+              593.24163,
+              593.268786,
+              594.119831,
+              597.690414,
+              601.2687719999999,
+              601.492924,
+              603.556565,
+              605.5847210000001,
+              606.243917,
+              606.248935,
+              609.083065,
+              612.031043,
+              614.9679219999999,
+              617.8319,
+              620.04579,
+              622.854668,
+              624.373735,
+              625.238085,
+              628.3568859999999,
+              629.709027,
+              631.246537,
+              632.405631,
+              633.855995,
+              634.693401,
+              635.0618999999999,
+              635.779629,
+              638.709168,
+              642.5010540000001,
+              649.307732,
+              651.7828,
+              653.9196440000001,
+              658.526935,
+              663.932275,
+              669.602038,
+              669.87055,
+              676.565687,
+              681.529269,
+              682.15779,
+              685.202179,
+              686.2318750000001,
+              688.5757070000001,
+              689.487671,
+              691.02723,
+              691.701683,
+              695.597008,
+              708.611789,
+              709.383769,
+              710.977352,
+              713.344937,
+              719.331399,
+              720.0222040000001,
+              720.6676699999999,
+              727.937048,
+              728.976224,
+              729.254373,
+              730.6651899999999,
+              731.5305589999999,
+              734.6342930000001,
+              739.202384,
+              743.629479,
+              752.604172,
+              765.4011370000001,
+              767.715476,
+              773.2460289999999,
+              774.6570310000001,
+              783.1125420000001
+            ]
+          },
+          "wall_ms": 10843.745009999999,
+          "workers": 12
+        },
+        "principals": 3,
+        "records": 10000,
+        "search": {
+          "rank": {
+            "max_ms": 116.137304,
+            "median_ms": 110.131212,
+            "min_ms": 107.685433,
+            "n": 7,
+            "p95_ms": 116.137304,
+            "samples_ms": [
+              107.685433,
+              109.295456,
+              110.074579,
+              110.131212,
+              111.777659,
+              115.471037,
+              116.137304
+            ]
+          },
+          "seq": {
+            "max_ms": 17.319497,
+            "median_ms": 16.374959,
+            "min_ms": 15.756763999999999,
+            "n": 7,
+            "p95_ms": 17.319497,
+            "samples_ms": [
+              15.756763999999999,
+              16.219349,
+              16.288932,
+              16.374959,
+              16.536398000000002,
+              17.103498000000002,
+              17.319497
+            ]
+          }
+        },
+        "seed_ms": 23449.875483,
+        "sqlite": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "journal_mode": "wal",
+          "page_size": 4096,
+          "sqlite_version": "3.53.2",
+          "synchronous": 2
+        },
+        "wal_bytes": 325512
+      },
+      "http_control": {
+        "wall_ms": 492.09563499994147,
+        "search_workers": 0,
+        "search_attempts_per_worker": 0,
+        "search_statuses": {},
+        "successful_search_latency": {
+          "n": 0
+        },
+        "tcp_read_disconnects_sent": 0,
+        "other_principal": {
+          "attempted_rounds": 30,
+          "statuses": {
+            "append": {
+              "201": 30
+            },
+            "inbox": {
+              "200": 30
+            },
+            "ack": {
+              "204": 30
+            }
+          },
+          "success_latency": {
+            "append": {
+              "n": 30,
+              "min_ms": 4.498409000007086,
+              "median_ms": 4.999219999945126,
+              "p95_ms": 7.877290000010362,
+              "max_ms": 8.68643899991639
+            },
+            "inbox": {
+              "n": 30,
+              "min_ms": 3.265783999950145,
+              "median_ms": 4.035833999978422,
+              "p95_ms": 4.960282999945775,
+              "max_ms": 5.563936000044123
+            },
+            "ack": {
+              "n": 30,
+              "min_ms": 3.917559000001347,
+              "median_ms": 4.448765999995885,
+              "p95_ms": 6.9248300000026575,
+              "max_ms": 7.225504999951227
+            }
+          },
+          "rounds_reaching_ack": {
+            "n": 30,
+            "min_ms": 12.360345999923084,
+            "median_ms": 13.913575000060519,
+            "p95_ms": 17.101044000014554,
+            "max_ms": 17.3162419999926
+          }
+        }
+      },
+      "http_loaded": {
+        "wall_ms": 13580.605483999989,
+        "search_workers": 12,
+        "search_attempts_per_worker": 24,
+        "search_statuses": {
+          "200": 192,
+          "503": 96
+        },
+        "successful_search_latency": {
+          "n": 192,
+          "min_ms": 194.7924990000729,
+          "median_ms": 563.5935160000827,
+          "p95_ms": 748.1607030000532,
+          "max_ms": 850.3360370000337
+        },
+        "tcp_read_disconnects_sent": 24,
+        "other_principal": {
+          "attempted_rounds": 30,
+          "statuses": {
+            "append": {
+              "503": 30
+            },
+            "inbox": {
+              "503": 30
+            },
+            "ack": {}
+          },
+          "success_latency": {
+            "append": {
+              "n": 0
+            },
+            "inbox": {
+              "n": 0
+            },
+            "ack": {
+              "n": 0
+            }
+          },
+          "rounds_reaching_ack": {
+            "n": 0
+          },
+          "before_last_search_worker_finished": {
+            "append": {
+              "statuses": {
+                "503": 30
+              },
+              "success_latency": {
+                "n": 0
+              }
+            },
+            "inbox": {
+              "statuses": {
+                "503": 30
+              },
+              "success_latency": {
+                "n": 0
+              }
+            },
+            "ack": {
+              "statuses": {},
+              "success_latency": {
+                "n": 0
+              }
+            }
+          },
+          "last_search_worker_finished_ms": 13579.268360000015
+        }
+      },
+      "final": {
+        "final_records": 10033,
+        "full_verification_passed": true
+      }
+    }
+  ]
+}
