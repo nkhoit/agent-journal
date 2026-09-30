@@ -29,6 +29,16 @@ fn execute(
         "principal-create" if a.len() == 2 => serde_json::to_value(client.create_principal(
             &PrincipalCreateRequest { handle: a[0].clone(), display_name: a[1].clone() })
             .map_err(|_| "principal creation failed")?),
+        "principal-disable" | "principal-enable" if a.len() == 1 || a.len() == 2 =>
+            serde_json::to_value(client.set_principal_state(&PrincipalStateRequest {
+                principal_id: a[0].clone(), disabled: args[2] == "principal-disable",
+                reason: a.get(1).cloned(),
+            }).map_err(|_| "principal state update failed; retry the same desired state by UUID")?),
+        "space-archive" | "space-unarchive" if a.len() == 1 || a.len() == 2 =>
+            serde_json::to_value(client.set_space_archive(&SpaceArchiveRequest {
+                space_id: a[0].clone(), archived: args[2] == "space-archive",
+                reason: a.get(1).cloned(),
+            }).map_err(|_| "space archive update failed; retry the same desired state by ID")?),
         "space-create" if a.len() == 2 => serde_json::to_value(client.create_space(
             &SpaceCreateRequest { access: domain::SpaceAccess::Public, id: a[0].clone(), name: a[1].clone() })
             .map_err(|_| "space creation failed")?),
@@ -83,7 +93,7 @@ fn execute(
             })?;
             return Ok(());
         },
-        _ => return Err("commands: metrics; principal-create HANDLE DISPLAY_NAME; principal-recover PRINCIPAL_UUID OUTPUT [REASON]; space-create ID NAME; membership-set SPACE PRINCIPAL READ APPEND ADMIN; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]"),
+        _ => return Err("commands: metrics; principal-create HANDLE DISPLAY_NAME; principal-disable PRINCIPAL_UUID [REASON]; principal-enable PRINCIPAL_UUID [REASON]; principal-recover PRINCIPAL_UUID OUTPUT [REASON]; space-create ID NAME; space-archive SPACE_ID [REASON]; space-unarchive SPACE_ID [REASON]; membership-set SPACE PRINCIPAL READ APPEND ADMIN; credential-rotate ID OUTPUT [REASON]; credential-revoke ID [REASON]"),
     }.map_err(|_| "cannot encode response")?;
     serde_json::to_writer(&mut *output, &value).map_err(|_| "cannot write response")?;
     writeln!(output).map_err(|_| "cannot write response")

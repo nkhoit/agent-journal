@@ -94,6 +94,9 @@ fn normative_wire_examples_round_trip_through_typed_dtos() {
     example!(domain::Principal, "Principal");
     example!(RegistrationRequest, "RegistrationRequest");
     example!(RegistrationReceipt, "RegistrationReceipt");
+    example!(PrincipalStateRequest, "PrincipalStateRequest");
+    example!(PrincipalStateResponse, "PrincipalStateResponse");
+    example!(SpaceArchiveRequest, "SpaceArchiveRequest");
     example!(domain::Relation, "Relation");
     example!(Membership, "Membership");
     example!(domain::Limits, "Limits");
@@ -635,4 +638,108 @@ fn retired_credential_class_is_not_a_wire_authority() {
         decode_json::<CredentialClass>(br#""principal-client""#).unwrap(),
         CredentialClass::PrincipalClient
     );
+}
+
+#[test]
+fn lifecycle_requests_require_typed_desired_state_and_exact_identifiers() {
+    assert_required_fields::<PrincipalStateResponse>(
+        wire_example("PrincipalStateResponse").clone(),
+        &["principal", "disabled_at"],
+    );
+    assert!(
+        decode_json::<PrincipalStateRequest>(
+            br#"["018f1f59-6e90-7000-8000-000000000001",true,"reason"]"#
+        )
+        .is_err()
+    );
+    assert!(decode_json::<SpaceArchiveRequest>(br#"["space",true,"reason"]"#).is_err());
+    for reason in [None, Some("".into()), Some("界".repeat(512))] {
+        PrincipalStateRequest {
+            principal_id: "018f1f59-6e90-7000-8000-000000000001".into(),
+            disabled: true,
+            reason: reason.clone(),
+        }
+        .validate()
+        .unwrap();
+        SpaceArchiveRequest {
+            space_id: "space".into(),
+            archived: true,
+            reason,
+        }
+        .validate()
+        .unwrap();
+    }
+    assert!(
+        PrincipalStateRequest {
+            principal_id: "018f1f59-6e90-7000-8000-000000000001".into(),
+            disabled: true,
+            reason: Some("界".repeat(513))
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        SpaceArchiveRequest {
+            space_id: "space".into(),
+            archived: true,
+            reason: Some("界".repeat(513))
+        }
+        .validate()
+        .is_err()
+    );
+    for subject in [
+        "handle",
+        "018f1f59-6e90-4000-8000-000000000001",
+        "018F1f59-6e90-7000-8000-000000000001",
+    ] {
+        assert!(
+            PrincipalStateRequest {
+                principal_id: subject.into(),
+                disabled: true,
+                reason: None
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    for value in [
+        json!([]),
+        json!({"principal_id":"id"}),
+        json!({"principal_id":"id","disabled":null}),
+        json!({"principal_id":"id","disabled":"true"}),
+        json!({"principal_id":"id","disabled":true,"reason":null}),
+        json!({"principal_id":"id","disabled":true,"extra":1}),
+    ] {
+        assert!(decode_json::<PrincipalStateRequest>(value.to_string().as_bytes()).is_err());
+    }
+    for value in [
+        json!([]),
+        json!({"space_id":"space"}),
+        json!({"space_id":"space","archived":null}),
+        json!({"space_id":"space","archived":"true"}),
+        json!({"space_id":"space","archived":true,"reason":null}),
+        json!({"space_id":"space","archived":true,"extra":1}),
+    ] {
+        assert!(decode_json::<SpaceArchiveRequest>(value.to_string().as_bytes()).is_err());
+    }
+    assert!(
+        decode_json::<PrincipalStateRequest>(
+            br#"{"principal_id":"id","disabled":true,"disabled":false}"#
+        )
+        .is_err()
+    );
+    assert!(
+        decode_json::<SpaceArchiveRequest>(
+            br#"{"space_id":"space","archived":true,"archived":false}"#
+        )
+        .is_err()
+    );
+    let response: PrincipalStateResponse = decode_json(
+        wire_example("PrincipalStateResponse")
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert!(response.principal.disabled);
+    assert!(response.disabled_at.is_some());
 }

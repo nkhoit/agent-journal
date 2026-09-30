@@ -2169,6 +2169,20 @@ mod tests {
         } else {
             let mut connection = database.connect_unchecked().unwrap();
             let transaction = connection.transaction().unwrap();
+            // Lifecycle state, revocations and retained reason history share
+            // the same prepare/central-commit boundary as every audited write.
+            transaction.execute_batch(
+                "UPDATE principals SET disabled_at='2026-01-02T00:00:00Z';
+                 UPDATE spaces SET archived_at='2026-01-02T00:00:00Z';
+                 UPDATE credentials SET revoked_at='2026-01-02T00:00:00Z',revocation_reason='suspended';
+                 INSERT INTO credential_audit(credential_id,operation,occurred_at,reason)
+                     VALUES('c','revoked','2026-01-02T00:00:00Z','suspended');
+                 INSERT INTO audit_events(id,event_type,subject_type,subject_id,detail_json,created_at)
+                     VALUES('disable','principal-state-changed','principal','018f1f59-6e90-7000-8000-000000000001',
+                            '{\"disabled\":true,\"reason\":\"suspended\"}','2026-01-02T00:00:00Z'),
+                           ('archive','space-archive-changed','space','s',
+                            '{\"archived\":true,\"reason\":\"completed\"}','2026-01-02T00:00:00Z');"
+            ).unwrap();
             transaction
                 .execute("UPDATE memberships SET can_read=0", [])
                 .unwrap();
@@ -2235,6 +2249,26 @@ mod tests {
             }
             assert!(audit.ensure_open(&database).is_err(), "{stage}");
             if stage == "prepared" || stage == "committed" {
+                let connection = database.connect_unchecked().unwrap();
+                for (table, column) in [
+                    ("principals", "disabled_at"),
+                    ("spaces", "archived_at"),
+                    ("credentials", "revoked_at"),
+                ] {
+                    let changed: bool = connection
+                        .query_row(
+                            &format!("SELECT {column} IS NOT NULL FROM {table}"),
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(changed, stage == "committed", "{stage}: {table}");
+                }
+                let history: i64 = connection
+                    .query_row("SELECT count(*) FROM audit_events", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(history, if stage == "committed" { 2 } else { 0 });
+                drop(connection);
                 let before = snapshot(&database.connect_unchecked().unwrap()).unwrap();
                 let evidence = head(&audit.connection().unwrap()).unwrap();
                 // An unresolved intent keeps its predecessor as evidence.

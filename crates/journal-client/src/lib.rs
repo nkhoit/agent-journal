@@ -461,6 +461,22 @@ impl Client {
         self.json("/v1/admin/principals/recover", input, None)
     }
 
+    pub fn set_principal_state(
+        &self,
+        input: &journal_protocol::PrincipalStateRequest,
+    ) -> Result<journal_protocol::PrincipalStateResponse, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/principals/state", input, None)
+    }
+
+    pub fn set_space_archive(
+        &self,
+        input: &journal_protocol::SpaceArchiveRequest,
+    ) -> Result<journal_protocol::domain::Space, ClientError> {
+        input.validate().map_err(|_| ClientError::InvalidRequest)?;
+        self.json("/v1/admin/spaces/archive", input, None)
+    }
+
     fn mutate(&self, path: &str, input: &impl serde::Serialize) -> Result<(), ClientError> {
         let mut request = Request::new(
             "POST",

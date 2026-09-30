@@ -37,6 +37,8 @@ EXPECTED_OPERATIONS = {'acknowledgeInboxItem': ('POST', '/v1/inbox/{item_id}/ack
  'revokeCredential': ('POST', '/v1/admin/credentials/revoke'),
  'rotateCredential': ('POST', '/v1/admin/credentials/rotate'),
  'searchRecords': ('GET', '/v1/spaces/{space}/search'),
+ 'setPrincipalState': ('POST', '/v1/admin/principals/state'),
+ 'setSpaceArchive': ('POST', '/v1/admin/spaces/archive'),
  'updateProfile': ('PATCH', '/v1/me/profile')}
 EXPECTED_PATHS = {path for _, path in EXPECTED_OPERATIONS.values()}
 ADMIN_OPERATIONS = {
@@ -68,6 +70,7 @@ REQUIRED_RESPONSE_FIELDS = {'AppendRecordResponse': {'replayed', 'mailbox_create
  'Principal': {'disabled', 'display_name', 'id', 'handle', 'created_at', 'profile_revision'},
  'PrincipalPage': {'items', 'next_cursor'},
  'PrincipalRecoveryResponse': {'replacement_secret', 'principal'},
+ 'PrincipalStateResponse': {'principal', 'disabled_at'},
  'ReceiptStatusPage': {'items', 'next_cursor'},
  'ReceiptSummary': {'state', 'recipient', 'created_at', 'inbox_item_id', 'acknowledged_at'},
  'Record': {'seq', 'relations', 'author', 'content', 'id', 'space_id', 'kind', 'created_at'},
@@ -91,6 +94,8 @@ REQUEST_SCHEMA_FIELDS = {'AppendRecordRequest': ({'run_id', 'content', 'relation
  'CredentialRevokeRequest': ({'credential_id', 'reason'}, {'credential_id'}),
  'CredentialRotateRequest': ({'credential_id', 'reason'}, {'credential_id'}),
  'PrincipalRecoveryRequest': ({'principal_id', 'reason'}, {'principal_id'}),
+ 'PrincipalStateRequest': ({'principal_id', 'disabled', 'reason'}, {'principal_id', 'disabled'}),
+ 'SpaceArchiveRequest': ({'space_id', 'archived', 'reason'}, {'space_id', 'archived'}),
  'ProfileUpdateRequest': ({'expected_profile_revision', 'display_name', 'description', 'handle'},
                           {'expected_profile_revision', 'display_name', 'handle'}),
  'RegistrationRequest': ({'display_name', 'handle'}, {'display_name', 'handle'}),
@@ -104,6 +109,8 @@ EXPECTED_REQUESTS = {'appendRecord': ('AppendRecordRequest', True),
  'registerPrincipal': ('RegistrationRequest', True),
  'revokeCredential': ('CredentialRevokeRequest', True),
  'rotateCredential': ('CredentialRotateRequest', True),
+ 'setPrincipalState': ('PrincipalStateRequest', True),
+ 'setSpaceArchive': ('SpaceArchiveRequest', True),
  'updateProfile': ('ProfileUpdateRequest', True)}
 EXPECTED_SUCCESS_RESPONSES = {'acknowledgeInboxItem': ('204', None),
  'appendRecord': ('201', 'AppendRecordResponse'),
@@ -127,6 +134,8 @@ EXPECTED_SUCCESS_RESPONSES = {'acknowledgeInboxItem': ('204', None),
  'revokeCredential': ('204', None),
  'rotateCredential': ('200', 'CredentialRotationResponse'),
  'searchRecords': ('200', 'SearchPage'),
+ 'setPrincipalState': ('200', 'PrincipalStateResponse'),
+ 'setSpaceArchive': ('200', 'Space'),
  'updateProfile': ('200', 'Principal')}
 PAGINATED_OPERATIONS = {'getInbox',
  'getRecordDeliveryStatus',
@@ -146,7 +155,10 @@ EXPECTED_ADMIN_PARAMETER_REFS = {'createPrincipal': (),
  'grantMembership': (),
  'recoverPrincipalCredential': (),
  'revokeCredential': (),
- 'rotateCredential': ()}
+ 'rotateCredential': (),
+ 'setPrincipalState': (),
+ 'setSpaceArchive': ()}
+
 
 
 def fail(message: str) -> None:
@@ -477,6 +489,16 @@ def validate_request_contract(
         access = schemas.get(name, {}).get("properties", {}).get("access", {})
         if access.get("type") != "string" or access.get("enum") != ["public"] or "default" in access:
             fail(f"{name} access must explicitly accept public only without a default")
+    principal_id = schemas["PrincipalStateRequest"]["properties"]["principal_id"]
+    if (principal_id.get("type") != "string" or principal_id.get("format") != "uuid"
+            or principal_id.get("pattern") != r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"):
+        fail("PrincipalStateRequest principal_id must be an exact lowercase UUIDv7")
+    for name, state in (("PrincipalStateRequest", "disabled"), ("SpaceArchiveRequest", "archived")):
+        properties = schemas[name]["properties"]
+        if properties[state] != {"type": "boolean"}:
+            fail(f"{name} {state} must be a boolean desired state")
+        if properties["reason"] != {"type": "string", "maxLength": 512}:
+            fail(f"{name} reason must be a non-null bounded string")
     append_operation = operations["appendRecord"][2]
     parameter_refs = {
         parameter.get("$ref")

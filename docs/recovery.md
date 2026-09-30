@@ -62,8 +62,13 @@ approving it cannot manufacture certainty.
 
 Snapshots retain current principal/profile/name, public-space and membership
 metadata, credential/digest/registration bindings, security history, space heads
-and recipient allocation high-water marks. They never contain plaintext bearer
-secrets. They do not snapshot record relations or all inbox receipts.
+and recipient allocation high-water marks. They include principal disabled and
+space archived state and all lifecycle transition/reason events.
+Older-backup reconciliation applies the latest audited
+state, including enable/unarchive reversals, while retaining revoked bindings
+and original history. It never silently revives credentials or discards a later
+archive. They never contain plaintext bearer secrets. They do not snapshot record
+relations or all inbox receipts.
 
 The audit keeps every revision's number, outcome and timestamp, but only the
 head revision keeps its snapshot body. Resolving a revision (committed or

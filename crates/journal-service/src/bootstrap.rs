@@ -14,6 +14,8 @@ use crate::Clock;
 
 #[path = "inbox.rs"]
 mod inbox;
+#[path = "lifecycle.rs"]
+mod lifecycle;
 #[path = "records.rs"]
 mod records;
 

@@ -61,7 +61,7 @@ impl InboxArrivals {
             .subscribe()
     }
 
-    /// Called after a committed append created inbox items. Waiters re-query
+    /// Called after a committed append or principal disable. Waiters re-query
     /// under their own credentials, so only the generation needs to advance.
     fn notify(&self, recipients: &[String]) {
         let mut waiters = self.waiters();
@@ -421,6 +421,48 @@ admin_handler!(
     OK,
     |s: BootstrapService, r| s.recover_principal(&r)
 );
+admin_handler!(
+    set_space_archive,
+    journal_protocol::SpaceArchiveRequest,
+    OK,
+    |s: BootstrapService, r| s.set_space_archive(&r)
+);
+
+async fn set_principal_state(
+    State(state): State<ServiceState>,
+    Extension(request_id): Extension<RequestId>,
+    request: Request<Body>,
+) -> Response {
+    let Ok(input) = strict_request::<journal_protocol::PrincipalStateRequest>(request).await else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "invalid request",
+            request_id,
+        );
+    };
+    match bootstrap_result(
+        &state,
+        &request_id,
+        "set_principal_state",
+        true,
+        move |service| service.set_principal_state(&input),
+    )
+    .await
+    {
+        Ok(result) => {
+            if result.principal.disabled {
+                // Also notify repeats: a lost disable response cannot strand a
+                // held reader until its original polling deadline.
+                state
+                    .inbox_arrivals
+                    .notify(std::slice::from_ref(&result.principal.id));
+            }
+            success_response(StatusCode::OK, result)
+        }
+        Err(response) => response,
+    }
+}
 
 fn bearer(headers: &axum::http::HeaderMap) -> Option<String> {
     if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
@@ -588,8 +630,8 @@ async fn fetch_inbox_page(
 /// When positive and the request carries no cursor, an empty first page holds
 /// the connection until an inbox item is committed, the bound elapses, the
 /// client disconnects, or the server begins shutting down; the query is then
-/// re-executed and its result returned, except on shutdown, which returns the
-/// empty page at once so graceful drain is not held for the full bound.
+/// re-executed and its result returned. Shutdown also reauthorizes at once so
+/// graceful drain is not held for the full bound or served stale authority.
 /// The wait never holds a database transaction or a blocking-executor permit:
 /// each fetch runs separately inside the bounded executor, and the hold itself
 /// is a plain async wait on the caller's per-principal arrival signal. Spurious
@@ -635,7 +677,10 @@ async fn inbox_long_poll(
         tokio::select! {
             _ = arrivals.changed() => continue,
             () = wait_for_shutdown(shutdown.clone()) => {
-                return success_response(StatusCode::OK, page);
+                return match fetch_inbox_page(&state, &request_id, &token, &query).await {
+                    Ok(page) => success_response(StatusCode::OK, page),
+                    Err(response) => response,
+                };
             }
             _ = tokio::time::sleep(deadline - now) => {
                 return match fetch_inbox_page(&state, &request_id, &token, &query).await {
@@ -931,6 +976,8 @@ pub(crate) fn admin_router_with_timeout(
         .route("/v1/admin/credentials/rotate", post(rotate))
         .route("/v1/admin/credentials/revoke", post(revoke))
         .route("/v1/admin/principals/recover", post(recover_principal))
+        .route("/v1/admin/principals/state", post(set_principal_state))
+        .route("/v1/admin/spaces/archive", post(set_space_archive))
         .route_layer(middleware::from_fn(require_local_peer))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -1377,6 +1424,16 @@ mod peer_tests {
                 "principals/recover",
                 "application/json",
                 r#"["018f1f59-6e90-7000-8000-000000000001","reason"]"#,
+            ),
+            (
+                "principals/state",
+                "application/json",
+                r#"["018f1f59-6e90-7000-8000-000000000001",true,"reason"]"#,
+            ),
+            (
+                "spaces/archive",
+                "application/json",
+                r#"["space",true,"reason"]"#,
             ),
             (
                 "principals",

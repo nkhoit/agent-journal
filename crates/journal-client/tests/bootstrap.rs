@@ -221,3 +221,55 @@ fn client_rejects_duplicate_response_keys_and_accepts_typed_objects() {
     assert!(response.items.is_empty());
     assert!(response.next_cursor.is_none());
 }
+
+struct LifecycleRecorder;
+impl Transport for LifecycleRecorder {
+    fn send(&self, request: Request) -> Result<Response, TransportError> {
+        assert_eq!(request.method, "POST");
+        assert!(!request.headers.contains_key("Authorization"));
+        let examples: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../conformance/client/wire-examples.json"
+        ))
+        .unwrap();
+        let response = match request.path.as_str() {
+            "/v1/admin/principals/state" => {
+                let body: PrincipalStateRequest = decode_json(&request.body).unwrap();
+                assert!(body.disabled);
+                examples["schemas"]["PrincipalStateResponse"].clone()
+            }
+            "/v1/admin/spaces/archive" => {
+                let body: SpaceArchiveRequest = decode_json(&request.body).unwrap();
+                assert!(body.archived);
+                examples["schemas"]["Space"].clone()
+            }
+            _ => panic!("unexpected lifecycle path"),
+        };
+        Ok(Response::new(200, serde_json::to_vec(&response).unwrap()))
+    }
+}
+#[test]
+fn typed_lifecycle_operations_use_protected_paths_without_caller_authority() {
+    let client = Client::new(LifecycleRecorder);
+    client
+        .set_principal_state(&PrincipalStateRequest {
+            principal_id: "018f1f59-6e90-7000-8000-000000000001".into(),
+            disabled: true,
+            reason: None,
+        })
+        .unwrap();
+    client
+        .set_space_archive(&SpaceArchiveRequest {
+            space_id: "project-alpha".into(),
+            archived: true,
+            reason: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        client.set_principal_state(&PrincipalStateRequest {
+            principal_id: "handle".into(),
+            disabled: true,
+            reason: None
+        }),
+        Err(ClientError::InvalidRequest)
+    ));
+}

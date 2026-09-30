@@ -617,6 +617,58 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/admin/principals/state:
+    post:
+      tags: [administration]
+      operationId: setPrincipalState
+      summary: Set principal enabled or disabled state
+      description: Exact UUID primary-key lookup. Disable atomically revokes all unrevoked credentials, including expired bindings. Enable never revives them; issuance or recovery is explicit. Repeating the current state preserves timestamps and reason history without a new semantic transition. A response loss is retried with the same desired state.
+      security: []
+      x-agent-journal-authorization: protected-unix-socket-peer-credentials
+      x-agent-journal-public-https: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrincipalStateRequest' }
+      responses:
+        '200':
+          description: Current desired state and retained server timestamp.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrincipalStateResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /v1/admin/spaces/archive:
+    post:
+      tags: [administration]
+      operationId: setSpaceArchive
+      summary: Set space archived or active state
+      description: Exact space ID lookup. Archive blocks new appends but retains reads, inbox acknowledgments and exact committed append replay. Unarchive permits new appends. Repeating the current state preserves timestamps and reason history without a new semantic transition.
+      security: []
+      x-agent-journal-authorization: protected-unix-socket-peer-credentials
+      x-agent-journal-public-https: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SpaceArchiveRequest' }
+      responses:
+        '200':
+          description: Current desired state and retained server timestamp.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Space' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 components:
   headers:
     XRequestID:
@@ -1053,6 +1105,36 @@ components:
           type: string
           format: uuid
           description: Existing immutable principal UUID; handles and aliases are not accepted.
+        reason: { type: string, maxLength: 512 }
+    PrincipalStateRequest:
+      type: object
+      additionalProperties: false
+      required: [principal_id, disabled]
+      properties:
+        principal_id:
+          type: string
+          format: uuid
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          description: Immutable lowercase UUIDv7; handles and aliases are never resolved.
+        disabled: { type: boolean }
+        reason: { type: string, maxLength: 512 }
+    PrincipalStateResponse:
+      type: object
+      additionalProperties: false
+      required: [principal, disabled_at]
+      properties:
+        principal: { $ref: '#/components/schemas/Principal' }
+        disabled_at:
+          type: [string, 'null']
+          format: date-time
+          description: First server timestamp of the current disabled period, or null when enabled. Prior transition timestamps and reasons remain in protected audit history.
+    SpaceArchiveRequest:
+      type: object
+      additionalProperties: false
+      required: [space_id, archived]
+      properties:
+        space_id: { type: string, minLength: 1, maxLength: 128 }
+        archived: { type: boolean }
         reason: { type: string, maxLength: 512 }
     PrincipalRecoveryResponse:
       type: object
