@@ -9,11 +9,13 @@ members = [
     "crates/journal-runtime-fake",
     "crates/journal-runtime-hermes",
     "crates/journal-runtime-muse",
+    "crates/journal-runtime-file",
     "crates/journald",
     "crates/aj",
     "crates/aj-admin",
     "crates/journal-inbox-hermes",
     "crates/journal-inbox-muse",
+    "crates/journal-inbox-file",
     "crates/journal-lock-test",
 ]
 resolver = "3"

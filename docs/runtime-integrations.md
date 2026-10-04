@@ -1,7 +1,7 @@
 # Optional runtime integrations
 
 Runtime destinations and platform credentials remain local. The journal knows
-only principals, records, inbox items and acknowledgments. Both clients use
+only principals, records, inbox items and acknowledgments. The inbox clients use
 ordinary principal credentials and work without central adapter registration.
 
 ## Hermes Runs API
@@ -82,6 +82,48 @@ comprehension. If a hook consumes/removes the file before an interrupted client
 acks, restart may recreate it. The hook's durable seen-set must use the inbox ID
 to suppress duplicate chat turns where required. The client does not implement
 that hook or infer its success.
+
+## File envelope spool
+
+```sh
+journal-inbox-file \
+  --central-endpoint https://journal.example.invalid \
+  --credential-file /private/agent-journal/principal.json \
+  --routes-file /private/agent-journal/routes.json \
+  --spool-dir /private/agent-journal/inbox-spool \
+  --poll-seconds 1 \
+  --wait-seconds 30
+```
+
+Use this client when the runtime has no injection API and is not a Muse hook.
+`aj inbox` cannot long-poll: it has no `wait_seconds` flag. This client uses
+the shared worker, so cursorless fetches honor `--wait-seconds` (0..30) and
+the HTTP client timeout stays above that hold.
+
+`Route.runtime_target` is an opaque label stored inside the envelope. It is
+not a path, a session id, or a chat to wake. Only an absent routing key selects
+`SPACE/default`. Unknown, empty, or disabled keys are not written and not
+acknowledged.
+
+Each item publishes `aj-<sha256(inbox_item_id)>.envelope.json` (mode 0600).
+Version 1 carries `dedupe_key`, the route label, record and inbox ids, author,
+recipient, optional source run, reply-to and routing key, the raw body, the
+rendered untrusted envelope, and the SHA-256 of that rendering. Publication
+creates a private staging file, fsyncs it, hard-links the stable name without
+clobbering, removes the staging link, then fsyncs the directory. `inject`
+returns only after that. Exact bytes replay without rewriting. A conflicting,
+unreadable, oversized, or symlink file fails closed.
+
+Readers watch only published `aj-*.envelope.json` files. Staging names
+(`.aj-*.tmp.*`) are not handoffs. Deleting or moving a file is not an
+acknowledgment. A crash after publication and before ack leaves the file in
+place; restart acks without a second write. If the reader already removed it,
+restart publishes the same stable name again. Duplicate suppression is the
+reader's durable seen-set on `dedupe_key`.
+
+A published file is not model observation. Nothing in this client injects into
+a vendor session or opens a chat. A long-running process, or a later scheduled
+reader of the spool, is required. The server API is unchanged.
 
 ## Shared operation
 

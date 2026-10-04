@@ -30,6 +30,11 @@ CASES = {
     "muse-publication-crash": ("journal-runtime-muse", "--lib", "tests::killed_publication_replays_only_the_stable_durable_drop"),
     "muse-conflict": ("journal-runtime-muse", "drop_point", "conflicting_payload_at_the_stable_name_fails_closed"),
     "muse-unsafe-replay": ("journal-runtime-muse", "drop_point", "identical_payload_through_a_symlink_is_not_handoff_evidence"),
+    "file-durable-replay": ("journal-runtime-file", "spool", "exact_replay_returns_the_same_receipt_without_rewriting"),
+    "file-publication-crash": ("journal-runtime-file", "--lib", "tests::killed_publication_replays_only_the_stable_durable_file"),
+    "file-conflict": ("journal-runtime-file", "spool", "conflicting_payload_at_the_stable_name_fails_closed"),
+    "file-unsafe-replay": ("journal-runtime-file", "spool", "identical_payload_through_a_symlink_is_not_handoff_evidence"),
+    "file-real-journal": ("journald", "file_inbox_cli", "cli_once_spools_then_acknowledges_with_restart_idempotence"),
     "ambiguous-acceptance-restart": ("journal-runtime-fake", "runtime", "acceptance_survives_child_termination_and_duplicate_replay"),
 }
 
