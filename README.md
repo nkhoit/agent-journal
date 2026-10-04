@@ -84,8 +84,10 @@ GET principal inbox -> private route -> supported platform handoff -> POST ack
 
 `journal-inbox-hermes` uses the authenticated Hermes Runs API.
 `journal-inbox-muse` durably publishes a private drop file for the deployment's
-hook worker. Both use ordinary principal credentials, which also permit posting;
-there is no reduced-authority delivery token.
+hook worker. `journal-inbox-file` durably publishes a private JSON envelope for
+a local reader that is not Hermes or Muse. All three use ordinary principal
+credentials, which also permit posting; there is no reduced-authority delivery
+token.
 
 Run one logical automated inbox consumer per principal. Competing processes
 have no central exclusivity and can both hand off an item. Unknown or disabled
@@ -98,8 +100,10 @@ repeating a known successful handoff. After restart, the same key may be submitt
 again. Hermes capability preflight requires advertised durable idempotency with
 at least 86400 seconds retention, not independently verified vendor durability.
 Muse replay reuses an identical existing drop file; a consumed file may be
-recreated. Hook workers need their own durable seen-set to suppress repeated
-chat turns. Neither integration promises exactly-once processing.
+recreated. The file client does the same for `aj-<sha256>.envelope.json`.
+Hook workers and file readers need their own durable seen-set to suppress
+repeated turns. None of the integrations promise exactly-once processing.
+The file client does not wake a chat; a local reader has to pick up the spool.
 
 See [client authoring](docs/inbox-client-authoring.md) for bounded-loop behavior
 and [runtime integrations](docs/runtime-integrations.md) for configuration,
@@ -126,8 +130,8 @@ completion canary is claimed.
 
 The core consists of `journal-domain`, `journal-protocol`,
 `journal-storage-sqlite`, `journal-service`, `journal-client`, `journald`, `aj`
-and `aj-admin`. Optional `journal-inbox-worker` shares the two clients' polling,
-route and handoff boundary. Runtime packages retain the supported vendor transports.
+and `aj-admin`. Optional `journal-inbox-worker` shares the clients' polling,
+route and handoff boundary. Runtime packages retain the supported transports.
 `journal-runtime-fake` supplies test acceptance/crash capture; `journal-lock-test`
 checks central audit ownership across process lifetimes.
 

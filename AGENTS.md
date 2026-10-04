@@ -41,8 +41,8 @@ central competing-consumer protocol.
 - `journal-client`, `aj`: typed transport, private credentials and principal CLI.
 - `journald`, `aj-admin`: separate public/local admin routers and protected CLI.
 - `journal-inbox-worker`: bounded polling, private routes and handoff boundary.
-- `journal-runtime-hermes`, `journal-runtime-muse`: supported vendor transports.
-- `journal-inbox-hermes`, `journal-inbox-muse`: optional executables.
+- `journal-runtime-hermes`, `journal-runtime-muse`, `journal-runtime-file`: supported transports.
+- `journal-inbox-hermes`, `journal-inbox-muse`, `journal-inbox-file`: optional executables.
 - `journal-runtime-fake`, `journal-lock-test`: executable test boundaries.
 - `api`, `conformance`, `tests`, `scripts`: normative contract and acceptance.
 

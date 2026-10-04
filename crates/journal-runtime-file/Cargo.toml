@@ -1,0 +1,20 @@
+[package]
+name = "journal-runtime-file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+journal-domain = { path = "../journal-domain" }
+journal-inbox-worker = { path = "../journal-inbox-worker" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -83,7 +83,9 @@ retain an accepted-handoff ledger. The stable `inbox_item_id`, not a random retr
 key or attempt ID, identifies every repeated handoff.
 
 Hermes relies on its advertised finite durable idempotency window. Muse's
-durable drop file is its handoff evidence. A crash after handoff and before ack
+durable drop file is its handoff evidence. The file client's published
+`aj-<sha256(inbox_item_id)>.envelope.json` is its handoff evidence; staging
+files are not. A crash after handoff and before ack
 can repeat submission. An expired vendor key, removed Muse file, restored older
 central backup, or independently competing consumer can produce duplicates.
 Changing routes or payload binding during an uncertain retry may conflict;

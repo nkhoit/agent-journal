@@ -16,4 +16,9 @@ cases:
   - muse-publication-crash
   - muse-conflict
   - muse-unsafe-replay
+  - file-durable-replay
+  - file-publication-crash
+  - file-conflict
+  - file-unsafe-replay
+  - file-real-journal
   - ambiguous-acceptance-restart

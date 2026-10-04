@@ -661,6 +661,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal-inbox-file"
+version = "0.1.0"
+dependencies = [
+ "journal-inbox-worker",
+ "journal-runtime-file",
+]
+
+[[package]]
 name = "journal-inbox-hermes"
 version = "0.1.0"
 dependencies = [
@@ -722,6 +730,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal-runtime-file"
+version = "0.1.0"
+dependencies = [
+ "journal-domain",
+ "journal-inbox-worker",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "journal-runtime-hermes"
 version = "0.1.0"
 dependencies = [
@@ -776,11 +795,13 @@ dependencies = [
  "axum",
  "fs2",
  "journal-client",
+ "journal-inbox-file",
  "journal-inbox-hermes",
  "journal-inbox-muse",
  "journal-inbox-worker",
  "journal-protocol",
  "journal-runtime-fake",
+ "journal-runtime-file",
  "journal-runtime-hermes",
  "journal-runtime-muse",
  "journal-service",

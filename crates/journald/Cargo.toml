@@ -30,11 +30,13 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 journal-inbox-hermes = { path = "../journal-inbox-hermes" }
+journal-inbox-file = { path = "../journal-inbox-file" }
 journal-inbox-muse = { path = "../journal-inbox-muse" }
 journal-inbox-worker = { path = "../journal-inbox-worker" }
 journal-client = { path = "../journal-client" }
 journal-runtime-fake = { path = "../journal-runtime-fake" }
 journal-runtime-hermes = { path = "../journal-runtime-hermes" }
+journal-runtime-file = { path = "../journal-runtime-file" }
 journal-runtime-muse = { path = "../journal-runtime-muse" }
 rusqlite.workspace = true
 
